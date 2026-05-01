@@ -1,0 +1,365 @@
+﻿<!doctype html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Engine Project</title>
+    <link rel="stylesheet" href="./src/style.css">
+</head>
+
+<body>
+    <div id="app">
+        <!-- Project Launcher -->
+        <div id="launcher-container" style="display: none;">
+            <div class="launcher-sidebar">
+                <div class="launcher-logo">TugberkEngine Hub</div>
+                <div class="launcher-nav">
+                    <div class="nav-item active" id="nav-projects">Projects</div>
+                    <div class="nav-item" id="nav-learn">Learn</div>
+                    <div class="nav-item" id="nav-community">Community</div>
+                </div>
+                <div style="flex:1"></div>
+                <div class="launcher-version">v1.1.0-alpha</div>
+            </div>
+            <div class="launcher-main">
+                <div class="launcher-header">
+                    <h1>Projects</h1>
+                    <div style="flex:1"></div>
+                    <button id="btn-open-project" class="launcher-btn">Open</button>
+                    <button id="btn-new-project" class="launcher-btn primary">New project</button>
+                </div>
+                <div id="launcher-project-list" class="project-list">
+                    <!-- Recent projects will be listed here -->
+                </div>
+            </div>
+        </div>
+
+        <!-- Editor Layout -->
+        <div id="editor-container" style="display: flex;">
+            <div id="menu-bar">
+                <div class="menu-item" id="menu-file">File
+                    <div class="dropdown-content">
+                        <div class="dropdown-item" id="menu-new-scene">New Scene</div>
+                        <div class="dropdown-item" id="menu-open-scene">Open Scene</div>
+                        <div class="dropdown-item" id="menu-save-scene">Save Scene</div>
+                        <div class="dropdown-item" id="menu-save-scene-as">Save Scene As...</div>
+                        <hr>
+                        <div class="dropdown-item" id="menu-exit">Exit</div>
+                    </div>
+                </div>
+                <div class="menu-item" id="menu-edit">Edit
+                    <div class="dropdown-content">
+                        <div class="dropdown-item" id="menu-undo">Undo <span class="shortcut">Ctrl+Z</span></div>
+                        <div class="dropdown-item" id="menu-redo">Redo <span class="shortcut">Ctrl+Y</span></div>
+                        <hr>
+                        <div class="dropdown-item" id="menu-copy">Copy <span class="shortcut">Ctrl+C</span></div>
+                        <div class="dropdown-item" id="menu-cut">Cut <span class="shortcut">Ctrl+X</span></div>
+                        <div class="dropdown-item" id="menu-paste">Paste <span class="shortcut">Ctrl+V</span></div>
+                        <div class="dropdown-item" id="menu-paste-as-child">Paste As Child <span class="shortcut">Ctrl+Shift+V</span></div>
+                        <div class="dropdown-item" id="menu-duplicate">Duplicate <span class="shortcut">Ctrl+D</span>
+                        </div>
+                        <div class="dropdown-item" id="menu-delete">Delete <span class="shortcut">Del</span></div>
+                    </div>
+                </div>
+                <div class="menu-item" id="menu-gameobject">GameObject
+                    <div class="dropdown-content">
+                        <div class="dropdown-item" id="menu-create-empty">Create Empty <span class="shortcut">Ctrl+Shift+N</span></div>
+                        <div class="dropdown-item" id="menu-create-empty-child">Create Empty Child <span class="shortcut">Ctrl+Alt+Shift+N</span></div>
+                        <div class="dropdown-item" id="menu-create-empty-parent">Create Empty Parent <span class="shortcut">Ctrl+Shift+G</span></div>
+                        <hr>
+                        <div class="dropdown-item submenu">3D Object
+                            <div class="dropdown-content sub-dropdown">
+                                <div class="dropdown-item" id="create-cube">Cube</div>
+                                <div class="dropdown-item" id="create-sphere">Sphere</div>
+                                <div class="dropdown-item" id="create-capsule">Capsule</div>
+                                <div class="dropdown-item" id="create-cylinder">Cylinder</div>
+                                <div class="dropdown-item" id="create-plane">Plane</div>
+                                <div class="dropdown-item" id="create-quad">Quad</div>
+                            </div>
+                        </div>
+                        <div class="dropdown-item submenu">Light
+                            <div class="dropdown-content sub-dropdown">
+                                <div class="dropdown-item" id="create-directional-light">Directional Light</div>
+                                <div class="dropdown-item" id="create-point-light">Point Light</div>
+                                <div class="dropdown-item" id="create-spot-light">Spot Light</div>
+                            </div>
+                        </div>
+                        <div class="dropdown-item" id="create-camera">Camera</div>
+                        <div class="dropdown-item" id="create-audio-source">Audio Source</div>
+                        <div class="dropdown-item submenu">UI
+                            <div class="dropdown-content sub-dropdown">
+                                <div class="dropdown-item" id="create-ui-canvas">Canvas</div>
+                                <div class="dropdown-item" id="create-ui-image">Image</div>
+                                <div class="dropdown-item" id="create-ui-text">Text</div>
+                                <div class="dropdown-item" id="create-ui-button">Button</div>
+                                <div class="dropdown-item" id="create-ui-input-field">Input Field</div>
+                                <div class="dropdown-item" id="create-ui-dropdown">Dropdown</div>
+                                <div class="dropdown-item" id="create-ui-toggle">Toggle</div>
+                                <div class="dropdown-item" id="create-ui-slider">Slider</div>
+                                <div class="dropdown-item" id="create-ui-scrollbar">Scrollbar</div>
+                                <div class="dropdown-item" id="create-ui-scroll-view">Scroll View</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <div class="menu-item" id="menu-window">Window
+                    <div class="dropdown-content">
+                        <div class="dropdown-item" id="toggle-hierarchy"><span>Hierarchy</span><span class="menu-check" id="check-hierarchy"></span></div>
+                        <div class="dropdown-item" id="toggle-inspector"><span>Inspector</span><span class="menu-check" id="check-inspector"></span></div>
+                        <div class="dropdown-item" id="toggle-project"><span>Project</span><span class="menu-check" id="check-project"></span></div>
+                        <div class="dropdown-item" id="toggle-console"><span>Console</span><span class="menu-check" id="check-console"></span></div>
+                        <div class="dropdown-item" id="toggle-render"><span>Render Settings</span><span class="menu-check" id="check-render"></span></div>
+                        <hr>
+                        <div class="dropdown-item submenu">Layout Presets
+                            <div class="dropdown-content sub-dropdown">
+                                <div class="dropdown-item" id="menu-preset-default"><span>Default</span><span class="menu-check" id="check-preset-default"></span></div>
+                                <div class="dropdown-item" id="menu-preset-scene"><span>Scene Focus</span><span class="menu-check" id="check-preset-scene"></span></div>
+                                <div class="dropdown-item" id="menu-preset-scripting"><span>Scripting</span><span class="menu-check" id="check-preset-scripting"></span></div>
+                                <div class="dropdown-item" id="menu-preset-custom"><span>Custom</span><span class="menu-check" id="check-preset-custom"></span></div>
+                            </div>
+                        </div>
+                        <div class="dropdown-item submenu">Saved Layouts
+                            <div class="dropdown-content sub-dropdown">
+                                <div class="dropdown-item" id="menu-save-layout-slot-1">Save Slot 1</div>
+                                <div class="dropdown-item" id="menu-load-layout-slot-1"><span>Load Slot 1</span><span class="menu-check" id="check-layout-slot-1"></span></div>
+                                <hr>
+                                <div class="dropdown-item" id="menu-save-layout-slot-2">Save Slot 2</div>
+                                <div class="dropdown-item" id="menu-load-layout-slot-2"><span>Load Slot 2</span><span class="menu-check" id="check-layout-slot-2"></span></div>
+                            </div>
+                        </div>
+                        <div class="dropdown-item submenu">Dock Views
+                            <div class="dropdown-content sub-dropdown">
+                                <div class="dropdown-item" id="menu-dock-project-bottom"><span>Project to Bottom</span><span class="menu-check" id="check-dock-project-bottom"></span></div>
+                                <div class="dropdown-item" id="menu-dock-project-viewport"><span>Project to Viewport</span><span class="menu-check" id="check-dock-project-viewport"></span></div>
+                                <div class="dropdown-item" id="menu-dock-project-center-secondary"><span>Project to Center Split</span><span class="menu-check" id="check-dock-project-center-secondary"></span></div>
+                                <div class="dropdown-item" id="menu-dock-project-center-tertiary"><span>Project to Center Split 2</span><span class="menu-check" id="check-dock-project-center-tertiary"></span></div>
+                                <div class="dropdown-item" id="menu-dock-project-inspector"><span>Project to Inspector</span><span class="menu-check" id="check-dock-project-inspector"></span></div>
+                                <div class="dropdown-item" id="menu-dock-project-hierarchy"><span>Project to Hierarchy</span><span class="menu-check" id="check-dock-project-hierarchy"></span></div>
+                                <hr>
+                                <div class="dropdown-item" id="menu-dock-console-bottom"><span>Console to Bottom</span><span class="menu-check" id="check-dock-console-bottom"></span></div>
+                                <div class="dropdown-item" id="menu-dock-console-viewport"><span>Console to Viewport</span><span class="menu-check" id="check-dock-console-viewport"></span></div>
+                                <div class="dropdown-item" id="menu-dock-console-center-secondary"><span>Console to Center Split</span><span class="menu-check" id="check-dock-console-center-secondary"></span></div>
+                                <div class="dropdown-item" id="menu-dock-console-center-tertiary"><span>Console to Center Split 2</span><span class="menu-check" id="check-dock-console-center-tertiary"></span></div>
+                                <div class="dropdown-item" id="menu-dock-console-inspector"><span>Console to Inspector</span><span class="menu-check" id="check-dock-console-inspector"></span></div>
+                                <div class="dropdown-item" id="menu-dock-console-hierarchy"><span>Console to Hierarchy</span><span class="menu-check" id="check-dock-console-hierarchy"></span></div>
+                                <hr>
+                                <div class="dropdown-item" id="menu-dock-render-bottom"><span>Render Settings to Bottom</span><span class="menu-check" id="check-dock-render-bottom"></span></div>
+                                <div class="dropdown-item" id="menu-dock-render-viewport"><span>Render Settings to Viewport</span><span class="menu-check" id="check-dock-render-viewport"></span></div>
+                                <div class="dropdown-item" id="menu-dock-render-center-secondary"><span>Render Settings to Center Split</span><span class="menu-check" id="check-dock-render-center-secondary"></span></div>
+                                <div class="dropdown-item" id="menu-dock-render-center-tertiary"><span>Render Settings to Center Split 2</span><span class="menu-check" id="check-dock-render-center-tertiary"></span></div>
+                                <div class="dropdown-item" id="menu-dock-render-inspector"><span>Render Settings to Inspector</span><span class="menu-check" id="check-dock-render-inspector"></span></div>
+                                <div class="dropdown-item" id="menu-dock-render-hierarchy"><span>Render Settings to Hierarchy</span><span class="menu-check" id="check-dock-render-hierarchy"></span></div>
+                            </div>
+                        </div>
+                        <div class="dropdown-item submenu">Side Panels
+                            <div class="dropdown-content sub-dropdown">
+                                <div class="dropdown-item" id="menu-hierarchy-left"><span>Hierarchy Left</span><span class="menu-check" id="check-hierarchy-left"></span></div>
+                                <div class="dropdown-item" id="menu-hierarchy-right"><span>Hierarchy Right</span><span class="menu-check" id="check-hierarchy-right"></span></div>
+                                <hr>
+                                <div class="dropdown-item" id="menu-inspector-left"><span>Inspector Left</span><span class="menu-check" id="check-inspector-left"></span></div>
+                                <div class="dropdown-item" id="menu-inspector-right"><span>Inspector Right</span><span class="menu-check" id="check-inspector-right"></span></div>
+                                <hr>
+                                <div class="dropdown-item" id="menu-swap-side-panels">Swap Side Panels</div>
+                            </div>
+                        </div>
+                        <div class="dropdown-item" id="menu-maximize-active">Maximize Active Panel <span class="shortcut">Shift+Space</span></div>
+                        <div class="dropdown-item" id="menu-float-active">Float Active Panel</div>
+                        <div class="dropdown-item" id="menu-float-active-view">Float Active View</div>
+                        <div class="dropdown-item" id="menu-restore-active-view">Restore Active View</div>
+                        <div class="dropdown-item" id="menu-restore-detached-views">Restore Detached Views</div>
+                        <div class="dropdown-item" id="menu-dock-all-floating">Dock All Floating Panels</div>
+                        <div class="dropdown-item" id="menu-next-tab">Next Tab <span class="shortcut">Ctrl+Tab</span></div>
+                        <div class="dropdown-item" id="menu-previous-tab">Previous Tab <span class="shortcut">Ctrl+Shift+Tab</span></div>
+                        <div class="dropdown-item" id="menu-reset-layout">Reset Layout</div>
+                        <hr>
+                        <div class="dropdown-item submenu">Editor Themes
+                            <div class="dropdown-content sub-dropdown" id="theme-menu-list">
+                                <!-- Themes will be injected here -->
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div id="toolbar" style="display: flex; align-items: center; justify-content: space-between;">
+                <!-- Left Hand Tools -->
+                <div style="display: flex; gap: 4px;">
+                    <button id="tool-translate" class="tool-btn active" title="Move (W)">M</button>
+                    <button id="tool-rotate" class="tool-btn" title="Rotate (E)">R</button>
+                    <button id="tool-scale" class="tool-btn" title="Scale (R)">S</button>
+                    <button id="tool-pivot" class="tool-btn" style="width: auto; padding: 0 8px; font-size: 11px;"
+                        title="Toggle Pivot/Center">Pivot</button>
+                    <button id="tool-space" class="tool-btn" style="width: auto; padding: 0 8px; font-size: 11px;"
+                        title="Toggle Local/Global Space">Local</button>
+                    <button id="tool-snap" class="tool-btn" style="width: auto; padding: 0 8px; font-size: 11px;"
+                        title="Toggle Snap">Snap</button>
+                </div>
+
+                <!-- Center Play Tools -->
+                <div
+                    style="display: flex; gap: 4px; align-items: center; justify-content: center; position: absolute; left: 50%; transform: translateX(-50%);">
+                    <button id="play-btn" title="Play/Stop (Ctrl+P)"
+                        style="font-size: 14px; padding: 2px 10px;">Play</button>
+                    <button id="pause-btn" title="Pause" style="font-size: 14px; padding: 2px 10px;">Pause</button>
+                    <button id="step-btn" title="Step Frame" style="font-size: 14px; padding: 2px 10px;">Step</button>
+                </div>
+
+                <!-- Right Extra Tools -->
+                <div style="display: flex; gap: 4px; align-items: center;">
+                    <button id="save-btn" title="Save Scene" style="font-size: 12px; padding: 4px 8px;">Save</button>
+                    <button id="settings-btn" title="Project Settings" style="font-size: 12px; padding: 4px 8px;">Settings</button>
+
+                </div>
+            </div>
+            <div id="main-area">
+                <div id="hierarchy-panel" class="panel">
+                    <div id="hierarchy-panel-header" class="panel-header" style="display: flex; align-items: center; gap: 4px; padding: 2px 6px;">
+                        <div id="hierarchy-tabs" style="display: flex; height: 100%; margin-right: 4px;">
+                            <span id="tab-hierarchy" class="tab active-tab"
+                                style="cursor: pointer; font-weight: bold;">Hierarchy</span>
+                        </div>
+                        <div id="hierarchy-panel-tools" style="display: flex; align-items: center; gap: 4px; flex: 1; min-width: 0;">
+                            <button id="hierarchy-add-btn" class="tool-btn"
+                                style="padding: 2px 4px; font-size: 16px;">+</button>
+                            <div
+                                style="flex: 1; display: flex; align-items: center; background: var(--unity-bg-input); border-radius: 10px; padding: 0 8px; margin-left: 4px; border: 1px solid var(--unity-border); min-width: 0;">
+                                <span style="font-size: 10px; opacity: 0.5;">S</span>
+                                <input id="hierarchy-search" type="text" placeholder="Search"
+                                    style="background: transparent; border: none; color: white; font-size: 11px; width: 100%; padding: 2px 4px; outline: none;">
+                            </div>
+                        </div>
+                    </div>
+                    <div id="hierarchy-content" class="panel-content">
+                        <!-- Tree view -->
+                    </div>
+                </div>
+                <div id="left-splitter" class="panel-splitter vertical" data-splitter="left"></div>
+                <div id="viewport-panel" class="panel" style="flex: 1; min-width: 0;">
+                    <div class="panel-header" id="viewport-panel-header"
+                        style="display: flex; gap: 10px; align-items: center; padding: 4px 10px;">
+                        <div id="viewport-tabs" style="display: flex; height: 100%;">
+                            <span id="tab-scene" class="tab active-tab"
+                                style="cursor: pointer; font-weight: bold;">Scene</span>
+                            <span id="tab-game" class="tab" style="cursor: pointer; color: #888;">Game</span>
+                        </div>
+                        <div id="viewport-dock-tabs" style="display: flex; height: 100%;"></div>
+                        <div id="viewport-header-spacer" style="flex: 1"></div>
+                        <!-- Scene Toolbar (Viewport Extras) -->
+                        <div id="scene-toolbar" style="display: flex; gap: 4px; padding-right: 10px;">
+                            <button id="tool-stats" class="tool-btn"
+                                style="width: auto; padding: 0 6px; font-size: 10px;"
+                                title="Toggle Stats Overlay">Stats</button>
+                            <button id="tool-wireframe" class="tool-btn"
+                                style="width: auto; padding: 0 6px; font-size: 10px;"
+                                title="Toggle Wireframe Mode">Wireframe</button>
+                        </div>
+                        <!-- Game Toolbar -->
+                        <div id="game-toolbar"
+                            style="display: none; gap: 8px; padding-right: 10px; align-items: center;">
+                            <select id="game-resolution-select" class="unity-selector"
+                                style="font-size: 11px; padding: 2px 4px; background: #333; color: white; border: 1px solid #555;">
+                                <option value="free">Free Aspect</option>
+                                <option value="16:9">16:9</option>
+                                <option value="16:10">16:10</option>
+                                <option value="4:3">4:3</option>
+                                <option value="1920:1080">Full HD (1920x1080)</option>
+                                <option value="1280:720">HD (1280x720)</option>
+                            </select>
+                            <button id="game-stats-btn" class="tool-btn"
+                                style="width: auto; padding: 0 6px; font-size: 10px;">Stats</button>
+                        </div>
+                    </div>
+                    <!-- Viewport Content Area -->
+                    <div id="viewport-workspace" style="flex: 1; display: flex; min-width: 0; min-height: 0;">
+                        <div id="viewport-content" style="flex: 1; position: relative; background: #282828;">
+                            <div id="scene-view"
+                                style="width: 100%; height: 100%; display: block; overflow: hidden; outline: none;"
+                                tabindex="0">
+                                <!-- Canvas injected here via JS (append to this element) -->
+                            </div>
+                            <div id="game-view"
+                                style="width: 100%; height: 100%; display: none; background: #1e1e1e; overflow: hidden; justify-content: center; align-items: center; position: absolute; top: 0; left: 0;">
+                                <div id="game-view-container"
+                                    style="background: #000; display: flex; justify-content: center; align-items: center; width: 100%; height: 100%;">
+                                    <!-- Canvas injected here during play -->
+                                </div>
+                            </div>
+                            <div id="viewport-dock-content-host" class="panel-content"
+                                style="display: none; position: absolute; inset: 0;"></div>
+                        </div>
+                        <div id="center-secondary-splitter" class="panel-splitter vertical" data-splitter="center-secondary"></div>
+                        <div id="center-secondary-panel" class="panel" style="display: none; flex: 0 0 320px;">
+                            <div id="center-secondary-header" class="panel-header" style="display: flex; gap: 10px;">
+                                <div id="center-secondary-tabs" style="display: flex; height: 100%;"></div>
+                            </div>
+                        </div>
+                        <div id="center-tertiary-splitter" class="panel-splitter vertical" data-splitter="center-tertiary"></div>
+                        <div id="center-tertiary-panel" class="panel" style="display: none; flex: 0 0 280px;">
+                            <div id="center-tertiary-header" class="panel-header" style="display: flex; gap: 10px;">
+                                <div id="center-tertiary-tabs" style="display: flex; height: 100%;"></div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <div id="right-splitter" class="panel-splitter vertical" data-splitter="right"></div>
+                <div id="inspector-panel" class="panel">
+                    <div id="inspector-panel-header" class="panel-header" style="display: flex; gap: 10px;">
+                        <div id="inspector-tabs" style="display: flex; height: 100%;">
+                            <span id="tab-inspector" class="tab active-tab"
+                                style="cursor: pointer; font-weight: bold;">Inspector</span>
+                        </div>
+                    </div>
+                    <div id="inspector-content" class="panel-content">
+                        <!-- Components will be listed here -->
+                    </div>
+                </div>
+            </div>
+            <div id="bottom-splitter" class="panel-splitter horizontal" data-splitter="bottom"></div>
+            <div id="assets-panel" class="panel">
+                <div class="panel-header" id="bottom-panel-header" style="display: flex; gap: 10px;">
+                        <div id="bottom-tabs" style="display: flex; height: 100%;">
+                        <span id="tab-assets" class="tab active-tab"
+                            style="cursor: pointer; font-weight: bold;"><span class="tab-label">Project</span><button id="tab-close-assets" class="tab-close" type="button" aria-label="Close Project">x</button></span>
+                        <span id="tab-console" class="tab" style="cursor: pointer; color: #888;"><span class="tab-label">Console</span><button id="tab-close-console" class="tab-close" type="button" aria-label="Close Console">x</button></span>
+                        <span id="tab-render" class="tab" style="cursor: pointer; color: #888;"><span class="tab-label">Render Settings</span><button id="tab-close-render" class="tab-close" type="button" aria-label="Close Render Settings">x</button></span>
+                    </div>
+                </div>
+                <div id="assets-content" class="panel-content">
+                    <!-- File browser -->
+                </div>
+                <div id="console-content" class="panel-content" style="display: none; background: #1a1a1a;">
+                    <div id="console-toolbar"
+                        style="padding: 4px 8px; border-bottom: 1px solid #333; display: flex; gap: 8px; align-items: center;">
+                        <button id="console-clear-btn"
+                            style="padding: 2px 8px; font-size: 10px; background: #333; border: 1px solid #444; color: #ccc; cursor: pointer;">Clear</button>
+                        <div style="flex: 1"></div>
+                        <label
+                            style="font-size: 10px; color: #888; display: flex; align-items: center; gap: 4px;"><input
+                                type="checkbox" id="log-info-check" checked> Info</label>
+                        <label
+                            style="font-size: 10px; color: #888; display: flex; align-items: center; gap: 4px;"><input
+                                type="checkbox" id="log-warn-check" checked> Warn</label>
+                        <label
+                            style="font-size: 10px; color: #888; display: flex; align-items: center; gap: 4px;"><input
+                                type="checkbox" id="log-error-check" checked> Error</label>
+                    </div>
+                    <div id="console-logs"
+                        style="font-family: 'Consolas', monospace; font-size: 11px; padding-bottom: 20px;"></div>
+                </div>
+                <div id="render-content" class="panel-content" style="display: none; background: #2a2a2a;">
+                    <!-- Render Settings -->
+                </div>
+            </div>
+            <div id="floating-layer"></div>
+            <div id="status-bar">
+                <span id="status-text">Ready</span>
+                <div style="flex: 1"></div>
+                <span id="status-stats">Objects: 0 | Memory: 0MB</span>
+            </div>
+        </div>
+    </div>
+    <script type="module" src="/src/main.ts"></script>
+</body>
+
+</html>
+

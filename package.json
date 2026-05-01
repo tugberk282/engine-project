@@ -1,0 +1,32 @@
+﻿{
+  "name": "engine-project",
+  "version": "0.1.0",
+  "private": true,
+  "main": "electron/main.js",
+  "scripts": {
+    "dev": "concurrently \"vite --port 5174\" \"wait-on tcp:5174 && node scripts/start-electron.js\"",
+    "build": "tsc && vite build",
+    "test:parity": "node test_all_phases.cjs",
+    "test:phase8": "node verify_phase8_ui_rendering.cjs",
+    "test:phase9": "node verify_phase9_desktop_productization.cjs",
+    "preview": "vite preview",
+    "watch:csharp": "node scripts/watch-csharp.js",
+    "electron:build": "vite build && electron-builder"
+  },
+  "devDependencies": {
+    "chokidar": "^3.6.0",
+    "concurrently": "^8.2.2",
+    "cross-env": "^10.1.0",
+    "electron": "^28.3.3",
+    "electron-builder": "^24.9.1",
+    "typescript": "^5.2.2",
+    "vite": "^5.0.8",
+    "wait-on": "^7.2.0"
+  },
+  "dependencies": {
+    "@types/three": "^0.160.0",
+    "cannon-es": "^0.20.0",
+    "three": "^0.160.0"
+  }
+}
+
