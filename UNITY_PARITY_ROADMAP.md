@@ -33,6 +33,278 @@ Pratik yorum:
 - Asil acik alan artik parity degil, desktop shell ve productization tarafidir.
 - En kritik aktif konu Electron guvenligi ve renderer-main process ayrimini sertlestirmektir.
 
+## Session Bazli Faz Backloglari
+
+Bu bolum, her session tek bir faza odaklanmak icin tutulur. Mantik su:
+
+1. O fazin mevcut durumunu oku
+2. Asagidaki backlog maddelerini sirayla ele al
+3. Bitirdikce verify/build calistir
+4. Roadmap'te o fazin maddelerini guncelle
+
+### Faz 1 Session Backlogu: Editor Chrome
+
+Amac:
+
+- Editorun ilk gorunus ve ilk kullanim hissini daha tutarli hale getirmek
+- Yeni gelen kullanicinin arayuzde kaybolma ihtimalini azaltmak
+- Toolbar/menu/panel/status alanlarini tek bir tasarim dili altinda toplamak
+
+Mevcut durum:
+
+- Faz 1 parity olarak kapanmis durumda
+- Temel chrome mevcut
+- Ama polish ve standardizasyon turlari hala yapilabilir
+
+Gelistirme maddeleri:
+
+1. Menu bar standardizasyonu
+- Menu basliklari, siralamasi ve aralarindaki kavramsal tutarlilik gozden gecirilecek
+- Gereksiz veya tekrarli menu entry'leri temizlenecek
+- Kisayolu olan aksiyonlarin menu uzerinde tutarli gorunmesi saglanacak
+- Durum notu:
+- Ilk tur tamamlandi
+- Menu item label/shortcut/check hizasi normalize edildi
+- Dinamik Window menu item metinleri tek helper uzerinden guncelleniyor
+- Disabled menu item tiklanabilirligi artik tek yerden engelleniyor
+- Menu ve submenu elemanlarina role/aria-disabled/aria-checked/aria-expanded semantigi eklendi
+- Sonraki alt is: ust menu baslik dili ve redundant entry temizligi
+
+2. Toolbar hizalama ve buton dili
+- Toolbar buton boyutlari, bosluklari ve aktif/pasif state dilleri standardize edilecek
+- Play/Pause/Step ve transform tool butonlari tek bir gorsel hiyerarsiye alinacak
+- Ikon varsa ikon, text varsa text mantigi degil; ayni grupta ayni dil korunacak
+- Durum notu:
+- Ilk tur tamamlandi
+- Transform toolbar kisa harflerden tam aksiyon adlarina gecirildi
+- Sol/orta/sag toolbar gruplari ortak siniflarla hizalandi
+- Play/Pause/Step state dili daha net hale getirildi, pause ve step artik play mode disinda disabled
+- Pivot/Space/Snap tooltip dili runtime state ile senkron tutuluyor
+- Sonraki alt is: utility butonlari ve viewport ic toolbarlarla ortak gorsel dil turu
+
+3. Panel baslik ve tab dili
+- Hierarchy, Inspector, Project, Console, Render gibi panellerin header yukseklikleri ve bosluklari esitlenecek
+- Aktif tab, hover tab, pasif tab state renkleri ve border dili teklestirilecek
+- Kapatilmis/bos panel senaryolari icin daha okunur empty-state metinleri eklenecek
+- Durum notu:
+- Ilk tur tamamlandi
+- Ana panel header yapisi ortak `panel-header-main` ve `panel-tab-strip` siniflarina toplandi
+- Tab aktif/pasif gorunumu artik inline style yerine CSS state siniflariyla yonetiliyor
+- Header bosluk ve hizalama dili Hierarchy, Viewport, Inspector ve alt panelde tek kaliba yaklasti
+- Sonraki alt is: console/project/search satiri ve bos panel empty-state metinleri
+
+4. Status bar iyilestirmesi
+- Sol ve sag bilgi bloklari netlestirilecek
+- FPS/MS, secim bilgisi, play mode durumu ve hata/advisory metinleri icin gorsel oncelik duzeni kurulacak
+- Status bar update akisinda gereksiz gorsel titresim veya metin ziplamasi varsa temizlenecek
+- Durum notu:
+- Ilk tur tamamlandi
+- Status bar sol/orta/sag bilgi gruplarina ayrildi
+- Log, selection, scene, FPS, MS, draw call ve play mode artik ayri alanlarda okunuyor
+- Her tick tum HTML yeniden yazilmak yerine alan bazli text guncellemesi yapiliyor
+- Play mode pill rengi artik editing/playing/paused durumunu daha belirgin veriyor
+- Sonraki alt is: advisory/severity dili ve secimsiz/bos scene mesajlarini rafine etmek
+
+5. Tooltip ve yardim dili
+- Sik kullanilan toolbar/menu butonlarina tutarli tooltip verilecek
+- Tooltip formatinda aksiyon + kisayol standardi uygulanacak
+- Yeni kullanici icin belirsiz kisaltmalar azaltilacak
+- Durum notu:
+- Ilk tur tamamlandi
+- Menu item title degerleri label + shortcut standardina getirildi
+- Toolbar title dili aksiyon odakli hale getirildi
+- Inspector bos secimde sahne ayarlarina gecildigi daha net anlatiliyor
+- Sonraki alt is: viewport ic toolbar ve context aksiyonlari icin ayni tooltip standardini yaymak
+
+6. Theme ve kontrast turu
+- Secili, hover, disabled, border ve background kontrastlari gozden gecirilecek
+- Dark theme icindeki okunurluk sorunlari temizlenecek
+- Focus state'leri daha belirgin hale getirilecek
+- Durum notu:
+- Kapanis turu tamamlandi
+- Aktif panel header ve border kontrasti guclendirildi
+- Hover state ve tab kontrasti netlestirildi
+- Menu, toolbar, tab, input, select ve scene view icin ortak focus-visible dili eklendi
+
+7. Empty state ve ilk acilis hissi
+- Bos scene, bos project, bos console, secimsiz inspector gibi alanlarda daha net bilgilendirme saglanacak
+- Editor ilk acildiginda kullanicinin nereye bakacagini anlatan hafif yonlendirmeler eklenebilir
+- Durum notu:
+- Ilk tur tamamlandi
+- Bos console, bos project/search sonucu ve secimsiz inspector icin ortak empty-state dili eklendi
+- Empty-state kartlari ortak stil sinifina baglandi
+- Kapanis turu tamamlandi
+- Bos hierarchy ve scene view onboarding ipuclari eklendi
+- Yeni kullanici icin ilk aksiyonlar artik Hierarchy ve Scene tarafinda daha gorunur
+
+Faz 1 kapanis durumu:
+
+- Faz 1 session backlogu tamamlandi
+- Menu, toolbar, panel header/tab, status bar, tooltip, theme ve empty-state turlari kapatildi
+- Kalan iyilestirmeler artik Faz 2+ kapsaminda veya genel polish backlogunda ele alinabilir
+
+Oncelik sirasi:
+
+1. Toolbar + menu standardizasyonu
+2. Panel/tab/header polish
+3. Status bar iyilestirmesi
+4. Tooltip ve empty-state turu
+5. Theme/kontrast son polish
+
+Riskli noktalar:
+
+- Faz 1 degisiklikleri Faz 2 layout davranisini yanlislikla bozmamali
+- Header/tab yukseklik degisiklikleri docking hesaplarini etkilememeli
+- Fazla gorsel degisiklik yaparken mevcut muscle memory bozulmamali
+
+Session kapanis kriterleri:
+
+- Menu/toolbar/panel/tab/status alanlari tutarli gorunmeli
+- Layout bozulmamali
+- Mevcut parity testleri kirilmamali
+- `npm run build` temiz gecmeli
+
+Session sonunda calistirilacaklar:
+
+- `node verify_phase1_editor_chrome.cjs`
+- `node test_all_phases.cjs`
+- `npm.cmd run build`
+
+### Faz 2 Session Backlogu: Layout ve Windowing
+
+Amac:
+
+- Docking, floating, splitter ve tab tasima davranislarini daha ongorulebilir hale getirmek
+- Uzun kullanim sessionlarinda layout bozulmalarini ve state kaymalarini azaltmak
+- Unity benzeri panel hareketi hissini daha saglam bir taban uzerine oturtmak
+
+Mevcut durum:
+
+- Faz 2 parity olarak kapanmis durumda
+- Docking, floating panel, tear-off ve layout persistence ana olarak calisiyor
+- Ancak sistem artik daha buyuk ve cok-host lu oldugu icin edge-case sertlestirme ve UX polish turlari mantikli
+
+Kod gozlemi:
+
+- Layout state’i `EditorSettings` + `dockGraph` + `floatingPanels` + tab order listeleri uzerinden tutuluyor
+- Legacy ve normalized state birlikte yasiyor; bu guclu ama hata oldugunda debug maliyeti yukseliyor
+- Tab host sistemi artik `viewport`, `bottom`, `center-secondary`, `center-tertiary`, `hierarchy`, `inspector` arasinda dagiliyor
+- Floating panel drag/resize ve dock preview altyapisi var, yani Faz 2’nin ana riskleri artik ozellik eksigi degil, tutarlilik ve toparlanma davranisi
+
+Gelistirme maddeleri:
+
+1. Dock/undock edge-case sertlestirme
+- Ayni panelin hizli sekilde float/dock yapildigi akislarda state kaymasi kontrol edilecek
+- `assets-panel` ile dockable view host hareketi arasindaki ozel durumlar sadelestirilecek
+- Floating durumdan host’a donuste aktif tab secimi daha deterministik hale getirilecek
+- Durum notu:
+- Ilk tur tamamlandi
+- Layout mutation kapanis akisi tek helper altinda toplandi
+- Dock/undock ve detached-view restore sonlarinda ortak normalize + visible-panel fallback calisiyor
+- `activeViewportFocusHost` artik layout degisiminden sonra gorunur hostlara geri oturuyor
+- Ikinci tur tamamlandi
+- Floating drag-drop birakma akisinda gereksiz manuel `apply/save/resize` zinciri kaldirildi
+- `dockViewToHost` artik tab tasima + reveal sonrasinda tek `finalizeLayoutMutation` ile kapanis yapiyor
+- Sonraki alt is: splitter/clamp tarafinda bos host ve gizli panel sicrama senaryolarini sertlestirmek
+
+2. Splitter ve clamp davranisi polish
+- Sol/sag/alt/center splitlerde minimum boyut clamp davranisi gozden gecirilecek
+- Gizli panel, floating panel veya bos host durumlarinda splitter gorunurlugu daha akilli hale getirilecek
+- Layout degisimi sirasinda gereksiz ani sicrama olup olmadigi kontrol edilecek
+- Durum notu:
+- Ilk tur tamamlandi
+- Center dock splitter gorunurlugu artik gercek komsuluk iliskisine gore hesaplanıyor
+- Bosalan center host genislikleri default degerlere geri donuyor; yeniden acilis hissi daha stabil hale geldi
+- Sonraki alt is: side/bottom clamp davranisinda ani sicrama yapan dar pencere ve gizli-panel senaryolarini hedefli test etmek
+
+3. Tab drag-drop ve reorder tutarliligi
+- Hostlar arasi tab tasima sirasi test edilip hedef host secimi daha netlestirilecek
+- `hierarchy` ve `inspector` root tab’lerinin korunma kurali daha acik hale getirilecek
+- Drag preview / drop target hissi daha belirginlestirilecek
+- Durum notu:
+- Ilk tur tamamlandi
+- Dockable tab drop karar agaci tek helper altinda toplandi; ayni-host reorder ve hostlar arasi tasima daha deterministik hale geldi
+- `hierarchy` ve `inspector` kok tab’lerine birakilan view’lar artik kokun onune degil hemen arkasina yerlestiriliyor
+- Ikinci tur tamamlandi
+- Host tab strip’leri drag sirasinda artik daha okunur highlight aliyor
+- Ayni host icinde bos alana birakilan dockable tab artik host sonunda konumlaniyor; drop bosa gitmiyor
+- Sonraki alt is: layout save/load dayanikliligina gecip bozuk snapshot ve eksik DOM toparlanmasini sertlestirmek
+
+4. Layout save/load dayanikliligi
+- Slot save/load ve preset load akislarinda eksik DOM/state durumlarina karsi guard’lar artirilacak
+- Bozuk veya eski layout snapshot’larinda graceful fallback iyilestirilecek
+- `resetLayout` sonrasi aktif panel ve aktif tab restore mantigi tekrar gozden gecirilecek
+- Durum notu:
+- Ilk tur tamamlandi
+- Layout snapshot yukleme oncesi sanitize ediliyor; eksik veya bozuk alanlar mevcut gecerli state ile dolduruluyor
+- Layout slot yukleme sirasinda hata olursa editor onceki snapshot’a geri donecek sekilde rollback kazandi
+- Ikinci tur tamamlandi
+- `resetLayout` ve layout preset gecisleri artik ayni guvenli snapshot uygulama hattini kullaniyor
+- `applyStoredLayout` eksik root DOM durumunda sessizce cikarak agresif hata zincirini kesiyor
+- Sonraki alt is: floating panel UX turuna gecip baslik aksiyonlari, z-index ve keyboard focus hissini polish etmek
+
+5. Floating panel UX turu
+- Floating panel baslik aksiyonlari, z-index davranisi ve resize hissi gozden gecirilecek
+- Dock preview rehberleri daha tutarli kontrast ve yerlesimle polish edilecek
+- Floating panel keyboard focus ve active-panel iliskisi netlestirilecek
+- Durum notu:
+- Ilk tur tamamlandi
+- Floating panel artik pointer ile odak alinca one geliyor ve aktif panel olarak isaretleniyor
+- Floating panel aksiyon butonlari `aria-label` / `aria-pressed` ile daha net durum dili tasiyor
+- Aktif floating panel icin ayri header ve border vurgusu eklendi; z-index davranisi gorsel olarak daha okunur hale geldi
+- Ikinci tur tamamlandi
+- Drag sirasinda dock guide ve dock preview kontrasti guclendirildi; hedef alanlar daha kolay okunuyor
+- Floating resize sirasinda panel ve handle ayri bir aktiflik hissi aliyor; resize davranisi daha belirgin hale geldi
+- Ucuncu tur tamamlandi
+- Floating panel klavye odagi artik aktif panel durumuna baglaniyor; `focus-within` hissi ile keyboard navigation daha gorunur hale geldi
+- Sonraki alt is: Window menu parity kontrolu yalnizca istersek ek bir polish olarak donebilir; Faz 2 kapanis kriterleri teknik olarak saglandi
+
+6. Window menu ve layout komut parity kontrolu
+- Window menu icindeki layout/dock komutlarinin disabled/available state’leri yeniden gozden gecirilecek
+- Layout presets ile gercek runtime state arasinda fark olusuyorsa menu yansimasi duzeltilecek
+- Saved layout slot checkmark mantigi dogrulanacak
+
+7. Recovery ve self-healing turu
+- Kayip host, bos tab order veya gecersiz floating panel state’lerinde otomatik toparlama eklenebilecek yerler notlanacak
+- Layout system’in debug edilmesini kolaylastiran hafif status/dev hooks dusunulecek
+
+Oncelik sirasi:
+
+1. Dock/undock edge-case sertlestirme
+2. Tab drag-drop ve reorder tutarliligi
+3. Layout save/load dayanikliligi
+4. Splitter ve clamp polish
+5. Floating panel UX turu
+6. Window menu parity kontrolu
+7. Recovery/self-healing
+
+Riskli noktalar:
+
+- Faz 2 degisiklikleri Faz 1 chrome polish’ini ve Faz 4 scene workflow’unu dolayli bozabilir
+- Tab host mantiginda yapilacak degisiklikler `Project/Console/Render` icerik mount akisini etkileyebilir
+- Layout persistence formatina dokunulursa eski snapshot/preset davranisi kirilabilir
+
+Session kapanis kriterleri:
+
+- Docking/floating/tab reorder akislari beklenen hostlara deterministik donmeli
+- Layout reset/save/load akislari bozuk state uretmemeli
+- Splitter clamp davranisi minimum boyutlari korumali
+- `verify_phase1_editor_chrome` ve build temiz gecmeli
+
+Kapanis notu:
+
+- Tamamlandi. Docking, floating, tab reorder, layout persistence, splitter/clamp ve floating UX sertlestirme turlari kapatildi.
+- Son dogrulama:
+- `node verify_phase2_layout_mock.cjs` -> `39/39`
+- `node verify_phase1_editor_chrome.cjs` -> `41/41`
+- `npm.cmd run build` -> basarili
+
+Session sonunda calistirilacaklar:
+
+- `node verify_phase1_editor_chrome.cjs`
+- `node test_all_phases.cjs`
+- `npm.cmd run build`
+
 ## Urun Tanimi
 
 Engine Project su anda su urun kimligine sahiptir:

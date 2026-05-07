@@ -181,44 +181,34 @@
                     </div>
                 </div>
             </div>
-            <div id="toolbar" style="display: flex; align-items: center; justify-content: space-between;">
-                <!-- Left Hand Tools -->
-                <div style="display: flex; gap: 4px;">
-                    <button id="tool-translate" class="tool-btn active" title="Move (W)">M</button>
-                    <button id="tool-rotate" class="tool-btn" title="Rotate (E)">R</button>
-                    <button id="tool-scale" class="tool-btn" title="Scale (R)">S</button>
-                    <button id="tool-pivot" class="tool-btn" style="width: auto; padding: 0 8px; font-size: 11px;"
-                        title="Toggle Pivot/Center">Pivot</button>
-                    <button id="tool-space" class="tool-btn" style="width: auto; padding: 0 8px; font-size: 11px;"
-                        title="Toggle Local/Global Space">Local</button>
-                    <button id="tool-snap" class="tool-btn" style="width: auto; padding: 0 8px; font-size: 11px;"
-                        title="Toggle Snap">Snap</button>
+            <div id="toolbar">
+                <div class="toolbar-group toolbar-group-left">
+                    <button id="tool-translate" class="tool-btn toolbar-btn toolbar-btn-mode active" title="Move Tool (W)">Move</button>
+                    <button id="tool-rotate" class="tool-btn toolbar-btn toolbar-btn-mode" title="Rotate Tool (E)">Rotate</button>
+                    <button id="tool-scale" class="tool-btn toolbar-btn toolbar-btn-mode" title="Scale Tool (R)">Scale</button>
+                    <button id="tool-pivot" class="tool-btn toolbar-btn toolbar-btn-toggle" title="Pivot Mode">Pivot</button>
+                    <button id="tool-space" class="tool-btn toolbar-btn toolbar-btn-toggle" title="Local Space">Local</button>
+                    <button id="tool-snap" class="tool-btn toolbar-btn toolbar-btn-toggle" title="Snap: Off">Snap</button>
                 </div>
 
-                <!-- Center Play Tools -->
-                <div
-                    style="display: flex; gap: 4px; align-items: center; justify-content: center; position: absolute; left: 50%; transform: translateX(-50%);">
-                    <button id="play-btn" title="Play/Stop (Ctrl+P)"
-                        style="font-size: 14px; padding: 2px 10px;">Play</button>
-                    <button id="pause-btn" title="Pause" style="font-size: 14px; padding: 2px 10px;">Pause</button>
-                    <button id="step-btn" title="Step Frame" style="font-size: 14px; padding: 2px 10px;">Step</button>
+                <div class="toolbar-group toolbar-group-center">
+                    <button id="play-btn" class="toolbar-btn toolbar-btn-play" title="Play Mode (Ctrl+P)">Play</button>
+                    <button id="pause-btn" class="toolbar-btn toolbar-btn-play-state" title="Pause Play Mode">Pause</button>
+                    <button id="step-btn" class="toolbar-btn toolbar-btn-play-state" title="Step One Frame">Step</button>
                 </div>
 
-                <!-- Right Extra Tools -->
-                <div style="display: flex; gap: 4px; align-items: center;">
-                    <button id="save-btn" title="Save Scene" style="font-size: 12px; padding: 4px 8px;">Save</button>
-                    <button id="settings-btn" title="Project Settings" style="font-size: 12px; padding: 4px 8px;">Settings</button>
-
+                <div class="toolbar-group toolbar-group-right">
+                    <button id="save-btn" class="toolbar-btn toolbar-btn-utility" title="Save Scene (Ctrl+S)">Save</button>
+                    <button id="settings-btn" class="toolbar-btn toolbar-btn-utility" title="Project Settings">Settings</button>
                 </div>
             </div>
             <div id="main-area">
                 <div id="hierarchy-panel" class="panel">
-                    <div id="hierarchy-panel-header" class="panel-header" style="display: flex; align-items: center; gap: 4px; padding: 2px 6px;">
-                        <div id="hierarchy-tabs" style="display: flex; height: 100%; margin-right: 4px;">
-                            <span id="tab-hierarchy" class="tab active-tab"
-                                style="cursor: pointer; font-weight: bold;">Hierarchy</span>
+                    <div id="hierarchy-panel-header" class="panel-header panel-header-main panel-header-compact">
+                        <div id="hierarchy-tabs" class="panel-tab-strip panel-tab-strip-tight">
+                            <span id="tab-hierarchy" class="tab active-tab">Hierarchy</span>
                         </div>
-                        <div id="hierarchy-panel-tools" style="display: flex; align-items: center; gap: 4px; flex: 1; min-width: 0;">
+                        <div id="hierarchy-panel-tools" class="panel-header-tools panel-header-tools-fill">
                             <button id="hierarchy-add-btn" class="tool-btn"
                                 style="padding: 2px 4px; font-size: 16px;">+</button>
                             <div
@@ -235,14 +225,12 @@
                 </div>
                 <div id="left-splitter" class="panel-splitter vertical" data-splitter="left"></div>
                 <div id="viewport-panel" class="panel" style="flex: 1; min-width: 0;">
-                    <div class="panel-header" id="viewport-panel-header"
-                        style="display: flex; gap: 10px; align-items: center; padding: 4px 10px;">
-                        <div id="viewport-tabs" style="display: flex; height: 100%;">
-                            <span id="tab-scene" class="tab active-tab"
-                                style="cursor: pointer; font-weight: bold;">Scene</span>
-                            <span id="tab-game" class="tab" style="cursor: pointer; color: #888;">Game</span>
+                    <div class="panel-header panel-header-main" id="viewport-panel-header">
+                        <div id="viewport-tabs" class="panel-tab-strip">
+                            <span id="tab-scene" class="tab active-tab">Scene</span>
+                            <span id="tab-game" class="tab">Game</span>
                         </div>
-                        <div id="viewport-dock-tabs" style="display: flex; height: 100%;"></div>
+                        <div id="viewport-dock-tabs" class="panel-tab-strip"></div>
                         <div id="viewport-header-spacer" style="flex: 1"></div>
                         <!-- Scene Toolbar (Viewport Extras) -->
                         <div id="scene-toolbar" style="display: flex; gap: 4px; padding-right: 10px;">
@@ -289,24 +277,23 @@
                         </div>
                         <div id="center-secondary-splitter" class="panel-splitter vertical" data-splitter="center-secondary"></div>
                         <div id="center-secondary-panel" class="panel" style="display: none; flex: 0 0 320px;">
-                            <div id="center-secondary-header" class="panel-header" style="display: flex; gap: 10px;">
-                                <div id="center-secondary-tabs" style="display: flex; height: 100%;"></div>
+                            <div id="center-secondary-header" class="panel-header panel-header-main">
+                                <div id="center-secondary-tabs" class="panel-tab-strip"></div>
                             </div>
                         </div>
                         <div id="center-tertiary-splitter" class="panel-splitter vertical" data-splitter="center-tertiary"></div>
                         <div id="center-tertiary-panel" class="panel" style="display: none; flex: 0 0 280px;">
-                            <div id="center-tertiary-header" class="panel-header" style="display: flex; gap: 10px;">
-                                <div id="center-tertiary-tabs" style="display: flex; height: 100%;"></div>
+                            <div id="center-tertiary-header" class="panel-header panel-header-main">
+                                <div id="center-tertiary-tabs" class="panel-tab-strip"></div>
                             </div>
                         </div>
                     </div>
                 </div>
                 <div id="right-splitter" class="panel-splitter vertical" data-splitter="right"></div>
                 <div id="inspector-panel" class="panel">
-                    <div id="inspector-panel-header" class="panel-header" style="display: flex; gap: 10px;">
-                        <div id="inspector-tabs" style="display: flex; height: 100%;">
-                            <span id="tab-inspector" class="tab active-tab"
-                                style="cursor: pointer; font-weight: bold;">Inspector</span>
+                    <div id="inspector-panel-header" class="panel-header panel-header-main">
+                        <div id="inspector-tabs" class="panel-tab-strip">
+                            <span id="tab-inspector" class="tab active-tab">Inspector</span>
                         </div>
                     </div>
                     <div id="inspector-content" class="panel-content">
@@ -316,12 +303,12 @@
             </div>
             <div id="bottom-splitter" class="panel-splitter horizontal" data-splitter="bottom"></div>
             <div id="assets-panel" class="panel">
-                <div class="panel-header" id="bottom-panel-header" style="display: flex; gap: 10px;">
-                        <div id="bottom-tabs" style="display: flex; height: 100%;">
+                <div class="panel-header panel-header-main" id="bottom-panel-header">
+                        <div id="bottom-tabs" class="panel-tab-strip">
                         <span id="tab-assets" class="tab active-tab"
-                            style="cursor: pointer; font-weight: bold;"><span class="tab-label">Project</span><button id="tab-close-assets" class="tab-close" type="button" aria-label="Close Project">x</button></span>
-                        <span id="tab-console" class="tab" style="cursor: pointer; color: #888;"><span class="tab-label">Console</span><button id="tab-close-console" class="tab-close" type="button" aria-label="Close Console">x</button></span>
-                        <span id="tab-render" class="tab" style="cursor: pointer; color: #888;"><span class="tab-label">Render Settings</span><button id="tab-close-render" class="tab-close" type="button" aria-label="Close Render Settings">x</button></span>
+                            ><span class="tab-label">Project</span><button id="tab-close-assets" class="tab-close" type="button" aria-label="Close Project">x</button></span>
+                        <span id="tab-console" class="tab"><span class="tab-label">Console</span><button id="tab-close-console" class="tab-close" type="button" aria-label="Close Console">x</button></span>
+                        <span id="tab-render" class="tab"><span class="tab-label">Render Settings</span><button id="tab-close-render" class="tab-close" type="button" aria-label="Close Render Settings">x</button></span>
                     </div>
                 </div>
                 <div id="assets-content" class="panel-content">
@@ -352,9 +339,19 @@
             </div>
             <div id="floating-layer"></div>
             <div id="status-bar">
-                <span id="status-text">Ready</span>
-                <div style="flex: 1"></div>
-                <span id="status-stats">Objects: 0 | Memory: 0MB</span>
+                <div class="status-group status-group-left">
+                    <span id="status-text" class="status-pill status-pill-primary">Ready</span>
+                    <span id="status-selection" class="status-pill">No Selection</span>
+                </div>
+                <div class="status-group status-group-center">
+                    <span id="status-scene" class="status-pill status-pill-scene">Unsaved Scene</span>
+                </div>
+                <div class="status-group status-group-right">
+                    <span id="status-fps" class="status-pill">FPS: 0</span>
+                    <span id="status-ms" class="status-pill">MS: 0.0</span>
+                    <span id="status-drawcalls" class="status-pill">DC: 0</span>
+                    <span id="status-playmode" class="status-pill status-pill-mode">EDITING</span>
+                </div>
             </div>
         </div>
     </div>

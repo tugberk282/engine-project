@@ -513,6 +513,27 @@ export class ProjectWindow {
                 grid.appendChild(item);
             });
 
+            if (!grid.querySelector('.asset-item')) {
+                const empty = document.createElement('div');
+                empty.className = 'editor-empty-state';
+                empty.style.width = '100%';
+                empty.innerHTML = this.searchQuery
+                    ? `
+                        <div class="editor-empty-state-title">No assets matched "${this.searchQuery}"</div>
+                        <div class="editor-empty-state-hint">Try a shorter search term or switch the asset filter back to All.</div>
+                    `
+                    : this.activeFilter !== 'All'
+                        ? `
+                            <div class="editor-empty-state-title">No ${this.activeFilter.toLowerCase()} assets in this folder</div>
+                            <div class="editor-empty-state-hint">Change the filter or create/import assets into the current folder.</div>
+                        `
+                        : `
+                            <div class="editor-empty-state-title">This folder is empty</div>
+                            <div class="editor-empty-state-hint">Create assets, import files or drag GameObjects here to save them as prefabs.</div>
+                        `;
+                grid.appendChild(empty);
+            }
+
         } catch (e) {
             console.error("Failed to read directory", e);
             rightPane.innerText = "Error reading assets: " + e;

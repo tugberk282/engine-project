@@ -159,6 +159,22 @@ export class HierarchyWindow extends EditorWindow {
                 this.renderNode(list as HTMLElement, go, 0, searchQuery);
             }
         });
+
+        if (!(list as HTMLElement).children.length) {
+            const empty = document.createElement('div');
+            empty.className = 'editor-empty-state';
+            empty.style.minHeight = '100px';
+            empty.innerHTML = searchQuery
+                ? `
+                    <div class="editor-empty-state-title">No GameObjects matched "${searchQuery}"</div>
+                    <div class="editor-empty-state-hint">Clear the search or create a new object from the + button or GameObject menu.</div>
+                `
+                : `
+                    <div class="editor-empty-state-title">The scene is empty</div>
+                    <div class="editor-empty-state-hint">Use the + button, right click in Hierarchy, or choose GameObject from the menu to create your first object.</div>
+                `;
+            list.appendChild(empty);
+        }
     }
 
     private renderNode(parent: HTMLElement, go: GameObject, depth: number, searchQuery: string): void {

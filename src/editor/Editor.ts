@@ -101,6 +101,7 @@ export class Editor {
     private gridHelper!: THREE.GridHelper;
     private statusBar: HTMLElement;
     private statsTimer: number = 0;
+    private sceneOnboardingHint: HTMLElement | null = null;
 
     // Play Mode State
     private isPlaying: boolean = false;
@@ -143,6 +144,8 @@ export class Editor {
     private readonly minViewportWidth: number = 420;
     private readonly minCenterSecondaryWidth: number = 240;
     private readonly minCenterTertiaryWidth: number = 220;
+    private readonly defaultCenterSecondaryWidth: number = 320;
+    private readonly defaultCenterTertiaryWidth: number = 280;
     private readonly minAssetsHeight: number = 140;
     private readonly minMainAreaHeight: number = 220;
     private readonly defaultViewportTabOrder: EditorViewportTab[] = ['scene', 'game'];
@@ -342,6 +345,7 @@ export class Editor {
         this.initializeTabEvents();
         this.initializeToolButtonEvents();
         this.initializeKeyBindings();
+        this.initializeMenuPresentation();
         this.initializeMenuEvents();
         this.initializeToolbarEvents();
         this.initializeDragAndDrop();
@@ -394,6 +398,18 @@ export class Editor {
     }
 
     private applyStoredLayout() {
+        const requiredLayoutRoots = [
+            'editor-container',
+            'main-area',
+            'viewport-panel',
+            'floating-layer',
+            'viewport-workspace'
+        ] as const;
+        if (requiredLayoutRoots.some((id) => !document.getElementById(id))) {
+            console.warn('Skipping layout application because required layout DOM roots are missing.');
+            return;
+        }
+
         this.floatingDockableHomeHosts = this.normalizeFloatingDockableHomeHosts(this.floatingDockableHomeHosts);
         EditorSettings.floatingDockableHomeHosts = { ...this.floatingDockableHomeHosts };
         this.syncDockGraphFromLegacyState();
@@ -440,6 +456,23 @@ export class Editor {
         this.floatablePanels.forEach((panelId) => {
             const panel = document.getElementById(panelId) as HTMLElement | null;
             if (!panel) return;
+
+            panel.addEventListener('pointerdown', () => {
+                if (!this.isPanelFloating(panelId)) return;
+                this.setActivePanel(panelId);
+            });
+            panel.addEventListener('focusin', () => {
+                if (!this.isPanelFloating(panelId)) return;
+                this.setActivePanel(panelId);
+                panel.classList.add('floating-panel-focus-within');
+            });
+            panel.addEventListener('focusout', () => {
+                requestAnimationFrame(() => {
+                    if (!panel.matches(':focus-within')) {
+                        panel.classList.remove('floating-panel-focus-within');
+                    }
+                });
+            });
 
             if (!panel.querySelector('.floating-resize-handle')) {
                 const resizeHandle = document.createElement('div');
@@ -721,6 +754,7 @@ export class Editor {
         dockButton.className = 'panel-window-btn panel-window-dock';
         dockButton.type = 'button';
         dockButton.title = 'Toggle Floating';
+        dockButton.setAttribute('aria-label', 'Toggle Floating');
         dockButton.textContent = '[]';
         dockButton.addEventListener('click', (event) => {
             event.preventDefault();
@@ -732,6 +766,7 @@ export class Editor {
         closeButton.className = 'panel-window-btn panel-window-close';
         closeButton.type = 'button';
         closeButton.title = 'Close Panel';
+        closeButton.setAttribute('aria-label', 'Close Panel');
         closeButton.textContent = 'x';
         closeButton.addEventListener('click', (event) => {
             event.preventDefault();
@@ -759,6 +794,55 @@ export class Editor {
             dockButton.classList.toggle('is-active', floating);
             dockButton.textContent = floating ? '><' : '[]';
             dockButton.setAttribute('title', floating ? 'Restore Docked Panel' : 'Float Panel');
+            dockButton.setAttribute('aria-label', floating ? 'Restore Docked Panel' : 'Float Panel');
+            dockButton.setAttribute('aria-pressed', floating ? 'true' : 'false');
+        }
+    }
+
+    private updateAllPanelWindowActions() {
+        this.floatablePanels.forEach((panelId) => this.updatePanelWindowActions(panelId));
+    }
+
+    private updateFloatingPanelActiveState() {
+        this.floatablePanels.forEach((panelId) => {
+            const panel = document.getElementById(panelId) as HTMLElement | null;
+            if (!panel) return;
+            panel.classList.toggle('floating-panel-active', this.isPanelFloating(panelId) && this.activePanelId === panelId);
+        });
+    }
+
+    private reconcileViewportFocusHostAfterLayoutMutation() {
+        if (this.activeViewportFocusHost === 'center-tertiary' && !this.isCenterTertiaryVisible()) {
+            this.activeViewportFocusHost = this.isCenterSecondaryVisible() ? 'center-secondary' : 'viewport';
+        }
+
+        if (this.activeViewportFocusHost === 'center-secondary' && !this.isCenterSecondaryVisible()) {
+            this.activeViewportFocusHost = this.isCenterTertiaryVisible() ? 'center-tertiary' : 'viewport';
+        }
+    }
+
+    private finalizeLayoutMutation(options?: {
+        save?: boolean;
+        updatedPanelId?: Exclude<EditorPanelId, 'viewport-panel'> | null;
+    }) {
+        this.normalizeTabSettings();
+        this.reconcileViewportFocusHostAfterLayoutMutation();
+        this.updateDockedViewState();
+        this.setActivePanel(this.getResolvedActivePanel(this.activePanelId));
+        this.applyPanelVisibility(false);
+        this.applyFloatingPanelStates();
+        if (options?.updatedPanelId) {
+            this.updatePanelWindowActions(options.updatedPanelId);
+        } else {
+            this.updateAllPanelWindowActions();
+        }
+        this.updateSplitterVisibility();
+        this.clampLayoutSizes();
+        this.syncWindowMenuState();
+        this.updateFloatingPanelActiveState();
+        this.resize();
+        if (options?.save ?? true) {
+            this.saveLayout();
         }
     }
 
@@ -789,6 +873,7 @@ export class Editor {
                 originY: parseFloat(panel.style.top || '0')
             };
 
+            panel.classList.add('floating-panel-dragging');
             header.setPointerCapture(event.pointerId);
 
             const handleMove = (moveEvent: PointerEvent) => {
@@ -804,7 +889,9 @@ export class Editor {
             const handleUp = (upEvent: PointerEvent) => {
                 if (!this.floatingPanelDragState || this.floatingPanelDragState.pointerId !== upEvent.pointerId) return;
                 const dockTarget = this.activeFloatingDockTarget;
+                let didDockToHost = false;
                 this.floatingPanelDragState = null;
+                panel.classList.remove('floating-panel-dragging');
                 header.releasePointerCapture(upEvent.pointerId);
                 header.removeEventListener('pointermove', handleMove);
                 header.removeEventListener('pointerup', handleUp);
@@ -815,7 +902,7 @@ export class Editor {
                         const dockedBottomTabs = [...EditorSettings.bottomTabOrder];
                         const preferredActiveTab = this.getPreferredDockableTabForPanel(panelId);
 
-                        dockedBottomTabs.forEach((tab) => this.moveDockableTabToHost(tab, 'viewport'));
+                        dockedBottomTabs.forEach((tab) => this.moveDockableTabToHost(tab, 'viewport', undefined, { deferLayout: true }));
 
                         const current = this.ensureFloatingPanelState(panelId);
                         EditorSettings.floatingPanels[panelId] = { ...current, floating: false };
@@ -827,13 +914,14 @@ export class Editor {
                         }
 
                         this.setActivePanel('viewport-panel');
+                        didDockToHost = true;
                     } else if (panelId === 'assets-panel' && dockTarget.slot) {
                         const sideTargetPanelId = this.getPanelIdForSideSlot(dockTarget.slot);
                         const sideTargetHost: EditorDockHost = sideTargetPanelId === 'hierarchy-panel' ? 'hierarchy' : 'inspector';
                         const dockedBottomTabs = [...EditorSettings.bottomTabOrder];
                         const preferredActiveTab = this.getPreferredDockableTabForPanel(panelId);
 
-                        dockedBottomTabs.forEach((tab) => this.moveDockableTabToHost(tab, sideTargetHost));
+                        dockedBottomTabs.forEach((tab) => this.moveDockableTabToHost(tab, sideTargetHost, undefined, { deferLayout: true }));
 
                         const current = this.ensureFloatingPanelState(panelId);
                         EditorSettings.floatingPanels[panelId] = { ...current, floating: false };
@@ -849,9 +937,10 @@ export class Editor {
                         }
 
                         this.setActivePanel(sideTargetPanelId);
+                        didDockToHost = true;
                     } else if (panelId !== 'assets-panel' && dockTarget.host) {
                         const preferredActiveTab = this.getPreferredDockableTabForPanel(panelId);
-                        this.movePanelDockableTabsToHost(panelId, dockTarget.host, { rememberSourceHosts: true });
+                        this.movePanelDockableTabsToHost(panelId, dockTarget.host, { rememberSourceHosts: true, deferLayout: true });
 
                         if (dockTarget.host === 'viewport' && preferredActiveTab) {
                             this.setViewportDockTab(preferredActiveTab, false);
@@ -866,22 +955,23 @@ export class Editor {
                             this.setInspectorTab(preferredActiveTab, false);
                             this.setActivePanel('inspector-panel');
                         }
+                        didDockToHost = true;
                     } else if (dockTarget.slot && panelId !== 'assets-panel') {
                         EditorSettings.sidePanelSlots = this.normalizeSidePanelSlots({
                             ...EditorSettings.sidePanelSlots,
                             [panelId]: dockTarget.slot
                         });
                         this.syncLegacyPanelWidthsFromSideSlots();
+                        didDockToHost = true;
                     }
-                    const current = this.ensureFloatingPanelState(panelId);
-                    EditorSettings.floatingPanels[panelId] = { ...current, floating: false };
-                    this.restoreDockedPanel(panelId);
-                    this.applyPanelVisibility(false);
-                    this.applyFloatingPanelStates();
-                    this.updateSplitterVisibility();
-                    this.clampLayoutSizes();
-                    this.syncWindowMenuState();
-                    this.resize();
+
+                    if (didDockToHost) {
+                        const current = this.ensureFloatingPanelState(panelId);
+                        EditorSettings.floatingPanels[panelId] = { ...current, floating: false };
+                        this.restoreDockedPanel(panelId);
+                        this.finalizeLayoutMutation({ updatedPanelId: panelId });
+                        return;
+                    }
                 }
 
                 this.saveLayout();
@@ -903,6 +993,7 @@ export class Editor {
 
         event.preventDefault();
         event.stopPropagation();
+        panel.classList.add('floating-panel-resizing');
 
         this.floatingPanelResizeState = {
             panelId,
@@ -925,6 +1016,7 @@ export class Editor {
         const handleUp = (upEvent: PointerEvent) => {
             if (!this.floatingPanelResizeState || this.floatingPanelResizeState.pointerId !== upEvent.pointerId) return;
             this.floatingPanelResizeState = null;
+            panel.classList.remove('floating-panel-resizing');
             document.removeEventListener('pointermove', handleMove);
             document.removeEventListener('pointerup', handleUp);
             this.saveLayout();
@@ -1035,6 +1127,7 @@ export class Editor {
         }
 
         panel.classList.add('floating-panel');
+        panel.tabIndex = 0;
         this.bringFloatingPanelToFront(panelId);
         panel.style.left = `${state.x}px`;
         panel.style.top = `${state.y}px`;
@@ -1042,6 +1135,7 @@ export class Editor {
         panel.style.height = `${state.height}px`;
         panel.style.flex = '0 0 auto';
         this.updatePanelWindowActions(panelId);
+        this.updateFloatingPanelActiveState();
     }
 
     private restoreDockedPanel(panelId: Exclude<EditorPanelId, 'viewport-panel'>) {
@@ -1067,6 +1161,8 @@ export class Editor {
         }
 
         panel.classList.remove('floating-panel');
+        panel.classList.remove('floating-panel-focus-within');
+        panel.removeAttribute('tabindex');
         panel.style.zIndex = '';
         panel.style.left = '';
         panel.style.top = '';
@@ -1074,6 +1170,7 @@ export class Editor {
         panel.style.height = '';
         panel.style.flex = '';
         this.updatePanelWindowActions(panelId);
+        this.updateFloatingPanelActiveState();
     }
 
     private bringFloatingPanelToFront(panelId: Exclude<EditorPanelId, 'viewport-panel'>) {
@@ -1347,7 +1444,7 @@ export class Editor {
         tabsToRestore.forEach((tab) => {
             const homeHost = this.floatingDockableHomeHosts[tab];
             if (!homeHost || homeHost === 'bottom') return;
-            this.moveDockableTabToHost(tab, homeHost);
+            this.moveDockableTabToHost(tab, homeHost, undefined, { deferLayout: true });
             delete this.floatingDockableHomeHosts[tab];
         });
 
@@ -1375,14 +1472,7 @@ export class Editor {
             }
         }
 
-        this.applyPanelVisibility(false);
-        this.applyFloatingPanelStates();
-        this.updatePanelWindowActions('assets-panel');
-        this.updateSplitterVisibility();
-        this.clampLayoutSizes();
-        this.syncWindowMenuState();
-        this.resize();
-        this.saveLayout();
+        this.finalizeLayoutMutation({ updatedPanelId: 'assets-panel' });
         return true;
     }
 
@@ -1407,7 +1497,7 @@ export class Editor {
         const homeHost = this.floatingDockableHomeHosts[view];
         if (!homeHost || homeHost === this.getViewHost(view)) return;
 
-        this.moveDockableTabToHost(view, homeHost);
+        this.moveDockableTabToHost(view, homeHost, undefined, { deferLayout: true });
         delete this.floatingDockableHomeHosts[view];
 
         if (homeHost === 'viewport') {
@@ -1430,14 +1520,7 @@ export class Editor {
         if (!activeView) return;
 
         this.restoreDockableViewToHome(activeView);
-        this.applyPanelVisibility(false);
-        this.applyFloatingPanelStates();
-        this.updatePanelWindowActions('assets-panel');
-        this.updateSplitterVisibility();
-        this.clampLayoutSizes();
-        this.syncWindowMenuState();
-        this.resize();
-        this.saveLayout();
+        this.finalizeLayoutMutation({ updatedPanelId: 'assets-panel' });
     }
 
     private restoreDetachedViews() {
@@ -1453,7 +1536,7 @@ export class Editor {
         detachedViews.forEach((tab) => {
             const homeHost = this.floatingDockableHomeHosts[tab];
             if (!homeHost || homeHost === this.getViewHost(tab)) return;
-            this.moveDockableTabToHost(tab, homeHost);
+            this.moveDockableTabToHost(tab, homeHost, undefined, { deferLayout: true });
             delete this.floatingDockableHomeHosts[tab];
         });
 
@@ -1483,14 +1566,7 @@ export class Editor {
             this.setActivePanel('inspector-panel');
         }
 
-        this.applyPanelVisibility(false);
-        this.applyFloatingPanelStates();
-        this.updatePanelWindowActions('assets-panel');
-        this.updateSplitterVisibility();
-        this.clampLayoutSizes();
-        this.syncWindowMenuState();
-        this.resize();
-        this.saveLayout();
+        this.finalizeLayoutMutation({ updatedPanelId: 'assets-panel' });
     }
 
     private toggleFloatingPanel(panelId: EditorPanelId = this.activePanelId) {
@@ -1510,14 +1586,7 @@ export class Editor {
             this.restoreDockedPanel(panelId);
         }
 
-        this.applyPanelVisibility(false);
-        this.applyFloatingPanelStates();
-        this.updatePanelWindowActions(panelId);
-        this.updateSplitterVisibility();
-        this.clampLayoutSizes();
-        this.syncWindowMenuState();
-        this.resize();
-        this.saveLayout();
+        this.finalizeLayoutMutation({ updatedPanelId: panelId });
     }
 
     private dockAllFloatingPanels() {
@@ -1539,13 +1608,7 @@ export class Editor {
 
         if (!changed) return;
 
-        this.applyPanelVisibility(false);
-        this.applyFloatingPanelStates();
-        this.updateSplitterVisibility();
-        this.clampLayoutSizes();
-        this.syncWindowMenuState();
-        this.resize();
-        this.saveLayout();
+        this.finalizeLayoutMutation();
     }
 
     private floatDockableView(view: DockableEditorView) {
@@ -1553,7 +1616,7 @@ export class Editor {
 
         const currentHost = this.getViewHost(view);
         if (currentHost !== 'bottom') {
-            this.moveDockableTabToHost(view, 'bottom');
+            this.moveDockableTabToHost(view, 'bottom', undefined, { deferLayout: true });
             this.floatingDockableHomeHosts[view] = currentHost;
         } else {
             delete this.floatingDockableHomeHosts[view];
@@ -1573,14 +1636,7 @@ export class Editor {
         EditorSettings.floatingPanels['assets-panel'] = { ...current, floating: true };
         this.floatPanel('assets-panel');
 
-        this.applyPanelVisibility(false);
-        this.applyFloatingPanelStates();
-        this.updatePanelWindowActions('assets-panel');
-        this.updateSplitterVisibility();
-        this.clampLayoutSizes();
-        this.syncWindowMenuState();
-        this.resize();
-        this.saveLayout();
+        this.finalizeLayoutMutation({ updatedPanelId: 'assets-panel' });
     }
 
     private floatActiveDockableView() {
@@ -1739,12 +1795,17 @@ export class Editor {
         const bottomSplitter = document.getElementById('bottom-splitter') as HTMLElement | null;
         const centerSecondarySplitter = document.getElementById('center-secondary-splitter') as HTMLElement | null;
         const centerTertiarySplitter = document.getElementById('center-tertiary-splitter') as HTMLElement | null;
+        const hasLeftDockedPanel = !!this.getDockedPanelIdForSideSlot('left');
+        const hasRightDockedPanel = !!this.getDockedPanelIdForSideSlot('right');
+        const hasBottomDockedPanel = this.isPanelDockedVisible('assets-panel');
+        const hasCenterSecondary = this.isCenterSecondaryVisible();
+        const hasCenterTertiary = this.isCenterTertiaryVisible();
 
-        if (leftSplitter) leftSplitter.style.display = this.getDockedPanelIdForSideSlot('left') ? 'block' : 'none';
-        if (rightSplitter) rightSplitter.style.display = this.getDockedPanelIdForSideSlot('right') ? 'block' : 'none';
-        if (bottomSplitter) bottomSplitter.style.display = this.isPanelDockedVisible('assets-panel') ? 'block' : 'none';
-        if (centerSecondarySplitter) centerSecondarySplitter.style.display = this.isCenterSecondaryVisible() ? 'block' : 'none';
-        if (centerTertiarySplitter) centerTertiarySplitter.style.display = this.isCenterTertiaryVisible() ? 'block' : 'none';
+        if (leftSplitter) leftSplitter.style.display = hasLeftDockedPanel ? 'block' : 'none';
+        if (rightSplitter) rightSplitter.style.display = hasRightDockedPanel ? 'block' : 'none';
+        if (bottomSplitter) bottomSplitter.style.display = hasBottomDockedPanel ? 'block' : 'none';
+        if (centerSecondarySplitter) centerSecondarySplitter.style.display = hasCenterSecondary ? 'block' : 'none';
+        if (centerTertiarySplitter) centerTertiarySplitter.style.display = hasCenterSecondary && hasCenterTertiary ? 'block' : 'none';
     }
 
     private clampLayoutSizes() {
@@ -1787,15 +1848,17 @@ export class Editor {
 
         const viewportWorkspace = document.getElementById('viewport-workspace') as HTMLElement | null;
         if (viewportWorkspace && (this.isCenterSecondaryVisible() || this.isCenterTertiaryVisible())) {
+            const hasCenterSecondary = this.isCenterSecondaryVisible();
+            const hasCenterTertiary = this.isCenterTertiaryVisible();
             const splitterAllowance =
-                (this.isCenterSecondaryVisible() ? 4 : 0) +
-                (this.isCenterTertiaryVisible() ? 4 : 0);
+                (hasCenterSecondary ? 4 : 0) +
+                (hasCenterSecondary && hasCenterTertiary ? 4 : 0);
             const availableDockWidth = Math.max(0, viewportWorkspace.clientWidth - this.minViewportWidth - splitterAllowance);
 
-            if (this.isCenterTertiaryVisible()) {
+            if (hasCenterTertiary) {
                 const maxCenterTertiaryWidth = Math.max(
                     this.minCenterTertiaryWidth,
-                    availableDockWidth - (this.isCenterSecondaryVisible() ? this.minCenterSecondaryWidth : 0)
+                    availableDockWidth - (hasCenterSecondary ? this.minCenterSecondaryWidth : 0)
                 );
                 EditorSettings.centerTertiaryWidth = THREE.MathUtils.clamp(
                     EditorSettings.centerTertiaryWidth,
@@ -1804,10 +1867,10 @@ export class Editor {
                 );
             }
 
-            if (this.isCenterSecondaryVisible()) {
+            if (hasCenterSecondary) {
                 const maxCenterSecondaryWidth = Math.max(
                     this.minCenterSecondaryWidth,
-                    availableDockWidth - (this.isCenterTertiaryVisible() ? EditorSettings.centerTertiaryWidth : 0)
+                    availableDockWidth - (hasCenterTertiary ? EditorSettings.centerTertiaryWidth : 0)
                 );
                 EditorSettings.centerSecondaryWidth = THREE.MathUtils.clamp(
                     EditorSettings.centerSecondaryWidth,
@@ -1816,7 +1879,18 @@ export class Editor {
                 );
             }
 
+            if (!hasCenterSecondary) {
+                EditorSettings.centerSecondaryWidth = this.defaultCenterSecondaryWidth;
+            }
+
+            if (!hasCenterTertiary) {
+                EditorSettings.centerTertiaryWidth = this.defaultCenterTertiaryWidth;
+            }
+
             this.applyPanelWidths();
+        } else {
+            EditorSettings.centerSecondaryWidth = this.defaultCenterSecondaryWidth;
+            EditorSettings.centerTertiaryWidth = this.defaultCenterTertiaryWidth;
         }
 
         const editorContainer = document.getElementById('editor-container') as HTMLElement | null;
@@ -1861,6 +1935,125 @@ export class Editor {
         return Math.max(this.minAssetsHeight, editorContainer.clientHeight - chromeHeight - this.minMainAreaHeight);
     }
 
+    private normalizeLayoutSnapshot(layout: Partial<EditorLayoutSnapshot> | null | undefined): EditorLayoutSnapshot {
+        const fallback = this.captureLayoutState();
+        const dockableViews = ['project', 'console', 'render'] as const;
+        const viewportTabs = ['scene', 'game'] as const;
+        const layoutPresets = ['default', 'scene', 'scripting', 'custom'] as const;
+        const panelIds = ['hierarchy-panel', 'viewport-panel', 'inspector-panel', 'assets-panel'] as const;
+        const sideSlots = ['left', 'right'] as const;
+        const dockHosts = ['bottom', 'inspector', 'hierarchy', 'viewport', 'center-secondary', 'center-tertiary'] as const;
+
+        const coerceNumber = (value: unknown, nextFallback: number) =>
+            Number.isFinite(value) ? Math.round(Number(value)) : nextFallback;
+        const coerceBoolean = (value: unknown, nextFallback: boolean) =>
+            typeof value === 'boolean' ? value : nextFallback;
+        const coerceEnum = <T extends string>(value: unknown, allowed: readonly T[], nextFallback: T): T =>
+            typeof value === 'string' && allowed.includes(value as T) ? (value as T) : nextFallback;
+        const coerceNullableEnum = <T extends string>(value: unknown, allowed: readonly T[], nextFallback: T | null): T | null => {
+            if (value === null) return null;
+            return typeof value === 'string' && allowed.includes(value as T) ? (value as T) : nextFallback;
+        };
+        const coerceUniqueList = <T extends string>(value: unknown, allowed: readonly T[], nextFallback: T[]): T[] => {
+            if (!Array.isArray(value)) return [...nextFallback];
+            const seen = new Set<T>();
+            const normalized: T[] = [];
+            value.forEach((item) => {
+                if (typeof item !== 'string' || !allowed.includes(item as T)) return;
+                const typedItem = item as T;
+                if (seen.has(typedItem)) return;
+                seen.add(typedItem);
+                normalized.push(typedItem);
+            });
+            return normalized.length > 0 ? normalized : [...nextFallback];
+        };
+
+        const normalizedViewHosts: Record<DockableEditorView, EditorDockHost> = { ...fallback.viewHosts };
+        dockableViews.forEach((view) => {
+            normalizedViewHosts[view] = coerceEnum(
+                layout?.viewHosts?.[view],
+                dockHosts,
+                fallback.viewHosts[view]
+            );
+        });
+
+        const normalizedSideSlots: Record<'hierarchy-panel' | 'inspector-panel', EditorSideDockSlot> = {
+            'hierarchy-panel': coerceEnum(layout?.sidePanelSlots?.['hierarchy-panel'], sideSlots, fallback.sidePanelSlots['hierarchy-panel']),
+            'inspector-panel': coerceEnum(layout?.sidePanelSlots?.['inspector-panel'], sideSlots, fallback.sidePanelSlots['inspector-panel'])
+        };
+
+        const normalizedSnapshot: EditorLayoutSnapshot = {
+            hierarchyWidth: coerceNumber(layout?.hierarchyWidth, fallback.hierarchyWidth),
+            inspectorWidth: coerceNumber(layout?.inspectorWidth, fallback.inspectorWidth),
+            sidePanelWidths: {
+                left: coerceNumber(layout?.sidePanelWidths?.left, fallback.sidePanelWidths.left),
+                right: coerceNumber(layout?.sidePanelWidths?.right, fallback.sidePanelWidths.right)
+            },
+            assetsHeight: coerceNumber(layout?.assetsHeight, fallback.assetsHeight),
+            hierarchyVisible: coerceBoolean(layout?.hierarchyVisible, fallback.hierarchyVisible),
+            inspectorVisible: coerceBoolean(layout?.inspectorVisible, fallback.inspectorVisible),
+            assetsVisible: coerceBoolean(layout?.assetsVisible, fallback.assetsVisible),
+            activeBottomTab: coerceEnum(layout?.activeBottomTab, dockableViews, fallback.activeBottomTab),
+            activeViewportTab: coerceEnum(layout?.activeViewportTab, viewportTabs, fallback.activeViewportTab),
+            bottomTabOrder: coerceUniqueList(layout?.bottomTabOrder, dockableViews, fallback.bottomTabOrder),
+            viewportTabOrder: coerceUniqueList(layout?.viewportTabOrder, viewportTabs, fallback.viewportTabOrder),
+            activeViewportDockTab: coerceNullableEnum(layout?.activeViewportDockTab, dockableViews, fallback.activeViewportDockTab),
+            viewportDockTabOrder: coerceUniqueList(layout?.viewportDockTabOrder, dockableViews, fallback.viewportDockTabOrder),
+            activeCenterSecondaryTab: coerceNullableEnum(layout?.activeCenterSecondaryTab, dockableViews, fallback.activeCenterSecondaryTab),
+            centerSecondaryTabOrder: coerceUniqueList(layout?.centerSecondaryTabOrder, dockableViews, fallback.centerSecondaryTabOrder),
+            activeCenterTertiaryTab: coerceNullableEnum(layout?.activeCenterTertiaryTab, dockableViews, fallback.activeCenterTertiaryTab),
+            centerTertiaryTabOrder: coerceUniqueList(layout?.centerTertiaryTabOrder, dockableViews, fallback.centerTertiaryTabOrder),
+            activeHierarchyTab: coerceEnum(layout?.activeHierarchyTab, ['hierarchy', ...dockableViews], fallback.activeHierarchyTab),
+            hierarchyTabOrder: coerceUniqueList(layout?.hierarchyTabOrder, ['hierarchy', ...dockableViews], fallback.hierarchyTabOrder),
+            activeInspectorTab: coerceEnum(layout?.activeInspectorTab, ['inspector', ...dockableViews], fallback.activeInspectorTab),
+            inspectorTabOrder: coerceUniqueList(layout?.inspectorTabOrder, ['inspector', ...dockableViews], fallback.inspectorTabOrder),
+            viewHosts: normalizedViewHosts,
+            dockGraph: this.normalizeDockGraph(layout?.dockGraph),
+            floatingDockableHomeHosts: this.normalizeFloatingDockableHomeHosts(layout?.floatingDockableHomeHosts),
+            floatingPanels: this.normalizeFloatingPanelMap(layout?.floatingPanels),
+            sidePanelSlots: normalizedSideSlots,
+            centerSecondaryWidth: coerceNumber(layout?.centerSecondaryWidth, fallback.centerSecondaryWidth),
+            centerTertiaryWidth: coerceNumber(layout?.centerTertiaryWidth, fallback.centerTertiaryWidth),
+            layoutPreset: coerceEnum(layout?.layoutPreset, layoutPresets, fallback.layoutPreset),
+            activePanelId: coerceEnum(layout?.activePanelId, panelIds, fallback.activePanelId),
+            prefabApplyTargetRootIds: layout?.prefabApplyTargetRootIds,
+            collapsedComponentsPerGameObject: layout?.collapsedComponentsPerGameObject
+        };
+
+        return normalizedSnapshot;
+    }
+
+    private applyLayoutSnapshotSafely(
+        layout: Partial<EditorLayoutSnapshot> | null | undefined,
+        options?: {
+            fallbackLayout?: EditorLayoutSnapshot;
+            fallbackPanelId?: EditorPanelId;
+            save?: boolean;
+            warningLabel?: string;
+        }
+    ) {
+        const fallbackLayout = options?.fallbackLayout ?? this.captureLayoutState();
+        const fallbackPanelId = options?.fallbackPanelId ?? this.getResolvedActivePanel(fallbackLayout.activePanelId);
+
+        try {
+            this.applyLayoutState(layout);
+            const targetPanelId = this.getResolvedActivePanel((layout as Partial<EditorLayoutSnapshot> | undefined)?.activePanelId ?? this.activePanelId);
+            this.setActivePanel(targetPanelId);
+            this.resize();
+            if (options?.save ?? true) {
+                this.saveLayout(false);
+            }
+        } catch (error) {
+            console.warn(options?.warningLabel ?? 'Failed to apply layout snapshot. Restoring fallback layout.', error);
+            this.applyLayoutState(fallbackLayout);
+            this.setActivePanel(fallbackPanelId);
+            this.resize();
+            if (options?.save ?? true) {
+                this.saveLayout(false);
+            }
+        }
+    }
+
     private captureLayoutState(): EditorLayoutSnapshot {
         return {
             hierarchyWidth: EditorSettings.hierarchyWidth,
@@ -1897,40 +2090,41 @@ export class Editor {
         };
     }
 
-    private applyLayoutState(layout: EditorLayoutSnapshot) {
-        EditorSettings.hierarchyWidth = layout.hierarchyWidth;
-        EditorSettings.inspectorWidth = layout.inspectorWidth;
-        EditorSettings.sidePanelSlots = this.normalizeSidePanelSlots(layout.sidePanelSlots);
-        EditorSettings.sidePanelWidths = this.normalizeSidePanelWidths(layout.sidePanelWidths, EditorSettings.sidePanelSlots);
-        EditorSettings.assetsHeight = layout.assetsHeight;
-        EditorSettings.hierarchyVisible = layout.hierarchyVisible;
-        EditorSettings.inspectorVisible = layout.inspectorVisible;
-        EditorSettings.assetsVisible = layout.assetsVisible;
-        this.activeBottomTab = layout.activeBottomTab;
-        this.activeViewportTab = layout.activeViewportTab;
-        EditorSettings.bottomTabOrder = [...(layout.bottomTabOrder ?? this.defaultBottomTabOrder)];
-        EditorSettings.viewportTabOrder = [...(layout.viewportTabOrder ?? this.defaultViewportTabOrder)];
-        this.activeViewportDockTab = layout.activeViewportDockTab ?? null;
-        EditorSettings.viewportDockTabOrder = [...(layout.viewportDockTabOrder ?? this.defaultViewportDockTabOrder)];
-        this.activeCenterSecondaryTab = layout.activeCenterSecondaryTab ?? null;
-        EditorSettings.centerSecondaryTabOrder = [...(layout.centerSecondaryTabOrder ?? this.defaultCenterSecondaryTabOrder)];
-        this.activeCenterTertiaryTab = layout.activeCenterTertiaryTab ?? null;
-        EditorSettings.centerTertiaryTabOrder = [...(layout.centerTertiaryTabOrder ?? this.defaultCenterTertiaryTabOrder)];
-        this.activeHierarchyTab = layout.activeHierarchyTab ?? 'hierarchy';
-        EditorSettings.hierarchyTabOrder = [...(layout.hierarchyTabOrder ?? this.defaultHierarchyTabOrder)];
-        this.activeInspectorTab = layout.activeInspectorTab ?? 'inspector';
-        EditorSettings.inspectorTabOrder = [...(layout.inspectorTabOrder ?? this.defaultInspectorTabOrder)];
-        EditorSettings.viewHosts = this.normalizeViewHosts(layout.viewHosts);
-        EditorSettings.dockGraph = this.normalizeDockGraph(layout.dockGraph);
+    private applyLayoutState(layout: Partial<EditorLayoutSnapshot> | null | undefined) {
+        const normalizedLayout = this.normalizeLayoutSnapshot(layout);
+        EditorSettings.hierarchyWidth = normalizedLayout.hierarchyWidth;
+        EditorSettings.inspectorWidth = normalizedLayout.inspectorWidth;
+        EditorSettings.sidePanelSlots = this.normalizeSidePanelSlots(normalizedLayout.sidePanelSlots);
+        EditorSettings.sidePanelWidths = this.normalizeSidePanelWidths(normalizedLayout.sidePanelWidths, EditorSettings.sidePanelSlots);
+        EditorSettings.assetsHeight = normalizedLayout.assetsHeight;
+        EditorSettings.hierarchyVisible = normalizedLayout.hierarchyVisible;
+        EditorSettings.inspectorVisible = normalizedLayout.inspectorVisible;
+        EditorSettings.assetsVisible = normalizedLayout.assetsVisible;
+        this.activeBottomTab = normalizedLayout.activeBottomTab;
+        this.activeViewportTab = normalizedLayout.activeViewportTab;
+        EditorSettings.bottomTabOrder = [...normalizedLayout.bottomTabOrder];
+        EditorSettings.viewportTabOrder = [...normalizedLayout.viewportTabOrder];
+        this.activeViewportDockTab = normalizedLayout.activeViewportDockTab ?? null;
+        EditorSettings.viewportDockTabOrder = [...normalizedLayout.viewportDockTabOrder];
+        this.activeCenterSecondaryTab = normalizedLayout.activeCenterSecondaryTab ?? null;
+        EditorSettings.centerSecondaryTabOrder = [...normalizedLayout.centerSecondaryTabOrder];
+        this.activeCenterTertiaryTab = normalizedLayout.activeCenterTertiaryTab ?? null;
+        EditorSettings.centerTertiaryTabOrder = [...normalizedLayout.centerTertiaryTabOrder];
+        this.activeHierarchyTab = normalizedLayout.activeHierarchyTab;
+        EditorSettings.hierarchyTabOrder = [...normalizedLayout.hierarchyTabOrder];
+        this.activeInspectorTab = normalizedLayout.activeInspectorTab;
+        EditorSettings.inspectorTabOrder = [...normalizedLayout.inspectorTabOrder];
+        EditorSettings.viewHosts = this.normalizeViewHosts(normalizedLayout.viewHosts);
+        EditorSettings.dockGraph = this.normalizeDockGraph(normalizedLayout.dockGraph);
         this.applyDockGraphToLegacyState(EditorSettings.dockGraph);
-        this.floatingDockableHomeHosts = this.normalizeFloatingDockableHomeHosts(layout.floatingDockableHomeHosts);
+        this.floatingDockableHomeHosts = this.normalizeFloatingDockableHomeHosts(normalizedLayout.floatingDockableHomeHosts);
         EditorSettings.floatingDockableHomeHosts = { ...this.floatingDockableHomeHosts };
-        EditorSettings.floatingPanels = this.normalizeFloatingPanelMap(layout.floatingPanels);
-        EditorSettings.centerSecondaryWidth = Math.max(this.minCenterSecondaryWidth, Math.round(layout.centerSecondaryWidth ?? 320));
-        EditorSettings.centerTertiaryWidth = Math.max(this.minCenterTertiaryWidth, Math.round(layout.centerTertiaryWidth ?? 280));
-        this.currentLayoutPreset = layout.layoutPreset ?? 'default';
-        this.activePanelId = this.getResolvedActivePanel(layout.activePanelId);
-        this.prefabApplyTargetRootIds = this.normalizePrefabApplyTargetRootIds(layout.prefabApplyTargetRootIds);
+        EditorSettings.floatingPanels = this.normalizeFloatingPanelMap(normalizedLayout.floatingPanels);
+        EditorSettings.centerSecondaryWidth = Math.max(this.minCenterSecondaryWidth, Math.round(normalizedLayout.centerSecondaryWidth ?? this.defaultCenterSecondaryWidth));
+        EditorSettings.centerTertiaryWidth = Math.max(this.minCenterTertiaryWidth, Math.round(normalizedLayout.centerTertiaryWidth ?? this.defaultCenterTertiaryWidth));
+        this.currentLayoutPreset = normalizedLayout.layoutPreset ?? 'default';
+        this.activePanelId = this.getResolvedActivePanel(normalizedLayout.activePanelId);
+        this.prefabApplyTargetRootIds = this.normalizePrefabApplyTargetRootIds(normalizedLayout.prefabApplyTargetRootIds);
         EditorSettings.prefabApplyTargetRootIds = this.serializePrefabApplyTargetRootIds();
         this.syncLegacyPanelWidthsFromSideSlots();
         this.applyStoredLayout();
@@ -2389,12 +2583,12 @@ export class Editor {
     private movePanelDockableTabsToHost(
         panelId: Exclude<EditorPanelId, 'viewport-panel'>,
         targetHost: EditorDockHost,
-        options?: { rememberSourceHosts?: boolean }
+        options?: { rememberSourceHosts?: boolean; deferLayout?: boolean }
     ): DockableEditorView[] {
         const dockableTabs = this.getDockableTabsForPanel(panelId);
         dockableTabs.forEach((tab) => {
             const sourceHost = this.getViewHost(tab);
-            this.moveDockableTabToHost(tab, targetHost);
+            this.moveDockableTabToHost(tab, targetHost, undefined, { deferLayout: options?.deferLayout });
             if (options?.rememberSourceHosts && sourceHost !== targetHost) {
                 this.floatingDockableHomeHosts[tab] = sourceHost;
             }
@@ -2524,10 +2718,125 @@ export class Editor {
         this.saveLayout();
     }
 
+    private resolveDockInsertionTarget(
+        host: EditorDockHost,
+        targetTab?: EditorHierarchyTab | EditorInspectorTab | EditorBottomTab
+    ): EditorHierarchyTab | EditorInspectorTab | EditorBottomTab | undefined {
+        if (host === 'hierarchy' && targetTab === 'hierarchy') {
+            return EditorSettings.hierarchyTabOrder.find((tab) => tab !== 'hierarchy');
+        }
+
+        if (host === 'inspector' && targetTab === 'inspector') {
+            return EditorSettings.inspectorTabOrder.find((tab) => tab !== 'inspector');
+        }
+
+        return targetTab;
+    }
+
+    private moveDockableTabToHostEnd(tab: DockableEditorView, host: EditorDockHost) {
+        if (host === 'viewport') {
+            EditorSettings.viewportDockTabOrder = [
+                ...EditorSettings.viewportDockTabOrder.filter((item) => item !== tab),
+                tab
+            ];
+            this.activeViewportFocusHost = 'viewport';
+            this.activeViewportDockTab = tab;
+            this.setActivePanel('viewport-panel');
+        } else if (host === 'center-secondary') {
+            EditorSettings.centerSecondaryTabOrder = [
+                ...EditorSettings.centerSecondaryTabOrder.filter((item) => item !== tab),
+                tab
+            ];
+            this.activeViewportFocusHost = 'center-secondary';
+            this.activeCenterSecondaryTab = tab;
+            this.setActivePanel('viewport-panel');
+        } else if (host === 'center-tertiary') {
+            EditorSettings.centerTertiaryTabOrder = [
+                ...EditorSettings.centerTertiaryTabOrder.filter((item) => item !== tab),
+                tab
+            ];
+            this.activeViewportFocusHost = 'center-tertiary';
+            this.activeCenterTertiaryTab = tab;
+            this.setActivePanel('viewport-panel');
+        } else if (host === 'bottom') {
+            EditorSettings.bottomTabOrder = [
+                ...EditorSettings.bottomTabOrder.filter((item) => item !== tab),
+                tab
+            ];
+            this.activeBottomTab = tab;
+            this.setActivePanel('assets-panel');
+        } else if (host === 'hierarchy') {
+            EditorSettings.hierarchyTabOrder = [
+                'hierarchy',
+                ...EditorSettings.hierarchyTabOrder.filter((item) => item !== 'hierarchy' && item !== tab),
+                tab
+            ];
+            this.activeHierarchyTab = tab;
+            this.setActivePanel('hierarchy-panel');
+        } else {
+            EditorSettings.inspectorTabOrder = [
+                'inspector',
+                ...EditorSettings.inspectorTabOrder.filter((item) => item !== 'inspector' && item !== tab),
+                tab
+            ];
+            this.activeInspectorTab = tab;
+            this.setActivePanel('inspector-panel');
+        }
+
+        this.applyTabOrders();
+        this.updateDockedViewState();
+        this.syncWindowMenuState();
+        this.saveLayout();
+    }
+
+    private dropDockableTabOntoHost(
+        targetHost: EditorDockHost,
+        targetTab?: EditorHierarchyTab | EditorInspectorTab | EditorBottomTab
+    ) {
+        if (!this.draggedDockableTab) return;
+
+        const sourceTab = this.draggedDockableTab;
+        const sourceHost = this.getViewHost(sourceTab);
+        const resolvedTargetTab = this.resolveDockInsertionTarget(targetHost, targetTab);
+
+        if (sourceHost === targetHost && resolvedTargetTab) {
+            if (targetHost === 'viewport') {
+                this.reorderViewportDockTabs(sourceTab, resolvedTargetTab as DockableEditorView);
+                return;
+            }
+            if (targetHost === 'center-secondary') {
+                this.reorderCenterSecondaryTabs(sourceTab, resolvedTargetTab as DockableEditorView);
+                return;
+            }
+            if (targetHost === 'center-tertiary') {
+                this.reorderCenterTertiaryTabs(sourceTab, resolvedTargetTab as DockableEditorView);
+                return;
+            }
+            if (targetHost === 'bottom') {
+                this.reorderBottomTabs(sourceTab, resolvedTargetTab as EditorBottomTab);
+                return;
+            }
+            if (targetHost === 'hierarchy') {
+                this.reorderHierarchyTabs(sourceTab, resolvedTargetTab as EditorHierarchyTab);
+                return;
+            }
+            this.reorderInspectorTabs(sourceTab, resolvedTargetTab as EditorInspectorTab);
+            return;
+        }
+
+        if (sourceHost === targetHost && !resolvedTargetTab) {
+            this.moveDockableTabToHostEnd(sourceTab, targetHost);
+            return;
+        }
+
+        this.moveDockableTabToHost(sourceTab, targetHost, resolvedTargetTab);
+    }
+
     private moveDockableTabToHost(
         tab: DockableEditorView,
         host: EditorDockHost,
-        targetTab?: EditorHierarchyTab | EditorInspectorTab | EditorBottomTab
+        targetTab?: EditorHierarchyTab | EditorInspectorTab | EditorBottomTab,
+        options?: { deferLayout?: boolean }
     ) {
         host = this.resolveDockHostTarget(host, tab);
         const currentHost = this.getViewHost(tab);
@@ -2589,7 +2898,7 @@ export class Editor {
             if (this.activeViewportDockTab === tab) this.activeViewportDockTab = null;
             if (this.activeCenterSecondaryTab === tab) this.activeCenterSecondaryTab = null;
             if (this.activeCenterTertiaryTab === tab) this.activeCenterTertiaryTab = null;
-            this.insertDockableTab(EditorSettings.hierarchyTabOrder, tab, targetTab);
+            this.insertDockableTab(EditorSettings.hierarchyTabOrder, tab, this.resolveDockInsertionTarget(host, targetTab));
             if (this.activeInspectorTab === tab) this.activeInspectorTab = 'inspector';
             this.activeHierarchyTab = tab;
             this.setActivePanel('hierarchy-panel');
@@ -2599,7 +2908,7 @@ export class Editor {
             if (this.activeCenterSecondaryTab === tab) this.activeCenterSecondaryTab = null;
             if (this.activeCenterTertiaryTab === tab) this.activeCenterTertiaryTab = null;
             if (this.activeHierarchyTab === tab) this.activeHierarchyTab = 'hierarchy';
-            this.insertDockableTab(EditorSettings.inspectorTabOrder, tab, targetTab);
+            this.insertDockableTab(EditorSettings.inspectorTabOrder, tab, this.resolveDockInsertionTarget(host, targetTab));
             this.activeInspectorTab = tab;
             this.setActivePanel('inspector-panel');
         }
@@ -2609,14 +2918,17 @@ export class Editor {
         this.applyTabOrders();
         this.applyDockedViewHosts();
         this.updateDockedViewState();
-        this.saveLayout();
-        this.resize();
+        if (!options?.deferLayout) {
+            this.saveLayout();
+            this.resize();
+        }
     }
 
     private dockViewToHost(view: DockableEditorView, host: EditorDockHost) {
         if (this.maximizedPanelId) this.restoreMaximizedPanel();
-        this.moveDockableTabToHost(view, host);
-        this.revealDockedView(view);
+        this.moveDockableTabToHost(view, host, undefined, { deferLayout: true });
+        this.revealDockedView(view, false, false);
+        this.finalizeLayoutMutation();
     }
 
     private insertDockableTab<T extends string>(list: T[], tab: T, targetTab?: T) {
@@ -2771,174 +3083,171 @@ export class Editor {
     }
 
     private resetLayout() {
+        const previousLayout = this.captureLayoutState();
         this.maximizedPanelId = null;
-        EditorSettings.hierarchyWidth = 250;
-        EditorSettings.inspectorWidth = 320;
-        EditorSettings.sidePanelWidths = { ...this.defaultSidePanelWidths };
-        EditorSettings.assetsHeight = 200;
-        EditorSettings.hierarchyVisible = true;
-        EditorSettings.inspectorVisible = true;
-        EditorSettings.assetsVisible = true;
-        this.activeBottomTab = 'project';
-        this.activeViewportTab = 'scene';
-        this.activeViewportDockTab = null;
-        this.activeCenterSecondaryTab = null;
-        this.activeCenterTertiaryTab = null;
-        this.activeHierarchyTab = 'hierarchy';
-        this.activeInspectorTab = 'inspector';
-        EditorSettings.viewportDockTabOrder = [...this.defaultViewportDockTabOrder];
-        EditorSettings.centerSecondaryTabOrder = [...this.defaultCenterSecondaryTabOrder];
-        EditorSettings.centerTertiaryTabOrder = [...this.defaultCenterTertiaryTabOrder];
-        EditorSettings.bottomTabOrder = [...this.defaultBottomTabOrder];
-        EditorSettings.viewportTabOrder = [...this.defaultViewportTabOrder];
-        EditorSettings.hierarchyTabOrder = [...this.defaultHierarchyTabOrder];
-        EditorSettings.inspectorTabOrder = [...this.defaultInspectorTabOrder];
-        EditorSettings.viewHosts = { ...this.defaultViewHosts };
-        EditorSettings.dockGraph = this.normalizeDockGraph(undefined);
-        this.floatingDockableHomeHosts = {};
-        EditorSettings.floatingDockableHomeHosts = {};
-        this.prefabApplyTargetRootIds.clear();
-        EditorSettings.prefabApplyTargetRootIds = {};
-        EditorSettings.floatingPanels = {};
-        EditorSettings.sidePanelSlots = { ...this.defaultSidePanelSlots };
-        EditorSettings.centerSecondaryWidth = 320;
-        EditorSettings.centerTertiaryWidth = 280;
-        this.currentLayoutPreset = 'default';
-        this.activePanelId = 'viewport-panel';
+        this.applyLayoutSnapshotSafely({
+            hierarchyWidth: 250,
+            inspectorWidth: 320,
+            sidePanelWidths: { ...this.defaultSidePanelWidths },
+            assetsHeight: 200,
+            hierarchyVisible: true,
+            inspectorVisible: true,
+            assetsVisible: true,
+            activeBottomTab: 'project',
+            activeViewportTab: 'scene',
+            activeViewportDockTab: null,
+            viewportDockTabOrder: [...this.defaultViewportDockTabOrder],
+            activeCenterSecondaryTab: null,
+            centerSecondaryTabOrder: [...this.defaultCenterSecondaryTabOrder],
+            activeCenterTertiaryTab: null,
+            centerTertiaryTabOrder: [...this.defaultCenterTertiaryTabOrder],
+            activeHierarchyTab: 'hierarchy',
+            hierarchyTabOrder: [...this.defaultHierarchyTabOrder],
+            activeInspectorTab: 'inspector',
+            inspectorTabOrder: [...this.defaultInspectorTabOrder],
+            bottomTabOrder: [...this.defaultBottomTabOrder],
+            viewportTabOrder: [...this.defaultViewportTabOrder],
+            viewHosts: { ...this.defaultViewHosts },
+            dockGraph: this.normalizeDockGraph(undefined),
+            floatingDockableHomeHosts: {},
+            floatingPanels: {},
+            sidePanelSlots: { ...this.defaultSidePanelSlots },
+            centerSecondaryWidth: this.defaultCenterSecondaryWidth,
+            centerTertiaryWidth: this.defaultCenterTertiaryWidth,
+            layoutPreset: 'default',
+            activePanelId: 'viewport-panel',
+            prefabApplyTargetRootIds: {}
+        }, {
+            fallbackLayout: previousLayout,
+            fallbackPanelId: this.getResolvedActivePanel(previousLayout.activePanelId),
+            warningLabel: 'Failed to reset layout. Restoring previous layout.'
+        });
         this.activeViewportFocusHost = 'viewport';
-        this.applyStoredLayout();
-        this.resize();
-        this.saveLayout(false);
     }
 
     private applyLayoutPreset(preset: Exclude<EditorLayoutPreset, 'custom'>) {
+        const previousLayout = this.captureLayoutState();
         this.maximizedPanelId = null;
-        this.currentLayoutPreset = preset;
-
-        if (preset === 'default') {
-            EditorSettings.hierarchyWidth = 250;
-            EditorSettings.inspectorWidth = 320;
-            EditorSettings.sidePanelWidths = { ...this.defaultSidePanelWidths };
-            EditorSettings.assetsHeight = 200;
-            EditorSettings.hierarchyVisible = true;
-            EditorSettings.inspectorVisible = true;
-            EditorSettings.assetsVisible = true;
-            this.activeBottomTab = 'project';
-            this.activeViewportTab = 'scene';
-            this.activeViewportDockTab = null;
-            this.activeCenterSecondaryTab = null;
-            this.activeCenterTertiaryTab = null;
-            this.activeHierarchyTab = 'hierarchy';
-            this.activeInspectorTab = 'inspector';
-            EditorSettings.viewportDockTabOrder = [...this.defaultViewportDockTabOrder];
-            EditorSettings.centerSecondaryTabOrder = [...this.defaultCenterSecondaryTabOrder];
-            EditorSettings.centerTertiaryTabOrder = [...this.defaultCenterTertiaryTabOrder];
-            EditorSettings.bottomTabOrder = [...this.defaultBottomTabOrder];
-            EditorSettings.viewportTabOrder = [...this.defaultViewportTabOrder];
-            EditorSettings.hierarchyTabOrder = [...this.defaultHierarchyTabOrder];
-            EditorSettings.inspectorTabOrder = [...this.defaultInspectorTabOrder];
-            EditorSettings.viewHosts = { ...this.defaultViewHosts };
-            EditorSettings.dockGraph = this.normalizeDockGraph(undefined);
-            this.floatingDockableHomeHosts = {};
-            EditorSettings.floatingDockableHomeHosts = {};
-            this.prefabApplyTargetRootIds.clear();
-            EditorSettings.prefabApplyTargetRootIds = {};
-            EditorSettings.floatingPanels = {};
-            EditorSettings.sidePanelSlots = { ...this.defaultSidePanelSlots };
-            EditorSettings.centerSecondaryWidth = 320;
-            EditorSettings.centerTertiaryWidth = 280;
-            this.activePanelId = 'viewport-panel';
-            this.activeViewportFocusHost = 'viewport';
-        }
-
-        if (preset === 'scene') {
-            EditorSettings.hierarchyWidth = 220;
-            EditorSettings.inspectorWidth = 300;
-            EditorSettings.sidePanelWidths = { left: 220, right: 300 };
-            EditorSettings.assetsHeight = 180;
-            EditorSettings.hierarchyVisible = true;
-            EditorSettings.inspectorVisible = false;
-            EditorSettings.assetsVisible = false;
-            this.activeBottomTab = 'project';
-            this.activeViewportTab = 'scene';
-            this.activeViewportDockTab = null;
-            this.activeCenterSecondaryTab = null;
-            this.activeCenterTertiaryTab = null;
-            this.activeHierarchyTab = 'hierarchy';
-            this.activeInspectorTab = 'inspector';
-            EditorSettings.viewportDockTabOrder = [...this.defaultViewportDockTabOrder];
-            EditorSettings.centerSecondaryTabOrder = [...this.defaultCenterSecondaryTabOrder];
-            EditorSettings.centerTertiaryTabOrder = [...this.defaultCenterTertiaryTabOrder];
-            EditorSettings.bottomTabOrder = [...this.defaultBottomTabOrder];
-            EditorSettings.viewportTabOrder = [...this.defaultViewportTabOrder];
-            EditorSettings.hierarchyTabOrder = [...this.defaultHierarchyTabOrder];
-            EditorSettings.inspectorTabOrder = [...this.defaultInspectorTabOrder];
-            EditorSettings.viewHosts = { ...this.defaultViewHosts };
-            EditorSettings.dockGraph = this.normalizeDockGraph(undefined);
-            this.floatingDockableHomeHosts = {};
-            EditorSettings.floatingDockableHomeHosts = {};
-            this.prefabApplyTargetRootIds.clear();
-            EditorSettings.prefabApplyTargetRootIds = {};
-            EditorSettings.floatingPanels = {};
-            EditorSettings.sidePanelSlots = { ...this.defaultSidePanelSlots };
-            EditorSettings.centerSecondaryWidth = 320;
-            EditorSettings.centerTertiaryWidth = 280;
-            this.activePanelId = 'viewport-panel';
-            this.activeViewportFocusHost = 'viewport';
-        }
-
-        if (preset === 'scripting') {
-            EditorSettings.hierarchyWidth = 220;
-            EditorSettings.inspectorWidth = 300;
-            EditorSettings.sidePanelWidths = { left: 220, right: 300 };
-            EditorSettings.assetsHeight = 260;
-            EditorSettings.hierarchyVisible = true;
-            EditorSettings.inspectorVisible = false;
-            EditorSettings.assetsVisible = true;
-            this.activeBottomTab = 'console';
-            this.activeViewportTab = 'scene';
-            this.activeViewportDockTab = null;
-            this.activeCenterSecondaryTab = null;
-            this.activeCenterTertiaryTab = null;
-            this.activeHierarchyTab = 'hierarchy';
-            this.activeInspectorTab = 'inspector';
-            EditorSettings.viewportDockTabOrder = [...this.defaultViewportDockTabOrder];
-            EditorSettings.centerSecondaryTabOrder = [...this.defaultCenterSecondaryTabOrder];
-            EditorSettings.centerTertiaryTabOrder = [...this.defaultCenterTertiaryTabOrder];
-            EditorSettings.bottomTabOrder = ['console', 'project', 'render'];
-            EditorSettings.viewportTabOrder = [...this.defaultViewportTabOrder];
-            EditorSettings.hierarchyTabOrder = [...this.defaultHierarchyTabOrder];
-            EditorSettings.inspectorTabOrder = [...this.defaultInspectorTabOrder];
-            EditorSettings.viewHosts = { ...this.defaultViewHosts };
-            EditorSettings.dockGraph = this.normalizeDockGraph({
-                hosts: {
-                    bottom: ['console', 'project', 'render'],
-                    viewport: [],
-                    'center-secondary': [],
-                    'center-tertiary': [],
-                    hierarchy: [],
-                    inspector: []
-                },
-                activeTabs: {
-                    bottom: 'console'
+        const presetLayout: Partial<EditorLayoutSnapshot> = preset === 'default'
+            ? {
+                hierarchyWidth: 250,
+                inspectorWidth: 320,
+                sidePanelWidths: { ...this.defaultSidePanelWidths },
+                assetsHeight: 200,
+                hierarchyVisible: true,
+                inspectorVisible: true,
+                assetsVisible: true,
+                activeBottomTab: 'project',
+                activeViewportTab: 'scene',
+                activeViewportDockTab: null,
+                viewportDockTabOrder: [...this.defaultViewportDockTabOrder],
+                activeCenterSecondaryTab: null,
+                centerSecondaryTabOrder: [...this.defaultCenterSecondaryTabOrder],
+                activeCenterTertiaryTab: null,
+                centerTertiaryTabOrder: [...this.defaultCenterTertiaryTabOrder],
+                activeHierarchyTab: 'hierarchy',
+                hierarchyTabOrder: [...this.defaultHierarchyTabOrder],
+                activeInspectorTab: 'inspector',
+                inspectorTabOrder: [...this.defaultInspectorTabOrder],
+                bottomTabOrder: [...this.defaultBottomTabOrder],
+                viewportTabOrder: [...this.defaultViewportTabOrder],
+                viewHosts: { ...this.defaultViewHosts },
+                dockGraph: this.normalizeDockGraph(undefined),
+                floatingDockableHomeHosts: {},
+                floatingPanels: {},
+                sidePanelSlots: { ...this.defaultSidePanelSlots },
+                centerSecondaryWidth: this.defaultCenterSecondaryWidth,
+                centerTertiaryWidth: this.defaultCenterTertiaryWidth,
+                layoutPreset: 'default',
+                activePanelId: 'viewport-panel',
+                prefabApplyTargetRootIds: {}
+            }
+            : preset === 'scene'
+                ? {
+                    hierarchyWidth: 220,
+                    inspectorWidth: 300,
+                    sidePanelWidths: { left: 220, right: 300 },
+                    assetsHeight: 180,
+                    hierarchyVisible: true,
+                    inspectorVisible: false,
+                    assetsVisible: false,
+                    activeBottomTab: 'project',
+                    activeViewportTab: 'scene',
+                    activeViewportDockTab: null,
+                    viewportDockTabOrder: [...this.defaultViewportDockTabOrder],
+                    activeCenterSecondaryTab: null,
+                    centerSecondaryTabOrder: [...this.defaultCenterSecondaryTabOrder],
+                    activeCenterTertiaryTab: null,
+                    centerTertiaryTabOrder: [...this.defaultCenterTertiaryTabOrder],
+                    activeHierarchyTab: 'hierarchy',
+                    hierarchyTabOrder: [...this.defaultHierarchyTabOrder],
+                    activeInspectorTab: 'inspector',
+                    inspectorTabOrder: [...this.defaultInspectorTabOrder],
+                    bottomTabOrder: [...this.defaultBottomTabOrder],
+                    viewportTabOrder: [...this.defaultViewportTabOrder],
+                    viewHosts: { ...this.defaultViewHosts },
+                    dockGraph: this.normalizeDockGraph(undefined),
+                    floatingDockableHomeHosts: {},
+                    floatingPanels: {},
+                    sidePanelSlots: { ...this.defaultSidePanelSlots },
+                    centerSecondaryWidth: this.defaultCenterSecondaryWidth,
+                    centerTertiaryWidth: this.defaultCenterTertiaryWidth,
+                    layoutPreset: 'scene',
+                    activePanelId: 'viewport-panel',
+                    prefabApplyTargetRootIds: {}
                 }
-            });
-            this.floatingDockableHomeHosts = {};
-            EditorSettings.floatingDockableHomeHosts = {};
-            this.prefabApplyTargetRootIds.clear();
-            EditorSettings.prefabApplyTargetRootIds = {};
-            EditorSettings.floatingPanels = {};
-            EditorSettings.sidePanelSlots = { ...this.defaultSidePanelSlots };
-            EditorSettings.centerSecondaryWidth = 320;
-            EditorSettings.centerTertiaryWidth = 280;
-            this.activePanelId = 'assets-panel';
-            this.activeViewportFocusHost = 'viewport';
-        }
+                : {
+                    hierarchyWidth: 220,
+                    inspectorWidth: 300,
+                    sidePanelWidths: { left: 220, right: 300 },
+                    assetsHeight: 260,
+                    hierarchyVisible: true,
+                    inspectorVisible: false,
+                    assetsVisible: true,
+                    activeBottomTab: 'console',
+                    activeViewportTab: 'scene',
+                    activeViewportDockTab: null,
+                    viewportDockTabOrder: [...this.defaultViewportDockTabOrder],
+                    activeCenterSecondaryTab: null,
+                    centerSecondaryTabOrder: [...this.defaultCenterSecondaryTabOrder],
+                    activeCenterTertiaryTab: null,
+                    centerTertiaryTabOrder: [...this.defaultCenterTertiaryTabOrder],
+                    activeHierarchyTab: 'hierarchy',
+                    hierarchyTabOrder: [...this.defaultHierarchyTabOrder],
+                    activeInspectorTab: 'inspector',
+                    inspectorTabOrder: [...this.defaultInspectorTabOrder],
+                    bottomTabOrder: ['console', 'project', 'render'],
+                    viewportTabOrder: [...this.defaultViewportTabOrder],
+                    viewHosts: { ...this.defaultViewHosts },
+                    dockGraph: this.normalizeDockGraph({
+                        hosts: {
+                            bottom: ['console', 'project', 'render'],
+                            viewport: [],
+                            'center-secondary': [],
+                            'center-tertiary': [],
+                            hierarchy: [],
+                            inspector: []
+                        },
+                        activeTabs: {
+                            bottom: 'console'
+                        }
+                    }),
+                    floatingDockableHomeHosts: {},
+                    floatingPanels: {},
+                    sidePanelSlots: { ...this.defaultSidePanelSlots },
+                    centerSecondaryWidth: this.defaultCenterSecondaryWidth,
+                    centerTertiaryWidth: this.defaultCenterTertiaryWidth,
+                    layoutPreset: 'scripting',
+                    activePanelId: 'assets-panel',
+                    prefabApplyTargetRootIds: {}
+                };
 
-        this.applyStoredLayout();
-        this.setActivePanel(this.getResolvedActivePanel(this.activePanelId));
-        this.resize();
-        this.saveLayout(false);
+        this.applyLayoutSnapshotSafely(presetLayout, {
+            fallbackLayout: previousLayout,
+            fallbackPanelId: this.getResolvedActivePanel(previousLayout.activePanelId),
+            warningLabel: `Failed to apply ${preset} layout preset. Restoring previous layout.`
+        });
+        this.activeViewportFocusHost = 'viewport';
     }
 
     private saveLayoutSlot(slot: EditorLayoutSlotId) {
@@ -2951,17 +3260,48 @@ export class Editor {
         const layout = EditorSettings.savedLayouts[slot];
         if (!layout) return;
 
+        const previousLayout = this.captureLayoutState();
         this.maximizedPanelId = null;
-        this.applyLayoutState(layout);
-        this.setActivePanel(this.getResolvedActivePanel(layout.activePanelId));
-        this.resize();
-        this.saveLayout(false);
+        try {
+            this.applyLayoutState(layout);
+            this.setActivePanel(this.getResolvedActivePanel(layout.activePanelId));
+            this.resize();
+            this.saveLayout(false);
+        } catch (error) {
+            console.warn(`Failed to load layout slot ${slot}. Restoring previous layout.`, error);
+            this.applyLayoutState(previousLayout);
+            this.setActivePanel(this.getResolvedActivePanel(previousLayout.activePanelId));
+            this.resize();
+            this.saveLayout(false);
+        }
     }
 
     private syncWindowMenuState() {
         const setCheck = (id: string, checked: boolean) => {
             const el = document.getElementById(id);
-            if (el) el.textContent = checked ? 'x' : '';
+            if (el) {
+                el.textContent = checked ? 'x' : '';
+                const menuItem = el.closest('.dropdown-item') as HTMLElement | null;
+                if (menuItem) {
+                    menuItem.setAttribute('aria-checked', checked ? 'true' : 'false');
+                }
+            }
+        };
+        const setMenuItemContent = (id: string, label: string, shortcut?: string) => {
+            const el = document.getElementById(id);
+            if (!el) return;
+            const labelSpan = el.querySelector('.menu-label') as HTMLElement | null;
+            if (labelSpan) {
+                labelSpan.textContent = label;
+            } else {
+                el.textContent = label;
+            }
+
+            const shortcutSpan = el.querySelector('.shortcut') as HTMLElement | null;
+            if (shortcutSpan) {
+                shortcutSpan.textContent = shortcut ?? '';
+                shortcutSpan.style.display = shortcut ? 'inline-block' : 'none';
+            }
         };
         const setMenuDisabled = (id: string, disabled: boolean) => {
             const el = document.getElementById(id);
@@ -3020,47 +3360,34 @@ export class Editor {
         setMenuDisabled('menu-create-empty-child', !hasSelection);
         setMenuDisabled('menu-create-empty-parent', !hasSelection);
 
-        const maximizeMenu = document.getElementById('menu-maximize-active');
-        if (maximizeMenu) {
-            maximizeMenu.innerHTML = `${this.maximizedPanelId ? 'Restore Active Panel' : 'Maximize Active Panel'} <span class="shortcut">Shift+Space</span>`;
+        setMenuItemContent('menu-maximize-active', this.maximizedPanelId ? 'Restore Active Panel' : 'Maximize Active Panel', 'Shift+Space');
+
+        if (this.activePanelId === 'viewport-panel') {
+            setMenuItemContent('menu-float-active', 'Float Active Panel (Viewport Locked)');
+        } else {
+            setMenuItemContent(
+                'menu-float-active',
+                this.isPanelFloating(this.activePanelId as Exclude<EditorPanelId, 'viewport-panel'>) ? 'Restore Docked Panel' : 'Float Active Panel'
+            );
         }
 
-        const floatMenu = document.getElementById('menu-float-active');
-        if (floatMenu) {
-            if (this.activePanelId === 'viewport-panel') {
-                floatMenu.textContent = 'Float Active Panel (Viewport Locked)';
-            } else {
-                floatMenu.textContent = this.isPanelFloating(this.activePanelId as Exclude<EditorPanelId, 'viewport-panel'>) ? 'Restore Docked Panel' : 'Float Active Panel';
-            }
-        }
+        const activeView = this.getActiveDockableView();
+        setMenuItemContent('menu-float-active-view', activeView ? `Float ${this.getDockableViewLabel(activeView)}` : 'Float Active View (None)');
 
-        const floatViewMenu = document.getElementById('menu-float-active-view');
-        if (floatViewMenu) {
-            const activeView = this.getActiveDockableView();
-            floatViewMenu.textContent = activeView ? `Float ${this.getDockableViewLabel(activeView)}` : 'Float Active View (None)';
-        }
+        const restorableActiveView = this.getRestorableActiveDockableView();
+        setMenuItemContent(
+            'menu-restore-active-view',
+            restorableActiveView ? `Restore ${this.getDockableViewLabel(restorableActiveView)}` : 'Restore Active View (None)'
+        );
 
-        const restoreActiveViewMenu = document.getElementById('menu-restore-active-view');
-        if (restoreActiveViewMenu) {
-            const restorableActiveView = this.getRestorableActiveDockableView();
-            restoreActiveViewMenu.textContent = restorableActiveView
-                ? `Restore ${this.getDockableViewLabel(restorableActiveView)}`
-                : 'Restore Active View (None)';
-        }
+        const detachedViewCount = this.getDetachedViewCount();
+        setMenuItemContent(
+            'menu-restore-detached-views',
+            detachedViewCount > 0 ? `Restore Detached Views (${detachedViewCount})` : 'Restore Detached Views (None)'
+        );
 
-        const restoreDetachedViewsMenu = document.getElementById('menu-restore-detached-views');
-        if (restoreDetachedViewsMenu) {
-            const detachedViewCount = this.getDetachedViewCount();
-            restoreDetachedViewsMenu.textContent = detachedViewCount > 0
-                ? `Restore Detached Views (${detachedViewCount})`
-                : 'Restore Detached Views (None)';
-        }
-
-        const dockAllMenu = document.getElementById('menu-dock-all-floating');
-        if (dockAllMenu) {
-            const hasFloatingPanels = this.floatablePanels.some((panelId) => this.isPanelFloating(panelId));
-            dockAllMenu.textContent = hasFloatingPanels ? 'Dock All Floating Panels' : 'Dock All Floating Panels (None)';
-        }
+        const hasFloatingPanels = this.floatablePanels.some((panelId) => this.isPanelFloating(panelId));
+        setMenuItemContent('menu-dock-all-floating', hasFloatingPanels ? 'Dock All Floating Panels' : 'Dock All Floating Panels (None)');
     }
 
     private isDockedViewVisible(view: DockableEditorView): boolean {
@@ -3144,6 +3471,7 @@ export class Editor {
             }
             this.bringFloatingPanelToFront(panelId);
         }
+        this.updateFloatingPanelActiveState();
     }
 
     private toggleMaximizePanel(panelId: EditorPanelId = this.activePanelId) {
@@ -3327,8 +3655,6 @@ export class Editor {
             const tabEl = document.getElementById(tabId) as HTMLElement | null;
             if (!tabEl) return;
             tabEl.classList.toggle('active-tab', active);
-            tabEl.style.fontWeight = active ? 'bold' : 'normal';
-            tabEl.style.color = active ? '#fff' : '#888';
         });
 
         dockableTabs.forEach((tab) => {
@@ -3377,7 +3703,7 @@ export class Editor {
         this.updateViewportHostState();
     }
 
-    private revealDockedView(view: DockableEditorView, save: boolean = true) {
+    private revealDockedView(view: DockableEditorView, save: boolean = true, resize: boolean = true) {
         if (this.maximizedPanelId) this.restoreMaximizedPanel();
 
         const host = this.getViewHost(view);
@@ -3391,7 +3717,11 @@ export class Editor {
             this.setCenterSecondaryTab(view, save);
         } else if (host === 'center-tertiary') {
             if (!this.isCenterSecondaryVisible()) {
-                this.moveDockableTabToHost(view, 'center-secondary');
+                this.moveDockableTabToHost(view, 'center-secondary', undefined, { deferLayout: !save && !resize });
+                if (!save && !resize) {
+                    this.revealDockedView(view, save, resize);
+                    return;
+                }
                 return;
             }
             this.activeCenterTertiaryTab = view;
@@ -3413,7 +3743,7 @@ export class Editor {
             this.setActivePanel('inspector-panel');
             this.setInspectorTab(view, save);
         }
-        this.resize();
+        if (resize) this.resize();
     }
 
     private toggleDockedView(view: DockableEditorView) {
@@ -3471,95 +3801,174 @@ export class Editor {
         this.saveLayout();
     }
 
+    private initializeMenuPresentation() {
+        const menuBar = document.getElementById('menu-bar');
+        menuBar?.setAttribute('role', 'menubar');
+
+        const dropdownItems = Array.from(document.querySelectorAll('.dropdown-item')) as HTMLElement[];
+        dropdownItems.forEach((item) => {
+            const existingLabel = item.querySelector('.menu-label');
+            if (!existingLabel) {
+                const shortcut = item.querySelector('.shortcut');
+                const check = item.querySelector('.menu-check');
+                const textNodes = Array.from(item.childNodes).filter((node) => node.nodeType === Node.TEXT_NODE && node.textContent?.trim());
+                const labelText = textNodes.map((node) => node.textContent?.trim() ?? '').join(' ').trim();
+                textNodes.forEach((node) => item.removeChild(node));
+
+                if (labelText.length > 0) {
+                    const labelSpan = document.createElement('span');
+                    labelSpan.className = 'menu-label';
+                    labelSpan.textContent = labelText;
+                    item.insertBefore(labelSpan, shortcut ?? check ?? item.firstChild);
+                }
+            }
+
+            const hasSubmenu = item.classList.contains('submenu');
+            const hasCheck = !!item.querySelector('.menu-check');
+            item.setAttribute('role', hasCheck ? 'menuitemcheckbox' : 'menuitem');
+            item.setAttribute('tabindex', '-1');
+            item.setAttribute('aria-disabled', item.classList.contains('disabled') ? 'true' : 'false');
+            if (!item.title) {
+                const label = (item.querySelector('.menu-label') as HTMLElement | null)?.textContent?.trim() ?? item.textContent?.trim() ?? '';
+                const shortcut = (item.querySelector('.shortcut') as HTMLElement | null)?.textContent?.trim() ?? '';
+                item.title = shortcut ? `${label} (${shortcut})` : label;
+            }
+            if (hasSubmenu) {
+                item.setAttribute('aria-haspopup', 'true');
+                item.setAttribute('aria-expanded', 'false');
+            }
+        });
+
+        const menuItems = Array.from(document.querySelectorAll('.menu-item')) as HTMLElement[];
+        menuItems.forEach((item) => {
+            item.setAttribute('role', 'menuitem');
+            item.setAttribute('aria-haspopup', 'true');
+            item.setAttribute('aria-expanded', 'false');
+            if (!item.title) {
+                const label = item.childNodes[0]?.textContent?.trim() ?? 'Menu';
+                item.title = `${label} Menu`;
+            }
+            const dropdown = item.querySelector(':scope > .dropdown-content') as HTMLElement | null;
+            dropdown?.setAttribute('role', 'menu');
+        });
+
+        const separators = Array.from(document.querySelectorAll('.dropdown-content hr')) as HTMLHRElement[];
+        separators.forEach((separator) => separator.setAttribute('role', 'separator'));
+    }
+
     private initializeMenuEvents() {
+        const bindMenuAction = (id: string, handler: () => void) => {
+            document.getElementById(id)?.addEventListener('click', (event) => {
+                const target = event.currentTarget as HTMLElement | null;
+                if (target?.classList.contains('disabled') || target?.getAttribute('aria-disabled') === 'true') {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    return;
+                }
+                handler();
+            });
+        };
+
+        const menuItems = Array.from(document.querySelectorAll('.menu-item')) as HTMLElement[];
+        menuItems.forEach((item) => {
+            item.addEventListener('mouseenter', () => item.setAttribute('aria-expanded', 'true'));
+            item.addEventListener('mouseleave', () => item.setAttribute('aria-expanded', 'false'));
+        });
+
+        const submenuItems = Array.from(document.querySelectorAll('.dropdown-item.submenu')) as HTMLElement[];
+        submenuItems.forEach((item) => {
+            item.addEventListener('mouseenter', () => item.setAttribute('aria-expanded', 'true'));
+            item.addEventListener('mouseleave', () => item.setAttribute('aria-expanded', 'false'));
+        });
+
         // File Menu
-        document.getElementById('menu-new-scene')?.addEventListener('click', () => this.newScene());
-        document.getElementById('menu-open-scene')?.addEventListener('click', () => this.showOpenSceneDialog());
-        document.getElementById('menu-save-scene')?.addEventListener('click', () => this.saveActiveScene());
-        document.getElementById('menu-save-scene-as')?.addEventListener('click', () => this.showSaveSceneAsDialog());
-        document.getElementById('menu-exit')?.addEventListener('click', () => this.electronAPI?.exitApp?.());
+        bindMenuAction('menu-new-scene', () => this.newScene());
+        bindMenuAction('menu-open-scene', () => this.showOpenSceneDialog());
+        bindMenuAction('menu-save-scene', () => this.saveActiveScene());
+        bindMenuAction('menu-save-scene-as', () => this.showSaveSceneAsDialog());
+        bindMenuAction('menu-exit', () => this.electronAPI?.exitApp?.());
 
         // Edit Menu
-        document.getElementById('menu-undo')?.addEventListener('click', () => { CommandHistory.undo(); this.hierarchyWindow.refresh(); this.inspectorWindow.refresh(); });
-        document.getElementById('menu-redo')?.addEventListener('click', () => { CommandHistory.redo(); this.hierarchyWindow.refresh(); this.inspectorWindow.refresh(); });
-        document.getElementById('menu-copy')?.addEventListener('click', () => this.copySelected());
-        document.getElementById('menu-cut')?.addEventListener('click', () => this.cutSelected());
-        document.getElementById('menu-paste')?.addEventListener('click', () => this.pasteSelected());
-        document.getElementById('menu-paste-as-child')?.addEventListener('click', () => this.pasteAsChildOfSelection());
-        document.getElementById('menu-duplicate')?.addEventListener('click', () => this.duplicateSelected());
-        document.getElementById('menu-delete')?.addEventListener('click', () => this.deleteSelected());
+        bindMenuAction('menu-undo', () => { CommandHistory.undo(); this.hierarchyWindow.refresh(); this.inspectorWindow.refresh(); });
+        bindMenuAction('menu-redo', () => { CommandHistory.redo(); this.hierarchyWindow.refresh(); this.inspectorWindow.refresh(); });
+        bindMenuAction('menu-copy', () => this.copySelected());
+        bindMenuAction('menu-cut', () => this.cutSelected());
+        bindMenuAction('menu-paste', () => this.pasteSelected());
+        bindMenuAction('menu-paste-as-child', () => this.pasteAsChildOfSelection());
+        bindMenuAction('menu-duplicate', () => this.duplicateSelected());
+        bindMenuAction('menu-delete', () => this.deleteSelected());
 
         // GameObject Menu
-        document.getElementById('menu-create-empty')?.addEventListener('click', () => this.createEmptyGameObject());
-        document.getElementById('menu-create-empty-child')?.addEventListener('click', () => this.createEmptyChildForSelection());
-        document.getElementById('menu-create-empty-parent')?.addEventListener('click', () => this.createEmptyParentForSelection());
-        document.getElementById('create-cube')?.addEventListener('click', () => this.createPrimitive('Cube'));
-        document.getElementById('create-sphere')?.addEventListener('click', () => this.createPrimitive('Sphere'));
-        document.getElementById('create-capsule')?.addEventListener('click', () => this.createPrimitive('Capsule'));
-        document.getElementById('create-cylinder')?.addEventListener('click', () => this.createPrimitive('Cylinder'));
-        document.getElementById('create-plane')?.addEventListener('click', () => this.createPrimitive('Plane'));
-        document.getElementById('create-quad')?.addEventListener('click', () => this.createPrimitive('Quad'));
-        document.getElementById('create-camera')?.addEventListener('click', () => this.createPrimitive('Camera'));
-        document.getElementById('create-directional-light')?.addEventListener('click', () => this.createDirectionalLight());
-        document.getElementById('create-point-light')?.addEventListener('click', () => this.createPointLight());
-        document.getElementById('create-spot-light')?.addEventListener('click', () => this.createSpotLight());
-        document.getElementById('create-audio-source')?.addEventListener('click', () => this.createAudioSourceObject());
-        document.getElementById('create-ui-canvas')?.addEventListener('click', () => this.createUICanvas());
-        document.getElementById('create-ui-image')?.addEventListener('click', () => this.createUIElement('Image'));
-        document.getElementById('create-ui-text')?.addEventListener('click', () => this.createUIElement('Text'));
-        document.getElementById('create-ui-button')?.addEventListener('click', () => this.createUIElement('Button'));
-        document.getElementById('create-ui-input-field')?.addEventListener('click', () => this.createUIElement('InputField'));
-        document.getElementById('create-ui-dropdown')?.addEventListener('click', () => this.createUIElement('Dropdown'));
-        document.getElementById('create-ui-toggle')?.addEventListener('click', () => this.createUIElement('Toggle'));
-        document.getElementById('create-ui-slider')?.addEventListener('click', () => this.createUIElement('Slider'));
-        document.getElementById('create-ui-scrollbar')?.addEventListener('click', () => this.createUIElement('Scrollbar'));
-        document.getElementById('create-ui-scroll-view')?.addEventListener('click', () => this.createUIElement('ScrollView'));
+        bindMenuAction('menu-create-empty', () => this.createEmptyGameObject());
+        bindMenuAction('menu-create-empty-child', () => this.createEmptyChildForSelection());
+        bindMenuAction('menu-create-empty-parent', () => this.createEmptyParentForSelection());
+        bindMenuAction('create-cube', () => this.createPrimitive('Cube'));
+        bindMenuAction('create-sphere', () => this.createPrimitive('Sphere'));
+        bindMenuAction('create-capsule', () => this.createPrimitive('Capsule'));
+        bindMenuAction('create-cylinder', () => this.createPrimitive('Cylinder'));
+        bindMenuAction('create-plane', () => this.createPrimitive('Plane'));
+        bindMenuAction('create-quad', () => this.createPrimitive('Quad'));
+        bindMenuAction('create-camera', () => this.createPrimitive('Camera'));
+        bindMenuAction('create-directional-light', () => this.createDirectionalLight());
+        bindMenuAction('create-point-light', () => this.createPointLight());
+        bindMenuAction('create-spot-light', () => this.createSpotLight());
+        bindMenuAction('create-audio-source', () => this.createAudioSourceObject());
+        bindMenuAction('create-ui-canvas', () => this.createUICanvas());
+        bindMenuAction('create-ui-image', () => this.createUIElement('Image'));
+        bindMenuAction('create-ui-text', () => this.createUIElement('Text'));
+        bindMenuAction('create-ui-button', () => this.createUIElement('Button'));
+        bindMenuAction('create-ui-input-field', () => this.createUIElement('InputField'));
+        bindMenuAction('create-ui-dropdown', () => this.createUIElement('Dropdown'));
+        bindMenuAction('create-ui-toggle', () => this.createUIElement('Toggle'));
+        bindMenuAction('create-ui-slider', () => this.createUIElement('Slider'));
+        bindMenuAction('create-ui-scrollbar', () => this.createUIElement('Scrollbar'));
+        bindMenuAction('create-ui-scroll-view', () => this.createUIElement('ScrollView'));
 
         // Window Menu
-        document.getElementById('toggle-hierarchy')?.addEventListener('click', () => this.togglePanel('hierarchy-panel'));
-        document.getElementById('toggle-inspector')?.addEventListener('click', () => this.togglePanel('inspector-panel'));
-        document.getElementById('toggle-project')?.addEventListener('click', () => this.toggleDockedView('project'));
-        document.getElementById('toggle-console')?.addEventListener('click', () => this.toggleDockedView('console'));
-        document.getElementById('toggle-render')?.addEventListener('click', () => this.toggleDockedView('render'));
-        document.getElementById('menu-maximize-active')?.addEventListener('click', () => this.toggleMaximizePanel());
-        document.getElementById('menu-float-active')?.addEventListener('click', () => this.toggleFloatingPanel());
-        document.getElementById('menu-float-active-view')?.addEventListener('click', () => this.floatActiveDockableView());
-        document.getElementById('menu-restore-active-view')?.addEventListener('click', () => this.restoreActiveDetachedView());
-        document.getElementById('menu-restore-detached-views')?.addEventListener('click', () => this.restoreDetachedViews());
-        document.getElementById('menu-dock-all-floating')?.addEventListener('click', () => this.dockAllFloatingPanels());
-        document.getElementById('menu-next-tab')?.addEventListener('click', () => this.cycleActivePanelTabs(1));
-        document.getElementById('menu-previous-tab')?.addEventListener('click', () => this.cycleActivePanelTabs(-1));
-        document.getElementById('menu-reset-layout')?.addEventListener('click', () => this.resetLayout());
-        document.getElementById('menu-preset-default')?.addEventListener('click', () => this.applyLayoutPreset('default'));
-        document.getElementById('menu-preset-scene')?.addEventListener('click', () => this.applyLayoutPreset('scene'));
-        document.getElementById('menu-preset-scripting')?.addEventListener('click', () => this.applyLayoutPreset('scripting'));
-        document.getElementById('menu-save-layout-slot-1')?.addEventListener('click', () => this.saveLayoutSlot('slot1'));
-        document.getElementById('menu-load-layout-slot-1')?.addEventListener('click', () => this.loadLayoutSlot('slot1'));
-        document.getElementById('menu-save-layout-slot-2')?.addEventListener('click', () => this.saveLayoutSlot('slot2'));
-        document.getElementById('menu-load-layout-slot-2')?.addEventListener('click', () => this.loadLayoutSlot('slot2'));
-        document.getElementById('menu-dock-project-bottom')?.addEventListener('click', () => this.dockViewToHost('project', 'bottom'));
-        document.getElementById('menu-dock-project-viewport')?.addEventListener('click', () => this.dockViewToHost('project', 'viewport'));
-        document.getElementById('menu-dock-project-center-secondary')?.addEventListener('click', () => this.dockViewToHost('project', 'center-secondary'));
-        document.getElementById('menu-dock-project-center-tertiary')?.addEventListener('click', () => this.dockViewToHost('project', 'center-tertiary'));
-        document.getElementById('menu-dock-project-hierarchy')?.addEventListener('click', () => this.dockViewToHost('project', 'hierarchy'));
-        document.getElementById('menu-dock-project-inspector')?.addEventListener('click', () => this.dockViewToHost('project', 'inspector'));
-        document.getElementById('menu-dock-console-bottom')?.addEventListener('click', () => this.dockViewToHost('console', 'bottom'));
-        document.getElementById('menu-dock-console-viewport')?.addEventListener('click', () => this.dockViewToHost('console', 'viewport'));
-        document.getElementById('menu-dock-console-center-secondary')?.addEventListener('click', () => this.dockViewToHost('console', 'center-secondary'));
-        document.getElementById('menu-dock-console-center-tertiary')?.addEventListener('click', () => this.dockViewToHost('console', 'center-tertiary'));
-        document.getElementById('menu-dock-console-hierarchy')?.addEventListener('click', () => this.dockViewToHost('console', 'hierarchy'));
-        document.getElementById('menu-dock-console-inspector')?.addEventListener('click', () => this.dockViewToHost('console', 'inspector'));
-        document.getElementById('menu-dock-render-bottom')?.addEventListener('click', () => this.dockViewToHost('render', 'bottom'));
-        document.getElementById('menu-dock-render-viewport')?.addEventListener('click', () => this.dockViewToHost('render', 'viewport'));
-        document.getElementById('menu-dock-render-center-secondary')?.addEventListener('click', () => this.dockViewToHost('render', 'center-secondary'));
-        document.getElementById('menu-dock-render-center-tertiary')?.addEventListener('click', () => this.dockViewToHost('render', 'center-tertiary'));
-        document.getElementById('menu-dock-render-hierarchy')?.addEventListener('click', () => this.dockViewToHost('render', 'hierarchy'));
-        document.getElementById('menu-dock-render-inspector')?.addEventListener('click', () => this.dockViewToHost('render', 'inspector'));
-        document.getElementById('menu-hierarchy-left')?.addEventListener('click', () => this.setSidePanelSlot('hierarchy-panel', 'left'));
-        document.getElementById('menu-hierarchy-right')?.addEventListener('click', () => this.setSidePanelSlot('hierarchy-panel', 'right'));
-        document.getElementById('menu-inspector-left')?.addEventListener('click', () => this.setSidePanelSlot('inspector-panel', 'left'));
-        document.getElementById('menu-inspector-right')?.addEventListener('click', () => this.setSidePanelSlot('inspector-panel', 'right'));
-        document.getElementById('menu-swap-side-panels')?.addEventListener('click', () => this.swapSidePanels());
+        bindMenuAction('toggle-hierarchy', () => this.togglePanel('hierarchy-panel'));
+        bindMenuAction('toggle-inspector', () => this.togglePanel('inspector-panel'));
+        bindMenuAction('toggle-project', () => this.toggleDockedView('project'));
+        bindMenuAction('toggle-console', () => this.toggleDockedView('console'));
+        bindMenuAction('toggle-render', () => this.toggleDockedView('render'));
+        bindMenuAction('menu-maximize-active', () => this.toggleMaximizePanel());
+        bindMenuAction('menu-float-active', () => this.toggleFloatingPanel());
+        bindMenuAction('menu-float-active-view', () => this.floatActiveDockableView());
+        bindMenuAction('menu-restore-active-view', () => this.restoreActiveDetachedView());
+        bindMenuAction('menu-restore-detached-views', () => this.restoreDetachedViews());
+        bindMenuAction('menu-dock-all-floating', () => this.dockAllFloatingPanels());
+        bindMenuAction('menu-next-tab', () => this.cycleActivePanelTabs(1));
+        bindMenuAction('menu-previous-tab', () => this.cycleActivePanelTabs(-1));
+        bindMenuAction('menu-reset-layout', () => this.resetLayout());
+        bindMenuAction('menu-preset-default', () => this.applyLayoutPreset('default'));
+        bindMenuAction('menu-preset-scene', () => this.applyLayoutPreset('scene'));
+        bindMenuAction('menu-preset-scripting', () => this.applyLayoutPreset('scripting'));
+        bindMenuAction('menu-save-layout-slot-1', () => this.saveLayoutSlot('slot1'));
+        bindMenuAction('menu-load-layout-slot-1', () => this.loadLayoutSlot('slot1'));
+        bindMenuAction('menu-save-layout-slot-2', () => this.saveLayoutSlot('slot2'));
+        bindMenuAction('menu-load-layout-slot-2', () => this.loadLayoutSlot('slot2'));
+        bindMenuAction('menu-dock-project-bottom', () => this.dockViewToHost('project', 'bottom'));
+        bindMenuAction('menu-dock-project-viewport', () => this.dockViewToHost('project', 'viewport'));
+        bindMenuAction('menu-dock-project-center-secondary', () => this.dockViewToHost('project', 'center-secondary'));
+        bindMenuAction('menu-dock-project-center-tertiary', () => this.dockViewToHost('project', 'center-tertiary'));
+        bindMenuAction('menu-dock-project-hierarchy', () => this.dockViewToHost('project', 'hierarchy'));
+        bindMenuAction('menu-dock-project-inspector', () => this.dockViewToHost('project', 'inspector'));
+        bindMenuAction('menu-dock-console-bottom', () => this.dockViewToHost('console', 'bottom'));
+        bindMenuAction('menu-dock-console-viewport', () => this.dockViewToHost('console', 'viewport'));
+        bindMenuAction('menu-dock-console-center-secondary', () => this.dockViewToHost('console', 'center-secondary'));
+        bindMenuAction('menu-dock-console-center-tertiary', () => this.dockViewToHost('console', 'center-tertiary'));
+        bindMenuAction('menu-dock-console-hierarchy', () => this.dockViewToHost('console', 'hierarchy'));
+        bindMenuAction('menu-dock-console-inspector', () => this.dockViewToHost('console', 'inspector'));
+        bindMenuAction('menu-dock-render-bottom', () => this.dockViewToHost('render', 'bottom'));
+        bindMenuAction('menu-dock-render-viewport', () => this.dockViewToHost('render', 'viewport'));
+        bindMenuAction('menu-dock-render-center-secondary', () => this.dockViewToHost('render', 'center-secondary'));
+        bindMenuAction('menu-dock-render-center-tertiary', () => this.dockViewToHost('render', 'center-tertiary'));
+        bindMenuAction('menu-dock-render-hierarchy', () => this.dockViewToHost('render', 'hierarchy'));
+        bindMenuAction('menu-dock-render-inspector', () => this.dockViewToHost('render', 'inspector'));
+        bindMenuAction('menu-hierarchy-left', () => this.setSidePanelSlot('hierarchy-panel', 'left'));
+        bindMenuAction('menu-hierarchy-right', () => this.setSidePanelSlot('hierarchy-panel', 'right'));
+        bindMenuAction('menu-inspector-left', () => this.setSidePanelSlot('inspector-panel', 'left'));
+        bindMenuAction('menu-inspector-right', () => this.setSidePanelSlot('inspector-panel', 'right'));
+        bindMenuAction('menu-swap-side-panels', () => this.swapSidePanels());
     }
 
     private setSidePanelSlot(
@@ -4542,44 +4951,7 @@ export class Editor {
             event.preventDefault();
             event.stopPropagation();
             this.dockableTabDropHandled = true;
-            const targetHost = this.getViewHost(tab);
-            if (targetHost === 'viewport') {
-                if (this.getViewHost(this.draggedDockableTab) === 'viewport') {
-                    this.reorderViewportDockTabs(this.draggedDockableTab, tab);
-                } else {
-                    this.moveDockableTabToHost(this.draggedDockableTab, 'viewport', tab);
-                }
-            } else if (targetHost === 'center-secondary') {
-                if (this.getViewHost(this.draggedDockableTab) === 'center-secondary') {
-                    this.reorderCenterSecondaryTabs(this.draggedDockableTab, tab);
-                } else {
-                    this.moveDockableTabToHost(this.draggedDockableTab, 'center-secondary', tab);
-                }
-            } else if (targetHost === 'center-tertiary') {
-                if (this.getViewHost(this.draggedDockableTab) === 'center-tertiary') {
-                    this.reorderCenterTertiaryTabs(this.draggedDockableTab, tab);
-                } else {
-                    this.moveDockableTabToHost(this.draggedDockableTab, 'center-tertiary', tab);
-                }
-            } else if (targetHost === 'bottom') {
-                if (this.getViewHost(this.draggedDockableTab) === 'bottom') {
-                    this.reorderBottomTabs(this.draggedDockableTab, tab);
-                } else {
-                    this.moveDockableTabToHost(this.draggedDockableTab, 'bottom', tab);
-                }
-            } else if (targetHost === 'hierarchy') {
-                if (this.getViewHost(this.draggedDockableTab) === 'hierarchy') {
-                    this.reorderHierarchyTabs(this.draggedDockableTab, tab);
-                } else {
-                    this.moveDockableTabToHost(this.draggedDockableTab, 'hierarchy', tab);
-                }
-            } else {
-                if (this.getViewHost(this.draggedDockableTab) === 'inspector') {
-                    this.reorderInspectorTabs(this.draggedDockableTab, tab);
-                } else {
-                    this.moveDockableTabToHost(this.draggedDockableTab, 'inspector', tab);
-                }
-            }
+            this.dropDockableTabOntoHost(this.getViewHost(tab), tab);
             element.classList.remove('drop-target');
         });
         element.addEventListener('dragend', (event) => this.handleDockableTabDragEnd(event));
@@ -4614,7 +4986,7 @@ export class Editor {
             event.preventDefault();
             event.stopPropagation();
             this.dockableTabDropHandled = true;
-            this.moveDockableTabToHost(this.draggedDockableTab, host, fixedTab);
+            this.dropDockableTabOntoHost(host, fixedTab);
             staticTab.classList.remove('drop-target');
             this.resetDockHostHighlight(host);
         });
@@ -4689,7 +5061,7 @@ export class Editor {
                 event.preventDefault();
                 event.stopPropagation();
                 this.dockableTabDropHandled = true;
-                this.moveDockableTabToHost(this.draggedDockableTab, host);
+                this.dropDockableTabOntoHost(host);
                 this.resetDockHostHighlight(host);
             });
         });
@@ -4729,11 +5101,25 @@ export class Editor {
                 : host === 'bottom'
                     ? 'bottom-panel-header'
                     : host === 'hierarchy'
-                        ? 'hierarchy-panel-header'
+                    ? 'hierarchy-panel-header'
                         : 'inspector-panel-header'
+        );
+        const tabStrip = document.getElementById(
+            host === 'viewport'
+                ? 'viewport-dock-tabs'
+                : host === 'center-secondary'
+                    ? 'center-secondary-tabs'
+                : host === 'center-tertiary'
+                    ? 'center-tertiary-tabs'
+                : host === 'bottom'
+                    ? 'bottom-tabs'
+                : host === 'hierarchy'
+                    ? 'hierarchy-tabs'
+                    : 'inspector-tabs'
         );
         panel?.classList.toggle('dock-target-panel', active);
         header?.classList.toggle('dock-target-header', active);
+        tabStrip?.classList.toggle('drop-target-strip', active);
 
         if (active) {
             this.showDockHostPreview(host);
@@ -5374,15 +5760,24 @@ export class Editor {
     }
 
     private updatePlayModeButtons() {
-        const playBtn = document.getElementById('play-btn');
-        const pauseBtn = document.getElementById('pause-btn');
+        const playBtn = document.getElementById('play-btn') as HTMLButtonElement | null;
+        const pauseBtn = document.getElementById('pause-btn') as HTMLButtonElement | null;
+        const stepBtn = document.getElementById('step-btn') as HTMLButtonElement | null;
 
         if (playBtn) {
             playBtn.innerText = this.isPlaying ? "Stop" : "Play";
+            playBtn.title = this.isPlaying ? 'Stop Play Mode (Ctrl+P)' : 'Play Mode (Ctrl+P)';
             playBtn.style.color = this.isPlaying ? "var(--unity-accent)" : "";
         }
         if (pauseBtn) {
+            pauseBtn.disabled = !this.isPlaying;
+            pauseBtn.classList.toggle('active', this.isPaused);
+            pauseBtn.title = this.isPaused ? 'Resume Play Mode' : 'Pause Play Mode';
             pauseBtn.style.color = this.isPaused ? "var(--unity-accent)" : "";
+        }
+        if (stepBtn) {
+            stepBtn.disabled = !this.isPlaying;
+            stepBtn.title = this.isPlaying ? 'Step One Frame' : 'Step One Frame (Play Mode Required)';
         }
 
         // Tint UI
@@ -6679,11 +7074,13 @@ export class Editor {
         if (btnPivot) {
             btnPivot.innerText = this.transformPivotMode === 'center' ? 'Center' : 'Pivot';
             btnPivot.classList.toggle('active', this.transformPivotMode === 'center');
+            btnPivot.title = this.transformPivotMode === 'center' ? 'Center Pivot Mode' : 'Pivot Mode';
         }
 
         if (btnSpace) {
             btnSpace.innerText = this.transformSpaceMode === 'world' ? 'World' : 'Local';
             btnSpace.classList.toggle('active', this.transformSpaceMode === 'world');
+            btnSpace.title = this.transformSpaceMode === 'world' ? 'World Space (X)' : 'Local Space (X)';
         }
 
         if (btnSnap) {
@@ -6851,6 +7248,7 @@ export class Editor {
         this.statsTimer += deltaTime;
         if (this.statsTimer >= 0.1) {
             this.updateStatusBar();
+            this.updateSceneOnboardingHint();
             this.updateStatsOverlay();
             this.statsTimer = 0;
         }
@@ -6934,18 +7332,80 @@ export class Editor {
             ? (this.consoleWindow as any).logs[(this.consoleWindow as any).logs.length - 1].message
             : "Ready";
 
-        // Truncate long logs
-        const displayLog = lastLog.length > 60 ? lastLog.substring(0, 57) + "..." : lastLog;
+        const displayLog = lastLog.length > 80 ? lastLog.substring(0, 77) + "..." : lastLog;
+        const selectionTargets = this.selectedGameObjects.filter((go) => go !== this.cameraGO);
+        const selectionLabel = selectionTargets.length === 0
+            ? 'No Selection'
+            : selectionTargets.length === 1
+                ? `Selected: ${selectionTargets[0].name}`
+                : `Selected: ${selectionTargets.length} Objects`;
+        const sceneName = scenePath.split(/[\\/]/).pop() || scenePath;
+        const playModeText = this.isPlaying ? (this.isPaused ? 'PAUSED' : 'PLAYING') : 'EDITING';
 
-        this.statusBar.innerHTML = `
-            <span style="margin-right: 15px; color: var(--unity-text);">Log: ${displayLog}</span>
-            <div style="flex: 1"></div>
-            <span style="margin-right: 15px;">FPS: ${fpsVal}</span>
-            <span style="margin-right: 15px;">MS: ${frameMs}</span>
-            <span style="margin-right: 15px;">DC: ${this.renderer.info.render.calls}</span>
-            <span style="margin-right: 15px; opacity: 0.7;">${scenePath}</span>
-            <span style="color: var(--unity-accent); font-weight: bold;">${this.isPlaying ? (this.isPaused ? 'PAUSED' : 'PLAYING') : 'EDITING'}</span>
-        `;
+        const setText = (id: string, value: string, title?: string) => {
+            const element = this.statusBar.querySelector(`#${id}`) as HTMLElement | null;
+            if (!element) return;
+            if (element.textContent !== value) {
+                element.textContent = value;
+            }
+            if (title !== undefined && element.getAttribute('title') !== title) {
+                element.setAttribute('title', title);
+            }
+        };
+
+        setText('status-text', displayLog, lastLog);
+        setText('status-selection', selectionLabel, selectionLabel);
+        setText('status-scene', sceneName, scenePath);
+        setText('status-fps', `FPS: ${fpsVal}`);
+        setText('status-ms', `MS: ${frameMs}`);
+        setText('status-drawcalls', `DC: ${this.renderer.info.render.calls}`);
+        setText('status-playmode', playModeText, playModeText);
+
+        const playModeEl = this.statusBar.querySelector('#status-playmode') as HTMLElement | null;
+        if (playModeEl) {
+            playModeEl.classList.toggle('is-playing', this.isPlaying && !this.isPaused);
+            playModeEl.classList.toggle('is-paused', this.isPlaying && this.isPaused);
+        }
+    }
+
+    private updateSceneOnboardingHint() {
+        if (!this.sceneView) return;
+
+        if (!this.sceneOnboardingHint) {
+            const hint = document.createElement('div');
+            hint.className = 'scene-onboarding-hint';
+            hint.style.display = 'none';
+            this.sceneView.appendChild(hint);
+            this.sceneOnboardingHint = hint;
+        }
+
+        if (this.isGameView) {
+            this.sceneOnboardingHint.style.display = 'none';
+            return;
+        }
+
+        const sceneObjects = (this.scene?.gameObjects ?? []).filter((go) => go !== this.cameraGO);
+        const selectedObjects = this.selectedGameObjects.filter((go) => go !== this.cameraGO);
+
+        if (sceneObjects.length === 0) {
+            this.sceneOnboardingHint.innerHTML = `
+                <strong>Start by creating a GameObject</strong>
+                Use the Hierarchy + button, right click in Hierarchy, or open the GameObject menu to place your first object.
+            `;
+            this.sceneOnboardingHint.style.display = 'block';
+            return;
+        }
+
+        if (selectedObjects.length === 0) {
+            this.sceneOnboardingHint.innerHTML = `
+                <strong>Select an object to inspect it</strong>
+                Click an object in Hierarchy or Scene view, then use W, E and R to move, rotate or scale the current selection.
+            `;
+            this.sceneOnboardingHint.style.display = 'block';
+            return;
+        }
+
+        this.sceneOnboardingHint.style.display = 'none';
     }
 
     public selectGameObject(go: GameObject | null, additive: boolean = false) {

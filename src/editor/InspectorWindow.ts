@@ -82,6 +82,15 @@ export class InspectorWindow extends EditorWindow {
     }
 
     private renderSceneInspector(content: HTMLElement, scene: any): void {
+        const emptyState = document.createElement('div');
+        emptyState.className = 'editor-empty-state';
+        emptyState.style.minHeight = '78px';
+        emptyState.innerHTML = `
+            <div class="editor-empty-state-title">Nothing is selected</div>
+            <div class="editor-empty-state-hint">Scene-level settings are shown below. Select a GameObject or project asset to inspect its details here.</div>
+        `;
+        content.appendChild(emptyState);
+
         const header = document.createElement('div');
         header.className = 'inspector-header';
         header.innerHTML = `<div style="font-weight: bold; padding: 5px;">Scene Settings</div>`;

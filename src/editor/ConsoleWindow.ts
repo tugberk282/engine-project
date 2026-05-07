@@ -94,6 +94,7 @@ export class ConsoleWindow extends EditorWindow {
         const errorEnabled = (content.querySelector('#filter-error') as HTMLInputElement)?.checked ?? true;
 
         this.logContainer.innerHTML = '';
+        let visibleCount = 0;
 
         this.logs.forEach(log => {
             if (log.type === 'info' && !infoEnabled) return;
@@ -108,7 +109,23 @@ export class ConsoleWindow extends EditorWindow {
                 <span class="console-time">${log.time}</span>
             `;
             this.logContainer!.appendChild(item);
+            visibleCount += 1;
         });
+
+        if (visibleCount === 0) {
+            const empty = document.createElement('div');
+            empty.className = 'editor-empty-state';
+            empty.innerHTML = this.logs.length === 0
+                ? `
+                    <div class="editor-empty-state-title">Console is clear</div>
+                    <div class="editor-empty-state-hint">Runtime logs, warnings and errors will appear here. Use Clear to reset the view at any time.</div>
+                `
+                : `
+                    <div class="editor-empty-state-title">No logs match the current filters</div>
+                    <div class="editor-empty-state-hint">Enable Info, Warn or Error filters to show hidden console entries.</div>
+                `;
+            this.logContainer.appendChild(empty);
+        }
 
         this.logContainer.scrollTop = this.logContainer.scrollHeight;
     }
