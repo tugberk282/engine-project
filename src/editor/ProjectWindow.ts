@@ -1,5 +1,5 @@
 import { AssetIcons } from './AssetIcons';
-import { PrefabManager } from '../engine/Prefab';
+import { Prefab, PrefabManager } from '../engine/Prefab';
 import { Material, MaterialManager } from '../engine/Material';
 import { SceneManager } from '../engine/SceneManager';
 import { Scene } from '../engine/Scene';
@@ -43,6 +43,9 @@ export interface AssetReferenceAuditResult {
     unresolved: number;
     filesChanged: number;
     issuesByAsset: Record<string, number>;
+    fixedByAsset: Record<string, number>;
+    issuesByReason: Record<string, number>;
+    changedAssetPaths: string[];
     sampleIssues: AssetReferenceAuditIssue[];
 }
 
@@ -52,13 +55,44 @@ export interface AssetDeleteImpactSummary {
     targetAssetCount: number;
     externalReferencerCount: number;
     externalReferencerPaths: string[];
+    externalReferencerTypeCounts: Record<string, number>;
+    autoPatchableReferencerCount: number;
+    manualReviewReferencerCount: number;
 }
+
+interface AssetRepairHistoryEntry {
+    timestamp: string;
+    scopePath: string;
+    scopeLabel: string;
+    issues: number;
+    fixable: number;
+    fixed: number;
+    unresolved: number;
+    filesChanged: number;
+    topReasons: Array<{ reason: string; count: number }>;
+    changedAssetPaths: string[];
+}
+
+const RECENT_REPAIR_HISTORY_STORAGE_KEY = 'engine-project.recentAssetRepairHistory';
 
 interface Phase3ReadinessReport {
     scopePath: string;
     scopeAssetCount: number;
     runtimeCandidateCount: number;
     dependencyEdgeCount: number;
+    reimportDiagnostics: {
+        directRuntimeReimportCount: number;
+        dependentGraphExpandableCount: number;
+        totalDependentRuntimeReloads: number;
+        maxDependentRuntimeReloads: number;
+    };
+    healthDiagnostics: {
+        unusedAssetCount: number;
+        circularDependencyCount: number;
+        missingTargetIssueCount: number;
+        orphanGuidIssueCount: number;
+        ambiguousReferenceCount: number;
+    };
     scriptCount: number;
     scriptsWithCustomExecutionOrder: number;
     scriptsAutoReferencedDisabled: number;
@@ -69,11 +103,43 @@ interface Phase3ReadinessReport {
         removed: number;
         changed: number;
         metaChanged: number;
+        metaRepaired: number;
+        duplicateGuidRepaired: number;
+        orphanMetaFiles: number;
         moved: number;
     };
     assetTypeCounts: Record<string, number>;
     ready: boolean;
     blockers: string[];
+}
+
+interface PrefabOverrideComponentSnapshot {
+    type: string;
+    overrideKeys: string[];
+    data: Record<string, unknown>;
+}
+
+interface PrefabOverrideNodeSnapshot {
+    path: string | null;
+    gameObjectOverrideKeys: string[];
+    gameObjectValues: Partial<Pick<GameObject, 'name' | 'tag' | 'layer' | 'enabled'>>;
+    transformOverrideKeys: string[];
+    transformValues: {
+        position: [number, number, number];
+        rotation: [number, number, number];
+        scale: [number, number, number];
+    };
+    componentSnapshots: PrefabOverrideComponentSnapshot[];
+}
+
+interface PrefabStructuralOverrideSnapshot {
+    kind: 'component-added' | 'component-removed' | 'child-added' | 'child-removed';
+    targetPath?: string | null;
+    componentType?: string;
+    componentData?: Record<string, unknown>;
+    childPath?: string | null;
+    parentPath?: string | null;
+    childData?: any;
 }
 
 export class ProjectWindow {
@@ -85,10 +151,12 @@ export class ProjectWindow {
     private searchQuery: string = "";
     private activeFilter: string = "All";
     private selectedAssetPath: string | null = null;
+    private recentRepairHistory: AssetRepairHistoryEntry[] = [];
 
     constructor(editor: any) {
         this.editor = editor;
         this.fs = new DesktopFileSystem();
+        this.loadRecentRepairHistory();
     }
 
     public initialize() {
@@ -711,6 +779,7 @@ export class ProjectWindow {
         if (candidates.length === 0) return null;
 
         const result = this.auditAndRepairReferenceFiles(candidates, true);
+        this.recordRepairHistory(assetPath, result);
         if (result.filesChanged > 0) {
             this.refreshAssetDatabaseAndView({
                 focusAssetPath: this.fs.existsSync(assetPath) ? assetPath : null,
@@ -726,6 +795,7 @@ export class ProjectWindow {
 
     public repairAllAssetReferences(): AssetReferenceAuditResult {
         const result = this.auditAndRepairReferenceFiles(this.getReferenceAuditCandidatePaths(), true);
+        this.recordRepairHistory(this.rootPath, result);
         if (result.filesChanged > 0) {
             this.refreshAssetDatabaseAndView({ preserveSelection: true });
         }
@@ -752,6 +822,8 @@ export class ProjectWindow {
 
         const runtimeCandidateCount = scopeAssetPaths.filter((assetPath) => this.isRuntimeRefreshCandidate(assetPath)).length;
         const dependencyEdgeCount = scopeAssetPaths.reduce((sum, assetPath) => sum + AssetDatabase.getInstance().getDependencyPaths(assetPath).length, 0);
+        const reimportDiagnostics = this.collectReimportDiagnostics(scopeAssetPaths);
+        const healthDiagnostics = this.collectHealthDiagnostics(scopeEntries, referenceAudit, effectiveScopePath);
         const assetTypeCounts = this.collectAssetTypeCounts(scopeEntries);
 
         const blockers: string[] = [];
@@ -761,12 +833,29 @@ export class ProjectWindow {
         if (referenceAudit.unresolved > 0) {
             blockers.push(`Unresolved reference issues: ${referenceAudit.unresolved}`);
         }
+        if (refreshResult.orphanMetaFiles.length > 0) {
+            blockers.push(`Orphan meta files detected: ${refreshResult.orphanMetaFiles.length}`);
+        }
+        if (healthDiagnostics.circularDependencyCount > 0) {
+            blockers.push(`Circular dependency chains detected: ${healthDiagnostics.circularDependencyCount}`);
+        }
+        if (healthDiagnostics.missingTargetIssueCount > 0) {
+            blockers.push(`Missing target issues detected: ${healthDiagnostics.missingTargetIssueCount}`);
+        }
+        if (healthDiagnostics.orphanGuidIssueCount > 0) {
+            blockers.push(`Orphan GUID issues detected: ${healthDiagnostics.orphanGuidIssueCount}`);
+        }
+        if (healthDiagnostics.ambiguousReferenceCount > 0) {
+            blockers.push(`Ambiguous name-based references detected: ${healthDiagnostics.ambiguousReferenceCount}`);
+        }
 
         return {
             scopePath: effectiveScopePath,
             scopeAssetCount: scopeAssetPaths.length,
             runtimeCandidateCount,
             dependencyEdgeCount,
+            reimportDiagnostics,
+            healthDiagnostics,
             scriptCount: scriptEntries.length,
             scriptsWithCustomExecutionOrder,
             scriptsAutoReferencedDisabled,
@@ -777,6 +866,9 @@ export class ProjectWindow {
                 removed: refreshResult.removed.length,
                 changed: refreshResult.changed.length,
                 metaChanged: refreshResult.metaChanged.length,
+                metaRepaired: refreshResult.metaRepaired.length,
+                duplicateGuidRepaired: refreshResult.duplicateGuidRepaired.length,
+                orphanMetaFiles: refreshResult.orphanMetaFiles.length,
                 moved: refreshResult.moved.length
             },
             assetTypeCounts,
@@ -796,7 +888,10 @@ export class ProjectWindow {
                 targetIsDirectory,
                 targetAssetCount: 0,
                 externalReferencerCount: 0,
-                externalReferencerPaths: []
+                externalReferencerPaths: [],
+                externalReferencerTypeCounts: {},
+                autoPatchableReferencerCount: 0,
+                manualReviewReferencerCount: 0
             };
         }
 
@@ -810,12 +905,23 @@ export class ProjectWindow {
         });
 
         const externalReferencerPaths = Array.from(referencerSet).sort((left, right) => left.localeCompare(right));
+        const externalReferencerEntries = externalReferencerPaths
+            .map((referencerPath) => AssetDatabase.getInstance().getEntry(referencerPath))
+            .filter((entry): entry is AssetEntry => !!entry);
+        const externalReferencerTypeCounts = this.collectAssetTypeCounts(externalReferencerEntries);
+        const autoPatchableReferencerCount = externalReferencerEntries
+            .filter((entry) => this.isMovedReferenceAutoPatchableAssetType(entry.meta.assetType))
+            .length;
+        const manualReviewReferencerCount = externalReferencerPaths.length - autoPatchableReferencerCount;
         return {
             targetPath: assetPath,
             targetIsDirectory,
             targetAssetCount: targetPaths.length,
             externalReferencerCount: externalReferencerPaths.length,
-            externalReferencerPaths
+            externalReferencerPaths,
+            externalReferencerTypeCounts,
+            autoPatchableReferencerCount,
+            manualReviewReferencerCount
         };
     }
 
@@ -985,8 +1091,7 @@ export class ProjectWindow {
     }
 
     private loadMaterialAsset(fullPath: string): Material | null {
-        const nameKey = PathUtils.basename(fullPath, PathUtils.extname(fullPath));
-        const cached = MaterialManager.getMaterial(nameKey);
+        const cached = MaterialManager.getMaterial(fullPath);
 
         try {
             const data = JSON.parse(this.fs.readFileSync(fullPath, 'utf8'));
@@ -1037,6 +1142,7 @@ export class ProjectWindow {
         if (!meta) return;
 
         if (meta.assetType === 'texture') {
+            AssetImporter.invalidateTextureCache(assetPath);
             this.reloadMaterialTextureReferences(assetPath);
         } else if (meta.assetType === 'material') {
             this.loadMaterialAsset(assetPath);
@@ -1046,6 +1152,7 @@ export class ProjectWindow {
         } else if (meta.assetType === 'prefab') {
             this.reloadPrefabInstancesForAsset(assetPath);
         } else if (meta.assetType === 'model') {
+            AssetImporter.invalidateModelCache(assetPath);
             this.reloadModelInstancesForAsset(assetPath);
             this.reloadAnimatorClipsForAsset(assetPath);
         }
@@ -1168,6 +1275,11 @@ export class ProjectWindow {
             const matchesByGuid = !!assetGuid && go.sourceAssetGuid === assetGuid;
             if (go.sourceAssetType !== 'prefab' || (!matchesByPath && !matchesByGuid)) return;
             if (preserveOverrides) {
+                const overrideSnapshot = this.capturePrefabOverrideSnapshot(go);
+                const structuralOverrideSnapshot = this.capturePrefabStructuralOverrideSnapshot(go);
+                PrefabManager.revertToPrefab(go);
+                this.restorePrefabOverrideSnapshot(go, overrideSnapshot);
+                this.restorePrefabStructuralOverrideSnapshot(go, structuralOverrideSnapshot);
                 go.sourceAssetPath = assetPath;
                 go.sourceAssetGuid = assetGuid;
                 go.sourceAssetType = 'prefab';
@@ -1176,6 +1288,217 @@ export class ProjectWindow {
             }
 
             PrefabManager.revertToPrefab(go);
+        });
+    }
+
+    private capturePrefabOverrideSnapshot(prefabRoot: GameObject): PrefabOverrideNodeSnapshot[] {
+        const snapshots: PrefabOverrideNodeSnapshot[] = [];
+
+        const walk = (current: GameObject) => {
+            const path = PrefabManager.getPrefabNodePathForGameObject(current, prefabRoot);
+            const gameObjectOverrideKeys = Array.from(current.overrides.values());
+            const transformOverrideKeys = Array.from(current.transform.overrides.values());
+            const componentSnapshots = current.components
+                .filter((component) => component.constructor.name !== 'Transform' && component.overrides.size > 0)
+                .map((component) => {
+                    const serialized = component.serialize();
+                    return {
+                        type: component.constructor.name,
+                        overrideKeys: Array.from(component.overrides.values()),
+                        data: (serialized?.data && typeof serialized.data === 'object' && !Array.isArray(serialized.data))
+                            ? serialized.data as Record<string, unknown>
+                            : {}
+                    };
+                });
+
+            if (gameObjectOverrideKeys.length > 0 || transformOverrideKeys.length > 0 || componentSnapshots.length > 0) {
+                snapshots.push({
+                    path,
+                    gameObjectOverrideKeys,
+                    gameObjectValues: {
+                        name: current.name,
+                        tag: current.tag,
+                        layer: current.layer,
+                        enabled: current.enabled
+                    },
+                    transformOverrideKeys,
+                    transformValues: {
+                        position: current.transform.position.toArray() as [number, number, number],
+                        rotation: [
+                            current.transform.rotation.x,
+                            current.transform.rotation.y,
+                            current.transform.rotation.z
+                        ],
+                        scale: current.transform.scale.toArray() as [number, number, number]
+                    },
+                    componentSnapshots
+                });
+            }
+
+            current.transform.children.forEach((child) => walk(child.gameObject));
+        };
+
+        walk(prefabRoot);
+        return snapshots;
+    }
+
+    private capturePrefabStructuralOverrideSnapshot(prefabRoot: GameObject): PrefabStructuralOverrideSnapshot[] {
+        const snapshots: PrefabStructuralOverrideSnapshot[] = [];
+
+        const walk = (current: GameObject) => {
+            const targetPath = PrefabManager.getPrefabNodePathForGameObject(current, prefabRoot);
+            const entries = this.editor.getPrefabOverrideEntries?.(current) ?? [];
+            entries.forEach((entry: Record<string, any>) => {
+                switch (entry.kind) {
+                    case 'component-added': {
+                        if (!entry.component?.serialize) return;
+                        const serialized = entry.component.serialize();
+                        snapshots.push({
+                            kind: 'component-added',
+                            targetPath,
+                            componentType: entry.component.constructor?.name,
+                            componentData: (serialized?.data && typeof serialized.data === 'object' && !Array.isArray(serialized.data))
+                                ? serialized.data as Record<string, unknown>
+                                : {}
+                        });
+                        break;
+                    }
+                    case 'component-removed':
+                        snapshots.push({
+                            kind: 'component-removed',
+                            targetPath,
+                            componentType: entry.componentType
+                        });
+                        break;
+                    case 'child-added':
+                        if (!entry.childGameObject?.serialize) return;
+                        snapshots.push({
+                            kind: 'child-added',
+                            targetPath,
+                            childPath: PrefabManager.getPrefabNodePathForGameObject(entry.childGameObject, prefabRoot),
+                            parentPath: entry.parentPath ?? null,
+                            childData: entry.childGameObject.serialize()
+                        });
+                        break;
+                    case 'child-removed':
+                        snapshots.push({
+                            kind: 'child-removed',
+                            targetPath,
+                            childPath: entry.childPath ?? null
+                        });
+                        break;
+                    default:
+                        break;
+                }
+            });
+            current.transform.children.forEach((child) => walk(child.gameObject));
+        };
+
+        walk(prefabRoot);
+        return snapshots;
+    }
+
+    private restorePrefabOverrideSnapshot(prefabRoot: GameObject, snapshots: PrefabOverrideNodeSnapshot[]) {
+        snapshots.forEach((snapshot) => {
+            const target = PrefabManager.findPrefabInstanceNodeByPath(prefabRoot, snapshot.path);
+            if (!target) return;
+
+            snapshot.gameObjectOverrideKeys.forEach((key) => {
+                if (key === 'name') {
+                    target.name = snapshot.gameObjectValues.name ?? target.name;
+                } else if (key === 'tag') {
+                    target.tag = snapshot.gameObjectValues.tag ?? target.tag;
+                } else if (key === 'layer') {
+                    target.layer = snapshot.gameObjectValues.layer ?? target.layer;
+                } else if (key === 'enabled') {
+                    target.setActive(snapshot.gameObjectValues.enabled ?? target.enabled);
+                }
+            });
+            target.overrides = new Set(snapshot.gameObjectOverrideKeys);
+
+            snapshot.transformOverrideKeys.forEach((key) => {
+                if (key === 'position') {
+                    target.transform.position.fromArray(snapshot.transformValues.position);
+                } else if (key === 'rotation') {
+                    target.transform.rotation.set(
+                        snapshot.transformValues.rotation[0],
+                        snapshot.transformValues.rotation[1],
+                        snapshot.transformValues.rotation[2]
+                    );
+                } else if (key === 'scale') {
+                    target.transform.scale.fromArray(snapshot.transformValues.scale);
+                }
+            });
+            target.transform.overrides = new Set(snapshot.transformOverrideKeys);
+
+            snapshot.componentSnapshots.forEach((componentSnapshot) => {
+                const component = target.components.find((entry) => entry.constructor.name === componentSnapshot.type);
+                if (!component) return;
+                if (component.deserialize) {
+                    component.deserialize(componentSnapshot.data);
+                } else {
+                    Object.entries(componentSnapshot.data).forEach(([key, value]) => {
+                        (component as any)[key] = value;
+                    });
+                }
+                component.overrides = new Set(componentSnapshot.overrideKeys);
+            });
+        });
+    }
+
+    private restorePrefabStructuralOverrideSnapshot(prefabRoot: GameObject, snapshots: PrefabStructuralOverrideSnapshot[]) {
+        snapshots.forEach((snapshot) => {
+            const target = PrefabManager.findPrefabInstanceNodeByPath(prefabRoot, snapshot.targetPath ?? null);
+            if (!target) return;
+
+            if (snapshot.kind === 'component-added') {
+                if (!snapshot.componentType) return;
+                const existing = target.components.find((component) => component.constructor.name === snapshot.componentType);
+                if (existing) return;
+                const ComponentClass = ScriptRegistry.getComponentClass(snapshot.componentType);
+                if (!ComponentClass) return;
+                const component = target.addComponent(ComponentClass, { invokeLifecycle: false });
+                if (component.deserialize && snapshot.componentData) {
+                    component.deserialize(snapshot.componentData);
+                }
+                component.overrides = new Set(Object.keys(snapshot.componentData ?? {}));
+                target.flushPendingLifecycle(false);
+                return;
+            }
+
+            if (snapshot.kind === 'component-removed') {
+                if (!snapshot.componentType) return;
+                const existing = target.components.find((component) => component.constructor.name === snapshot.componentType);
+                if (!existing || existing === target.transform) return;
+                target.removeComponent(existing);
+                return;
+            }
+
+            if (snapshot.kind === 'child-added') {
+                if (!snapshot.childData) return;
+                if (snapshot.childPath && PrefabManager.findPrefabInstanceNodeByPath(prefabRoot, snapshot.childPath)) return;
+                const parent = snapshot.parentPath
+                    ? PrefabManager.findPrefabInstanceNodeByPath(prefabRoot, snapshot.parentPath)
+                    : target;
+                if (!parent) return;
+                const child = Prefab.instantiateData(snapshot.childData);
+                if (prefabRoot.scene) {
+                    prefabRoot.scene.addGameObject(child);
+                }
+                child.transform.setParent(parent.transform, false);
+                return;
+            }
+
+            if (snapshot.kind === 'child-removed') {
+                if (!snapshot.childPath) return;
+                const child = PrefabManager.findPrefabInstanceNodeByPath(prefabRoot, snapshot.childPath);
+                if (!child) return;
+                if (child.scene) {
+                    child.scene.removeGameObject(child);
+                } else {
+                    child.onDestroy();
+                }
+            }
         });
     }
 
@@ -1205,14 +1528,17 @@ export class ProjectWindow {
     private reloadAnimatorClipsForAsset(assetPath: string) {
         const normalizedAssetPath = this.normalizeAssetPath(assetPath);
         const assetGuid = AssetDatabase.getInstance().getGuid(assetPath) ?? null;
+        const shouldImportAnimations = AssetImporter.shouldImportModelAnimations(normalizedAssetPath);
         this.editor.scene.gameObjects.forEach((go: GameObject) => {
             go.components.forEach((component: any) => {
                 if (component.constructor?.name !== 'Animator') return;
                 const matchesByPath = !!component.modelPath && this.pathsEqual(component.modelPath, normalizedAssetPath);
                 const matchesByGuid = !!assetGuid && component.modelGuid === assetGuid;
                 if (!matchesByPath && !matchesByGuid) return;
-                component.animations.clear();
-                component.loadModelClips(normalizedAssetPath);
+                component.clearAnimations?.(!shouldImportAnimations);
+                if (shouldImportAnimations) {
+                    component.loadModelClips(normalizedAssetPath);
+                }
             });
         });
     }
@@ -1696,6 +2022,13 @@ export class ProjectWindow {
             const result = this.repairAllAssetReferences();
             alert(this.formatReferenceAuditSummary(result, 'Reference Auto Repair (All)'));
         });
+        this.addMenuItem(menu, 'Recent Repair History', () => {
+            alert(this.formatRecentRepairHistorySummary('Recent Repair History (Project)'));
+        });
+        this.addMenuItem(menu, 'Clear Repair History', () => {
+            this.clearRecentRepairHistory();
+            alert('Recent repair history cleared.');
+        });
         this.addMenuItem(menu, 'Phase 3 Readiness (Project)', () => {
             const report = this.runPhase3ReadinessCheck(this.rootPath);
             alert(this.formatPhase3ReadinessSummary(report, 'Phase 3 Readiness (Project)'));
@@ -1764,6 +2097,13 @@ export class ProjectWindow {
                 return;
             }
             alert(this.formatReferenceAuditSummary(result, 'Reference Auto Repair'));
+        });
+        this.addMenuItem(menu, 'Recent Repair History', () => {
+            alert(this.formatRecentRepairHistorySummary('Recent Repair History'));
+        });
+        this.addMenuItem(menu, 'Clear Repair History', () => {
+            this.clearRecentRepairHistory();
+            alert('Recent repair history cleared.');
         });
         this.addMenuItem(menu, isDirectory ? 'Phase 3 Readiness in Folder' : 'Phase 3 Readiness for Asset', () => {
             const report = this.runPhase3ReadinessCheck(fullPath);
@@ -1897,6 +2237,9 @@ export class ProjectWindow {
             unresolved: 0,
             filesChanged: 0,
             issuesByAsset: {},
+            fixedByAsset: {},
+            issuesByReason: {},
+            changedAssetPaths: [],
             sampleIssues: []
         };
     }
@@ -1923,6 +2266,7 @@ export class ProjectWindow {
             if (changed) {
                 this.fs.writeFileSync(assetPath, JSON.stringify(data, null, 2), 'utf8');
                 result.filesChanged += 1;
+                result.changedAssetPaths.push(assetPath);
             }
         } catch {
             // Ignore malformed/unparseable files in audit flow.
@@ -1971,6 +2315,7 @@ export class ProjectWindow {
 
                         result.issues += 1;
                         result.issuesByAsset[assetPath] = (result.issuesByAsset[assetPath] ?? 0) + 1;
+                        result.issuesByReason[evalResult.reason] = (result.issuesByReason[evalResult.reason] ?? 0) + 1;
                         if (evalResult.fixable) {
                             result.fixable += 1;
                         } else {
@@ -1992,6 +2337,7 @@ export class ProjectWindow {
                             }
                             if (issueFixed) {
                                 result.fixed += 1;
+                                result.fixedByAsset[assetPath] = (result.fixedByAsset[assetPath] ?? 0) + 1;
                                 changed = true;
                             }
                         }
@@ -2053,7 +2399,8 @@ export class ProjectWindow {
         }
 
         if (normalizedPath && !pathGuid) {
-            const inferredPath = this.findUniqueAssetPathByBaseName(normalizedPath);
+            const inferredPaths = this.findAssetPathsByBaseName(normalizedPath);
+            const inferredPath = inferredPaths.length === 1 ? inferredPaths[0] : null;
             const inferredGuid = inferredPath ? (AssetDatabase.getInstance().getGuid(inferredPath) ?? null) : null;
             if (inferredPath && inferredGuid) {
                 return {
@@ -2061,6 +2408,14 @@ export class ProjectWindow {
                     fixable: true,
                     suggestedPath: inferredPath,
                     suggestedGuid: inferredGuid
+                };
+            }
+            if (inferredPaths.length > 1) {
+                return {
+                    reason: 'ambiguous-by-name',
+                    fixable: false,
+                    suggestedPath: null,
+                    suggestedGuid: null
                 };
             }
             return {
@@ -2083,10 +2438,10 @@ export class ProjectWindow {
         return { reason: null, fixable: false, suggestedPath: null, suggestedGuid: null };
     }
 
-    private findUniqueAssetPathByBaseName(referencePath: string): string | null {
+    private findAssetPathsByBaseName(referencePath: string): string[] {
         const refExt = PathUtils.extname(referencePath).toLowerCase();
         const refBase = PathUtils.basename(referencePath, refExt || undefined).toLowerCase();
-        if (!refBase) return null;
+        if (!refBase) return [];
 
         const candidates = AssetDatabase.getInstance()
             .getAllEntries()
@@ -2098,7 +2453,7 @@ export class ProjectWindow {
             })
             .map((entry) => entry.path);
 
-        return candidates.length === 1 ? candidates[0] : null;
+        return candidates;
     }
 
     private collectAssetTypeCounts(entries: AssetEntry[]): Record<string, number> {
@@ -2110,6 +2465,78 @@ export class ProjectWindow {
         return counts;
     }
 
+    private collectHealthDiagnostics(
+        scopeEntries: AssetEntry[],
+        referenceAudit: AssetReferenceAuditResult,
+        scopePath: string
+    ): Phase3ReadinessReport['healthDiagnostics'] {
+        const fileEntries = scopeEntries.filter((entry) => this.isFileAssetPath(entry.path));
+        const unusedAssetCount = fileEntries.filter((entry) => {
+            if (!this.isUnusedAssetCandidate(entry.meta.assetType)) return false;
+            return AssetDatabase.getInstance()
+                .getReferencerPaths(entry.path)
+                .filter((referencerPath) => !this.pathsEqual(referencerPath, entry.path) && this.isPathInsideScope(referencerPath, scopePath))
+                .length === 0;
+        }).length;
+
+        const circularDependencyCount = this.countCircularDependencies(fileEntries.map((entry) => entry.path), scopePath);
+        const missingTargetIssueCount = referenceAudit.issuesByReason['missing-target'] ?? 0;
+        const orphanGuidIssueCount = referenceAudit.issuesByReason['orphan-guid'] ?? 0;
+        const ambiguousReferenceCount = referenceAudit.issuesByReason['ambiguous-by-name'] ?? 0;
+
+        return {
+            unusedAssetCount,
+            circularDependencyCount,
+            missingTargetIssueCount,
+            orphanGuidIssueCount,
+            ambiguousReferenceCount
+        };
+    }
+
+    private isUnusedAssetCandidate(assetType: string | null | undefined): boolean {
+        return assetType === 'material'
+            || assetType === 'texture'
+            || assetType === 'audio'
+            || assetType === 'model'
+            || assetType === 'prefab'
+            || assetType === 'scriptableObject';
+    }
+
+    private countCircularDependencies(scopeAssetPaths: string[], scopePath: string): number {
+        const relevantPaths = new Set(scopeAssetPaths);
+        const visiting = new Set<string>();
+        const visited = new Set<string>();
+        let cycles = 0;
+
+        const visit = (assetPath: string, trail: Set<string>) => {
+            if (trail.has(assetPath)) {
+                cycles += 1;
+                return;
+            }
+            if (visited.has(assetPath)) return;
+
+            visiting.add(assetPath);
+            trail.add(assetPath);
+
+            AssetDatabase.getInstance()
+                .getDependencyPaths(assetPath)
+                .filter((dependencyPath) => relevantPaths.has(dependencyPath) && this.isPathInsideScope(dependencyPath, scopePath))
+                .forEach((dependencyPath) => visit(dependencyPath, trail));
+
+            trail.delete(assetPath);
+            visiting.delete(assetPath);
+            visited.add(assetPath);
+        };
+
+        scopeAssetPaths.forEach((assetPath) => {
+            if (!visiting.has(assetPath) && !visited.has(assetPath)) {
+                visit(assetPath, new Set<string>());
+            }
+        });
+
+        return cycles;
+    }
+
     private formatPhase3ReadinessSummary(report: Phase3ReadinessReport, label: string): string {
         const typeLines = Object.entries(report.assetTypeCounts)
             .sort((left, right) => left[0].localeCompare(right[0]))
@@ -2119,11 +2546,180 @@ export class ProjectWindow {
             ? report.blockers.join('\n')
             : 'None';
 
-        return `${label}\nScope: ${report.scopePath}\nReady: ${report.ready ? 'YES' : 'NO'}\n\nScope Assets: ${report.scopeAssetCount}\nRuntime Candidates: ${report.runtimeCandidateCount}\nDependency Edges: ${report.dependencyEdgeCount}\nScripts: ${report.scriptCount}\nScripts with custom executionOrder: ${report.scriptsWithCustomExecutionOrder}\nScripts with autoReferenced=false: ${report.scriptsAutoReferencedDisabled}\n\nRefresh Scan: ${report.refreshSummary.scannedCount}\nRefresh Added: ${report.refreshSummary.added}\nRefresh Removed: ${report.refreshSummary.removed}\nRefresh Changed: ${report.refreshSummary.changed}\nRefresh Meta Changed: ${report.refreshSummary.metaChanged}\nRefresh Moved: ${report.refreshSummary.moved}\n\nReference Issues: ${report.referenceAudit.issues}\nReference Fixable: ${report.referenceAudit.fixable}\nReference Unresolved: ${report.referenceAudit.unresolved}\n\nAsset Types:\n${typeLines || 'None'}\n\nBlockers:\n${blockers}`;
+        return `${label}\nScope: ${report.scopePath}\nReady: ${report.ready ? 'YES' : 'NO'}\n\nScope Assets: ${report.scopeAssetCount}\nRuntime Candidates: ${report.runtimeCandidateCount}\nDependency Edges: ${report.dependencyEdgeCount}\nReimport Direct Runtime Paths: ${report.reimportDiagnostics.directRuntimeReimportCount}\nReimport Dependent Graph Assets: ${report.reimportDiagnostics.dependentGraphExpandableCount}\nReimport Dependent Runtime Reloads: ${report.reimportDiagnostics.totalDependentRuntimeReloads}\nReimport Max Runtime Reload Fanout: ${report.reimportDiagnostics.maxDependentRuntimeReloads}\nUnused Asset Candidates: ${report.healthDiagnostics.unusedAssetCount}\nCircular Dependency Chains: ${report.healthDiagnostics.circularDependencyCount}\nMissing Target Issues: ${report.healthDiagnostics.missingTargetIssueCount}\nOrphan GUID Issues: ${report.healthDiagnostics.orphanGuidIssueCount}\nAmbiguous Name References: ${report.healthDiagnostics.ambiguousReferenceCount}\nScripts: ${report.scriptCount}\nScripts with custom executionOrder: ${report.scriptsWithCustomExecutionOrder}\nScripts with autoReferenced=false: ${report.scriptsAutoReferencedDisabled}\n\nRefresh Scan: ${report.refreshSummary.scannedCount}\nRefresh Added: ${report.refreshSummary.added}\nRefresh Removed: ${report.refreshSummary.removed}\nRefresh Changed: ${report.refreshSummary.changed}\nRefresh Meta Changed: ${report.refreshSummary.metaChanged}\nRefresh Meta Repaired: ${report.refreshSummary.metaRepaired}\nRefresh Duplicate GUID Repaired: ${report.refreshSummary.duplicateGuidRepaired}\nRefresh Orphan Meta Files: ${report.refreshSummary.orphanMetaFiles}\nRefresh Moved: ${report.refreshSummary.moved}\n\nReference Issues: ${report.referenceAudit.issues}\nReference Fixable: ${report.referenceAudit.fixable}\nReference Unresolved: ${report.referenceAudit.unresolved}\n\nAsset Types:\n${typeLines || 'None'}\n\nBlockers:\n${blockers}`;
+    }
+
+    private collectReimportDiagnostics(scopeAssetPaths: string[]): Phase3ReadinessReport['reimportDiagnostics'] {
+        let directRuntimeReimportCount = 0;
+        let dependentGraphExpandableCount = 0;
+        let totalDependentRuntimeReloads = 0;
+        let maxDependentRuntimeReloads = 0;
+
+        scopeAssetPaths.forEach((assetPath) => {
+            if (this.isRuntimeRefreshCandidate(assetPath)) {
+                directRuntimeReimportCount++;
+            }
+
+            const dependentRuntimePaths = this.getRuntimeReimportPathsForAsset(assetPath, true)
+                .filter((candidatePath) => !this.pathsEqual(candidatePath, assetPath));
+
+            if (dependentRuntimePaths.length > 0) {
+                dependentGraphExpandableCount++;
+                totalDependentRuntimeReloads += dependentRuntimePaths.length;
+                maxDependentRuntimeReloads = Math.max(maxDependentRuntimeReloads, dependentRuntimePaths.length);
+            }
+        });
+
+        return {
+            directRuntimeReimportCount,
+            dependentGraphExpandableCount,
+            totalDependentRuntimeReloads,
+            maxDependentRuntimeReloads
+        };
     }
 
     private formatReferenceAuditSummary(result: AssetReferenceAuditResult, label: string): string {
-        return `${label}\nScanned Assets: ${result.scannedAssets}\nScanned References: ${result.scannedPairs}\nIssues: ${result.issues}\nFixable: ${result.fixable}\nFixed: ${result.fixed}\nUnresolved: ${result.unresolved}\nChanged Files: ${result.filesChanged}`;
+        const topAssets = Object.entries(result.issuesByAsset)
+            .sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0]))
+            .slice(0, 5)
+            .map(([assetPath, issueCount]) => `${PathUtils.basename(assetPath)}: ${issueCount}`);
+        const topAssetsSection = topAssets.length > 0
+            ? `\nTop Affected Assets:\n${topAssets.join('\n')}`
+            : '';
+
+        const sampleIssues = result.sampleIssues
+            .slice(0, 5)
+            .map((issue) => `${PathUtils.basename(issue.assetPath)} @ ${issue.jsonPath} -> ${issue.reason}`);
+        const sampleIssuesSection = sampleIssues.length > 0
+            ? `\nSample Issues:\n${sampleIssues.join('\n')}`
+            : '';
+
+        const topReasons = Object.entries(result.issuesByReason)
+            .sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0]))
+            .slice(0, 5)
+            .map(([reason, count]) => `${reason}: ${count}`);
+        const topReasonsSection = topReasons.length > 0
+            ? `\nTop Reasons:\n${topReasons.join('\n')}`
+            : '';
+
+        const topFixedAssets = Object.entries(result.fixedByAsset)
+            .sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0]))
+            .slice(0, 5)
+            .map(([assetPath, fixedCount]) => `${PathUtils.basename(assetPath)}: ${fixedCount}`);
+        const topFixedAssetsSection = topFixedAssets.length > 0
+            ? `\nTop Fixed Assets:\n${topFixedAssets.join('\n')}`
+            : '';
+
+        const changedAssets = result.changedAssetPaths
+            .slice(0, 5)
+            .map((assetPath) => PathUtils.basename(assetPath));
+        const changedAssetsSection = changedAssets.length > 0
+            ? `\nChanged Asset Files:\n${changedAssets.join('\n')}${result.changedAssetPaths.length > changedAssets.length ? `\n(+${result.changedAssetPaths.length - changedAssets.length} more)` : ''}`
+            : '';
+
+        return `${label}\nScanned Assets: ${result.scannedAssets}\nScanned References: ${result.scannedPairs}\nIssues: ${result.issues}\nFixable: ${result.fixable}\nFixed: ${result.fixed}\nUnresolved: ${result.unresolved}\nChanged Files: ${result.filesChanged}${topAssetsSection}${topReasonsSection}${topFixedAssetsSection}${changedAssetsSection}${sampleIssuesSection}`;
+    }
+
+    private recordRepairHistory(scopePath: string, result: AssetReferenceAuditResult): void {
+        const topReasons = Object.entries(result.issuesByReason)
+            .sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0]))
+            .slice(0, 5)
+            .map(([reason, count]) => ({ reason, count }));
+
+        const entry: AssetRepairHistoryEntry = {
+            timestamp: new Date().toISOString(),
+            scopePath,
+            scopeLabel: PathUtils.basename(scopePath) || scopePath,
+            issues: result.issues,
+            fixable: result.fixable,
+            fixed: result.fixed,
+            unresolved: result.unresolved,
+            filesChanged: result.filesChanged,
+            topReasons,
+            changedAssetPaths: [...result.changedAssetPaths]
+        };
+
+        this.recentRepairHistory.unshift(entry);
+        if (this.recentRepairHistory.length > 12) {
+            this.recentRepairHistory.length = 12;
+        }
+        this.persistRecentRepairHistory();
+    }
+
+    private formatRecentRepairHistorySummary(label: string): string {
+        if (this.recentRepairHistory.length === 0) {
+            return `${label}\nNo repair history recorded yet.`;
+        }
+
+        const lines = this.recentRepairHistory.map((entry, index) => {
+            const topReasons = entry.topReasons
+                .map((reasonEntry) => `${reasonEntry.reason}: ${reasonEntry.count}`)
+                .join(', ');
+            const changedAssets = entry.changedAssetPaths
+                .slice(0, 3)
+                .map((assetPath) => PathUtils.basename(assetPath))
+                .join(', ');
+            const changedSuffix = entry.changedAssetPaths.length > 3
+                ? ` (+${entry.changedAssetPaths.length - 3} more)`
+                : '';
+            return `${index + 1}. ${entry.timestamp}\n   Scope: ${entry.scopeLabel}\n   Issues/Fixed/Unresolved: ${entry.issues}/${entry.fixed}/${entry.unresolved}\n   Changed Files: ${entry.filesChanged}${changedAssets ? ` (${changedAssets}${changedSuffix})` : ''}\n   Top Reasons: ${topReasons || 'none'}`;
+        });
+
+        return `${label}\n${lines.join('\n\n')}`;
+    }
+
+    private loadRecentRepairHistory(): void {
+        try {
+            const raw = window.localStorage.getItem(RECENT_REPAIR_HISTORY_STORAGE_KEY);
+            if (!raw) return;
+
+            const parsed = JSON.parse(raw);
+            if (!Array.isArray(parsed)) return;
+
+            this.recentRepairHistory = parsed
+                .filter((entry) => entry && typeof entry === 'object')
+                .map((entry) => ({
+                    timestamp: typeof entry.timestamp === 'string' ? entry.timestamp : new Date().toISOString(),
+                    scopePath: typeof entry.scopePath === 'string' ? entry.scopePath : '',
+                    scopeLabel: typeof entry.scopeLabel === 'string' ? entry.scopeLabel : '',
+                    issues: typeof entry.issues === 'number' ? entry.issues : 0,
+                    fixable: typeof entry.fixable === 'number' ? entry.fixable : 0,
+                    fixed: typeof entry.fixed === 'number' ? entry.fixed : 0,
+                    unresolved: typeof entry.unresolved === 'number' ? entry.unresolved : 0,
+                    filesChanged: typeof entry.filesChanged === 'number' ? entry.filesChanged : 0,
+                    topReasons: Array.isArray(entry.topReasons)
+                        ? entry.topReasons
+                            .filter((reasonEntry: any) => reasonEntry && typeof reasonEntry.reason === 'string' && typeof reasonEntry.count === 'number')
+                            .slice(0, 5)
+                        : [],
+                    changedAssetPaths: Array.isArray(entry.changedAssetPaths)
+                        ? entry.changedAssetPaths.filter((assetPath: any) => typeof assetPath === 'string').slice(0, 25)
+                        : []
+                }))
+                .slice(0, 12);
+        } catch {
+            this.recentRepairHistory = [];
+        }
+    }
+
+    private persistRecentRepairHistory(): void {
+        try {
+            window.localStorage.setItem(
+                RECENT_REPAIR_HISTORY_STORAGE_KEY,
+                JSON.stringify(this.recentRepairHistory)
+            );
+        } catch {
+            // Ignore storage persistence issues; in-memory history still works.
+        }
+    }
+
+    private clearRecentRepairHistory(): void {
+        this.recentRepairHistory = [];
+        try {
+            window.localStorage.removeItem(RECENT_REPAIR_HISTORY_STORAGE_KEY);
+        } catch {
+            // Ignore storage cleanup issues.
+        }
     }
 
     private collectAssetPathsWithinScope(scopePath: string): string[] {
@@ -2156,7 +2752,12 @@ export class ProjectWindow {
             : '';
         const moreCount = summary.externalReferencerCount - sample.length;
         const moreLine = moreCount > 0 ? `\n(+${moreCount} more)` : '';
-        return `${label}\nTarget Assets: ${summary.targetAssetCount}\nExternal Referencers: ${summary.externalReferencerCount}${sampleLines}${moreLine}`;
+        const typeLines = Object.entries(summary.externalReferencerTypeCounts)
+            .sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0]))
+            .map(([assetType, count]) => `${assetType}: ${count}`)
+            .join('\n');
+        const typeSection = typeLines ? `\nReferencer Types:\n${typeLines}` : '';
+        return `${label}\nTarget Assets: ${summary.targetAssetCount}\nExternal Referencers: ${summary.externalReferencerCount}\nAuto-patchable on move/rename: ${summary.autoPatchableReferencerCount}\nManual review likely: ${summary.manualReviewReferencerCount}${typeSection}${sampleLines}${moreLine}`;
     }
 
     private buildDeleteConfirmationMessage(name: string, summary: AssetDeleteImpactSummary | null): string {
@@ -2168,13 +2769,46 @@ export class ProjectWindow {
             return `Delete '${name}'?\nTarget Assets: ${summary.targetAssetCount}\nNo external references detected.`;
         }
 
+        const typeLines = Object.entries(summary.externalReferencerTypeCounts)
+            .sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0]))
+            .slice(0, 4)
+            .map(([assetType, count]) => `${assetType}: ${count}`)
+            .join('\n');
+        const typeSection = typeLines ? `\nReferencer Types:\n${typeLines}` : '';
         const sample = summary.externalReferencerPaths.slice(0, 6);
         const sampleLines = sample.length > 0
             ? `\nAffected:\n${sample.join('\n')}`
             : '';
         const moreCount = summary.externalReferencerCount - sample.length;
         const moreLine = moreCount > 0 ? `\n(+${moreCount} more)` : '';
-        return `Delete '${name}'?\nWARNING: ${summary.externalReferencerCount} external asset(s) reference this scope.${sampleLines}${moreLine}`;
+        return `Delete '${name}'?\nWARNING: ${summary.externalReferencerCount} external asset(s) reference this scope.\nAuto-patchable on move/rename: ${summary.autoPatchableReferencerCount}\nManual review likely after delete: ${summary.manualReviewReferencerCount}${typeSection}${sampleLines}${moreLine}`;
+    }
+
+    private buildRenameConfirmationMessage(oldName: string, newName: string, summary: AssetDeleteImpactSummary | null): string | null {
+        if (!summary || summary.externalReferencerCount === 0) {
+            return null;
+        }
+
+        const typeLines = Object.entries(summary.externalReferencerTypeCounts)
+            .sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0]))
+            .slice(0, 4)
+            .map(([assetType, count]) => `${assetType}: ${count}`)
+            .join('\n');
+        const typeSection = typeLines ? `\nReferencer Types:\n${typeLines}` : '';
+        const sample = summary.externalReferencerPaths.slice(0, 6);
+        const sampleLines = sample.length > 0
+            ? `\nAffected:\n${sample.join('\n')}`
+            : '';
+        const moreCount = summary.externalReferencerCount - sample.length;
+        const moreLine = moreCount > 0 ? `\n(+${moreCount} more)` : '';
+        return `Rename '${oldName}' to '${newName}'?\nExternal referencers: ${summary.externalReferencerCount}\nAuto-patchable after refresh: ${summary.autoPatchableReferencerCount}\nManual review likely: ${summary.manualReviewReferencerCount}${typeSection}${sampleLines}${moreLine}`;
+    }
+
+    private isMovedReferenceAutoPatchableAssetType(assetType: string): boolean {
+        return assetType === 'material'
+            || assetType === 'scene'
+            || assetType === 'prefab'
+            || assetType === 'scriptableObject';
     }
 
     private appendReferenceMenuSection(menu: HTMLElement, title: string, assetPaths: string[]) {
@@ -2220,6 +2854,12 @@ export class ProjectWindow {
                 const newPath = PathUtils.join(PathUtils.dirname(fullPath), newName);
                 if (!this.fs.existsSync(newPath)) {
                     try {
+                        const renameImpactSummary = this.getDeleteImpactSummary(fullPath);
+                        const renameMessage = this.buildRenameConfirmationMessage(oldName, newName, renameImpactSummary);
+                        if (renameMessage && !confirm(renameMessage)) {
+                            this.refresh();
+                            return;
+                        }
                         this.fs.renameSync(fullPath, newPath);
                         const oldMeta = fullPath + '.meta';
                         const newMeta = newPath + '.meta';

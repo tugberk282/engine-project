@@ -2866,7 +2866,7 @@ export class EditorInspectors {
                                 updateSlot();
                             }
                         } else if (payload.type === 'material') {
-                            const mat = MaterialManager.getMaterial(payload.name);
+                            const mat = MaterialManager.getMaterial(payload.fullPath || payload.name);
                             if (mat) {
                                 onChange(mat);
                                 value = mat;

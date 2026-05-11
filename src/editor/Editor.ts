@@ -79,6 +79,11 @@ type FloatingDockTarget = {
     host?: EditorDockHost;
 };
 
+type ClipboardGameObjectPayload = {
+    data: any;
+    prefabApplyTargetDepthByPath: Record<string, number>;
+};
+
 export class Editor {
     private scene: Scene;
     private renderer: THREE.WebGLRenderer;
@@ -86,8 +91,9 @@ export class Editor {
     private sceneView: HTMLElement;
     private selectedGameObject: GameObject | null = null;
     private selectedGameObjects: GameObject[] = [];
-    private clipboard: any[] = []; // Serialized GameObjects for copy/paste
+    private clipboard: ClipboardGameObjectPayload[] = [];
     private transformControls: TransformControls;
+    private activeTransformToolMode: 'view' | 'translate' | 'rotate' | 'scale' | 'rect' = 'translate';
     private clock: THREE.Clock;
     private sceneGizmo: SceneGizmo;
     private composer!: EffectComposer;
@@ -4119,7 +4125,7 @@ export class Editor {
                             const renderer = go.getComponent(MeshRenderer);
                             if (renderer) {
                                 const matName = payload.name;
-                                const mat = MaterialManager.getMaterial(matName);
+                                const mat = MaterialManager.getMaterial(payload.fullPath || matName);
                                 if (mat) {
                                     renderer.material = mat;
                                     this.inspectorWindow.refresh();
@@ -4413,7 +4419,10 @@ export class Editor {
 
     private showSceneContextMenu(x: number, y: number, worldPoint: THREE.Vector3): void {
         this.removeSceneContextMenu();
-        const hasSelection = this.selectedGameObjects.some((go) => go !== this.cameraGO);
+        const selectionTargets = this.getSelectionStateTargets();
+        const hasSelection = selectionTargets.length > 0;
+        const allEnabled = hasSelection && selectionTargets.every((go) => go.enabled);
+        const allStatic = hasSelection && selectionTargets.every((go) => Boolean(go.isStatic));
         const primarySelection = this.selectedGameObject && this.selectedGameObject !== this.cameraGO
             ? this.selectedGameObject
             : (this.selectedGameObjects.find((go) => go !== this.cameraGO) ?? null);
@@ -4468,6 +4477,8 @@ export class Editor {
         };
 
         addItem('Frame Selected', () => this.focusOnSelectionOrScene(), undefined, !hasSelection);
+        addItem(allEnabled ? 'Set Inactive' : 'Set Active', () => this.setSelectionActiveState(!allEnabled), undefined, !hasSelection);
+        addItem(allStatic ? 'Clear Static' : 'Set Static', () => this.setSelectionStaticState(!allStatic), undefined, !hasSelection);
         addItem('Select Parent (Alt+Up)', () => this.selectParentOfSelection(), undefined, !hasParentSelection);
         addItem('Select First Child (Alt+Down)', () => this.selectFirstChildOfSelection(), undefined, !hasChildSelection);
         addItem('Select Previous Sibling (Alt+Left)', () => this.selectSiblingOfSelection(-1), undefined, !hasPrevSiblingSelection);
@@ -5375,6 +5386,11 @@ export class Editor {
     }
 
     private updateTransformControlsAttachment() {
+        if (this.activeTransformToolMode === 'view') {
+            this.transformControls.detach();
+            return;
+        }
+
         if (!this.selectedGameObject || this.selectedGameObjects.length === 0) {
             this.transformControls.detach();
             return;
@@ -5463,19 +5479,16 @@ export class Editor {
         this.transformSpaceMode = EditorSettings.transformSpaceMode === 'world' ? 'world' : 'local';
         this.transformControls.setSpace(this.transformSpaceMode);
         this.applySnapSettingsToTransformControls();
-        this.updateTransformToolToggleButtons();
+        this.setTransformToolMode('translate');
 
         btnTranslate.onclick = () => {
-            this.transformControls.setMode('translate');
-            this.updateToolButtons('translate');
+            this.setTransformToolMode('translate');
         };
         btnRotate.onclick = () => {
-            this.transformControls.setMode('rotate');
-            this.updateToolButtons('rotate');
+            this.setTransformToolMode('rotate');
         };
         btnScale.onclick = () => {
-            this.transformControls.setMode('scale');
-            this.updateToolButtons('scale');
+            this.setTransformToolMode('scale');
         };
 
         btnPivot.onclick = () => {
@@ -5571,11 +5584,26 @@ export class Editor {
             }
 
             const commandKey = event.ctrlKey || event.metaKey;
+            const hasRectSelection = Boolean(
+                this.selectedGameObject?.getComponent(RectTransform) || this.selectedGameObject?.getComponent(Canvas)
+            );
 
             switch (event.key.toLowerCase()) {
-                case 'w': this.transformControls.setMode('translate'); this.updateToolButtons('translate'); break;
-                case 'e': this.transformControls.setMode('rotate'); this.updateToolButtons('rotate'); break;
-                case 'r': this.transformControls.setMode('scale'); this.updateToolButtons('scale'); break;
+                case 'q':
+                    this.setTransformToolMode('view');
+                    break;
+                case 'w':
+                    this.setTransformToolMode('translate');
+                    break;
+                case 'e':
+                    this.setTransformToolMode('rotate');
+                    break;
+                case 'r':
+                    this.setTransformToolMode('scale');
+                    break;
+                case 't':
+                    this.setTransformToolMode(hasRectSelection ? 'rect' : 'translate');
+                    break;
                 case 'z':
                     if (commandKey) {
                         event.preventDefault();
@@ -6068,11 +6096,12 @@ export class Editor {
         go.object3D.updateMatrixWorld(true);
     }
 
-    private createEmptyGameObject(parent?: any, worldPosition?: THREE.Vector3) {
+    private createEmptyGameObject(parent?: any, worldPosition?: THREE.Vector3, prefabApplyTargetSource?: GameObject | null) {
         const go = new GameObject("New GameObject");
         this.applySpawnPosition(go, worldPosition, parent ?? null);
         const cmd = new CreateGameObjectCommand(go, this.scene, parent ?? null);
         CommandHistory.execute(cmd);
+        this.inheritPrefabApplyTargetPreference(go, prefabApplyTargetSource ?? parent?.gameObject ?? null);
         this.selectGameObject(go);
         this.hierarchyWindow.refresh();
     }
@@ -6348,7 +6377,7 @@ export class Editor {
         }
 
         if (targets.length === 1) {
-            this.createEmptyGameObject(targets[0].transform, worldPosition);
+            this.createEmptyGameObject(targets[0].transform, worldPosition, targets[0]);
             return;
         }
 
@@ -6368,6 +6397,9 @@ export class Editor {
         });
 
         CommandHistory.execute(new GroupCommand(`Create Empty Child (${targets.length})`, commands));
+        createdChildren.forEach((child, index) => {
+            this.inheritPrefabApplyTargetPreference(child, targets[index] ?? null);
+        });
 
         if (createdChildren.length > 0) {
             this.selectGameObjectRange(createdChildren, false);
@@ -6416,8 +6448,43 @@ export class Editor {
             CommandHistory.execute(new GroupCommand(`Create Empty Parent (${targets.length})`, commands));
         }
 
+        this.inheritPrefabApplyTargetPreference(parent, this.resolveInheritedPrefabApplyTargetSource(targets));
+
         this.selectGameObject(parent, false);
         this.hierarchyWindow.refresh();
+    }
+
+    private resolveInheritedPrefabApplyTargetSource(targets: GameObject[]): GameObject | null {
+        if (targets.length === 0) return null;
+        const normalizedTargets = this.normalizeSelectionTargets(targets);
+        if (normalizedTargets.length === 0) return null;
+
+        const activeSelection = this.selectedGameObject && normalizedTargets.includes(this.selectedGameObject)
+            ? this.selectedGameObject
+            : (normalizedTargets[normalizedTargets.length - 1] ?? normalizedTargets[0] ?? null);
+        if (!activeSelection) return null;
+
+        const activePreferredTarget = this.getPrefabApplyTargetRoot(activeSelection);
+        if (!activePreferredTarget) return null;
+
+        const allSharePreferredTarget = normalizedTargets.every((target) => this.getPrefabApplyTargetRoot(target)?.id === activePreferredTarget.id);
+        return allSharePreferredTarget ? activeSelection : null;
+    }
+
+    private inheritPrefabApplyTargetPreference(target: GameObject, source: GameObject | null): void {
+        if (!target || !source) return;
+        const sourcePreferredRoot = this.getPrefabApplyTargetRoot(source);
+        if (!sourcePreferredRoot) return;
+
+        const targetOwnershipChain = PrefabManager.getPrefabOwnershipChain(target);
+        const preferredTarget = targetOwnershipChain.find((entry) => entry.sourceAssetPath === sourcePreferredRoot.sourceAssetPath && entry.prefabSource === sourcePreferredRoot.prefabSource)
+            ?? targetOwnershipChain.find((entry) => entry.id === sourcePreferredRoot.id)
+            ?? null;
+        if (!preferredTarget) return;
+        if (targetOwnershipChain[0]?.id === preferredTarget.id) return;
+
+        this.prefabApplyTargetRootIds.set(target.id, preferredTarget.id);
+        this.persistPrefabApplyTargetRootPreferences();
     }
 
     private getTopLevelSelectionTargets(): GameObject[] {
@@ -6653,18 +6720,25 @@ export class Editor {
 
     // ─── Duplicate Selected ───────────────────────────────────────────
     public duplicateSelected(): void {
-        const targets = this.selectedGameObjects.filter(go => go !== this.cameraGO);
+        const targets = this.getTopLevelSelectionTargets();
         if (targets.length === 0) return;
 
         const newObjects: GameObject[] = [];
         if (targets.length === 1) {
+            const applyTargetDepthMap = this.capturePrefabApplyTargetDepthMap(targets[0]);
             const cmd = new DuplicateGameObjectCommand(this.scene, targets[0]);
             CommandHistory.execute(cmd);
             const dup = cmd.getDuplicatedGameObject();
-            if (dup) newObjects.push(dup);
+            if (dup) {
+                if (this.restorePrefabApplyTargetDepthMap(dup, applyTargetDepthMap)) {
+                    this.persistPrefabApplyTargetRootPreferences();
+                }
+                newObjects.push(dup);
+            }
         } else {
             const referenceMap = this.createSceneReferenceMap();
             const serialized = targets.map((go) => go.serialize());
+            const applyTargetDepthMaps = targets.map((go) => this.capturePrefabApplyTargetDepthMap(go));
             const duplicates = Prefab.instantiateManyData(serialized, { externalIdMap: referenceMap });
             duplicates.forEach((dup, index) => {
                 dup.name = `${targets[index]?.name ?? dup.name} (Copy)`;
@@ -6692,20 +6766,22 @@ export class Editor {
 
             if (commands.length > 0) {
                 CommandHistory.execute(new GroupCommand(`Duplicate ${commands.length} objects`, commands));
-                duplicates.forEach((dup) => {
+                let restoredAnyApplyTarget = false;
+                duplicates.forEach((dup, index) => {
                     if (dup.scene === this.scene) {
+                        restoredAnyApplyTarget = this.restorePrefabApplyTargetDepthMap(dup, applyTargetDepthMaps[index] ?? {}) || restoredAnyApplyTarget;
                         newObjects.push(dup);
                     }
                 });
+                if (restoredAnyApplyTarget) {
+                    this.persistPrefabApplyTargetRootPreferences();
+                }
             }
         }
 
         // Select duplicated objects
         if (newObjects.length > 0) {
-            this.selectGameObject(newObjects[0]);
-            for (let i = 1; i < newObjects.length; i++) {
-                this.selectGameObject(newObjects[i], true);
-            }
+            this.selectGameObjectRange(newObjects, false, newObjects[newObjects.length - 1] ?? null);
         }
         this.hierarchyWindow.refresh();
     }
@@ -6756,16 +6832,19 @@ export class Editor {
 
     // ─── Copy Selected ────────────────────────────────────────────────
     public cutSelected(): void {
-        const targets = this.selectedGameObjects.filter(go => go !== this.cameraGO);
+        const targets = this.getTopLevelSelectionTargets();
         if (targets.length === 0) return;
         this.copySelected();
         this.deleteSelected();
     }
 
     public copySelected(): void {
-        const targets = this.selectedGameObjects.filter(go => go !== this.cameraGO);
+        const targets = this.getTopLevelSelectionTargets();
         if (targets.length === 0) return;
-        this.clipboard = targets.map(go => go.serialize());
+        this.clipboard = targets.map((go) => ({
+            data: go.serialize(),
+            prefabApplyTargetDepthByPath: this.capturePrefabApplyTargetDepthMap(go)
+        }));
         console.log(`Copied ${targets.length} object(s) to clipboard`);
         this.syncWindowMenuState();
     }
@@ -6805,6 +6884,7 @@ export class Editor {
 
         if (commands.length === 0) return;
         CommandHistory.execute(new GroupCommand(`Paste As Child (${commands.length})`, commands));
+        this.restoreClipboardPrefabApplyTargets(pastedObjects, targets.length);
 
         this.selectGameObjectRange(pastedObjects, false);
         this.hierarchyWindow.refresh();
@@ -6843,12 +6923,11 @@ export class Editor {
             CommandHistory.execute(group);
         }
 
+        this.restoreClipboardPrefabApplyTargets(pastedObjects);
+
         // Select pasted objects
         if (pastedObjects.length > 0) {
-            this.selectGameObject(pastedObjects[0]);
-            for (let i = 1; i < pastedObjects.length; i++) {
-                this.selectGameObject(pastedObjects[i], true);
-            }
+            this.selectGameObjectRange(pastedObjects, false, pastedObjects[pastedObjects.length - 1] ?? null);
         }
         this.hierarchyWindow.refresh();
         this.syncWindowMenuState();
@@ -6902,7 +6981,114 @@ export class Editor {
 
     private instantiateSerializedGameObjects(dataList: any[]): GameObject[] {
         const referenceMap = this.createSceneReferenceMap();
-        return Prefab.instantiateManyData(dataList, { externalIdMap: referenceMap });
+        return Prefab.instantiateManyData(dataList.map((entry) => entry.data), { externalIdMap: referenceMap });
+    }
+
+    private capturePrefabApplyTargetDepthMap(root: GameObject): Record<string, number> {
+        const captured: Record<string, number> = {};
+
+        const visit = (current: GameObject, currentPath: string | null) => {
+            const preferredTargetId = this.prefabApplyTargetRootIds.get(current.id) ?? null;
+            if (preferredTargetId) {
+                const ownershipChain = PrefabManager.getPrefabOwnershipChain(current);
+                const preferredIndex = ownershipChain.findIndex((entry) => entry.id === preferredTargetId);
+                if (preferredIndex > 0) {
+                    captured[currentPath ?? ''] = preferredIndex;
+                }
+            }
+
+            current.transform.children.forEach((childTransform) => {
+                const child = childTransform.gameObject;
+                const childPath = this.getRelativeHierarchyPath(root, child);
+                if (!childPath) return;
+                visit(child, childPath);
+            });
+        };
+
+        visit(root, null);
+        return captured;
+    }
+
+    private restoreClipboardPrefabApplyTargets(pastedObjects: GameObject[], repeatCount: number = 1): void {
+        if (pastedObjects.length === 0 || this.clipboard.length === 0) return;
+        const rootsPerPaste = this.clipboard.length;
+        if (rootsPerPaste === 0) return;
+
+        const safeRepeatCount = Math.max(1, repeatCount);
+        let didRestoreAny = false;
+        for (let repeatIndex = 0; repeatIndex < safeRepeatCount; repeatIndex++) {
+            for (let clipboardIndex = 0; clipboardIndex < rootsPerPaste; clipboardIndex++) {
+                const pastedIndex = repeatIndex * rootsPerPaste + clipboardIndex;
+                const pastedRoot = pastedObjects[pastedIndex];
+                const payload = this.clipboard[clipboardIndex];
+                if (!pastedRoot || !payload) continue;
+                didRestoreAny = this.restorePrefabApplyTargetDepthMap(pastedRoot, payload.prefabApplyTargetDepthByPath) || didRestoreAny;
+            }
+        }
+
+        if (didRestoreAny) {
+            this.persistPrefabApplyTargetRootPreferences();
+        }
+    }
+
+    private restorePrefabApplyTargetDepthMap(root: GameObject, depthByPath: Record<string, number>): boolean {
+        if (!depthByPath || typeof depthByPath !== 'object') return false;
+
+        let didRestoreAny = false;
+        Object.entries(depthByPath).forEach(([path, preferredDepth]) => {
+            if (!Number.isFinite(preferredDepth) || preferredDepth <= 0) return;
+            const target = this.findGameObjectByRelativeHierarchyPath(root, path || null);
+            if (!target) return;
+
+            const ownershipChain = PrefabManager.getPrefabOwnershipChain(target);
+            const preferredRoot = ownershipChain[Math.trunc(preferredDepth)] ?? null;
+            if (!preferredRoot) return;
+            this.prefabApplyTargetRootIds.set(target.id, preferredRoot.id);
+            didRestoreAny = true;
+        });
+
+        return didRestoreAny;
+    }
+
+    private persistPrefabApplyTargetRootPreferences(): void {
+        EditorSettings.prefabApplyTargetRootIds = this.serializePrefabApplyTargetRootIds();
+        this.saveLayout(false);
+    }
+
+    private findGameObjectByRelativeHierarchyPath(root: GameObject, relativePath: string | null): GameObject | null {
+        if (!relativePath) return root;
+
+        const segments = relativePath.split('/').filter(Boolean);
+        let current = root;
+        for (const segment of segments) {
+            const next = current.transform.children.find((child) => this.getHierarchyPathSegment(child.gameObject) === segment)?.gameObject ?? null;
+            if (!next) return null;
+            current = next;
+        }
+        return current;
+    }
+
+    private getRelativeHierarchyPath(root: GameObject, target: GameObject): string | null {
+        if (root === target) return null;
+
+        const segments: string[] = [];
+        let current: GameObject | null = target;
+        while (current && current !== root) {
+            segments.unshift(this.getHierarchyPathSegment(current));
+            current = current.transform.parent?.gameObject ?? null;
+        }
+
+        return current === root ? segments.join('/') : null;
+    }
+
+    private getHierarchyPathSegment(gameObject: GameObject): string {
+        const parent = gameObject.transform.parent;
+        if (!parent) return `${gameObject.name}#0`;
+
+        const siblings = parent.children.map((child) => child.gameObject);
+        const sameNameSiblings = siblings.filter((sibling) => sibling.name === gameObject.name);
+        const index = sameNameSiblings.indexOf(gameObject);
+        return `${gameObject.name}#${Math.max(0, index)}`;
     }
 
     private setTab(mode: EditorViewportTab, save: boolean = true) {
@@ -7064,6 +7250,21 @@ export class Editor {
             }
         });
         this.updateTransformToolToggleButtons();
+    }
+
+    private setTransformToolMode(mode: 'view' | 'translate' | 'rotate' | 'scale' | 'rect') {
+        this.activeTransformToolMode = mode;
+
+        if (mode === 'view') {
+            this.transformControls.detach();
+            this.updateToolButtons('none');
+            return;
+        }
+
+        const resolvedMode = mode === 'rect' ? 'translate' : mode;
+        this.transformControls.setMode(resolvedMode);
+        this.updateToolButtons(resolvedMode);
+        this.updateTransformControlsAttachment();
     }
 
     private updateTransformToolToggleButtons() {
@@ -7235,13 +7436,7 @@ export class Editor {
 
         // Keyboard Shortcuts
         if (Input.getKeyDown('KeyF')) this.focusOnSelectionOrScene();
-        if (Input.getKeyDown('KeyQ')) this.transformControls.enabled = !this.transformControls.enabled;
         if (Input.getButtonDown('Submit')) { /* Handle Enter if needed */ }
-
-        // Tool Shortcuts
-        if (Input.getKeyDown('KeyW')) { this.transformControls.setMode('translate'); this.updateToolButtons('translate'); }
-        if (Input.getKeyDown('KeyE')) { this.transformControls.setMode('rotate'); this.updateToolButtons('rotate'); }
-        if (Input.getKeyDown('KeyR')) { this.transformControls.setMode('scale'); this.updateToolButtons('scale'); }
 
         Input.lateUpdate();
 
@@ -7410,136 +7605,39 @@ export class Editor {
 
     public selectGameObject(go: GameObject | null, additive: boolean = false) {
         if (!go) {
-            this.selectedGameObject = null;
-            this.selectedGameObjects = [];
-            this.updateTransformControlsAttachment();
-
-            this.selectionHelpers.forEach(h => this.scene.threeScene.remove(h));
-            this.selectionHelpers.clear();
-            this.outlinePass.selectedObjects = [];
-
-            this.gizmos.forEach(g => this.scene.threeScene.remove(g));
-            this.gizmos.clear();
-
-            this.inspectorWindow.selectGameObject(null);
-            this.hierarchyWindow.refresh();
-            this.syncWindowMenuState();
+            this.applyGameObjectSelection([], null);
             return;
         }
 
         if (additive) {
-            const index = this.selectedGameObjects.indexOf(go);
+            const current = this.normalizeSelectionTargets(this.selectedGameObjects);
+            const index = current.indexOf(go);
             if (index > -1) {
-                this.selectedGameObjects.splice(index, 1);
-                const h = this.selectionHelpers.get(go);
-                if (h) { this.scene.threeScene.remove(h); this.selectionHelpers.delete(go); }
-            } else {
-                this.selectedGameObjects.push(go);
-                const h = new THREE.BoxHelper(go.object3D, 0xffff00);
-                // @ts-ignore
-                h.material.opacity = 0.5;
-                // @ts-ignore
-                h.material.transparent = true;
-                this.scene.threeScene.add(h);
-                this.selectionHelpers.set(go, h);
+                current.splice(index, 1);
+                const nextActive = current[current.length - 1] ?? null;
+                this.applyGameObjectSelection(current, nextActive);
+                return;
             }
-            this.selectedGameObject = this.selectedGameObjects[this.selectedGameObjects.length - 1] || null;
-        } else {
-            this.selectionHelpers.forEach(h => this.scene.threeScene.remove(h));
-            this.selectionHelpers.clear();
 
-            this.selectedGameObjects = [go];
-            this.selectedGameObject = go;
-
-            const h = new THREE.BoxHelper(go.object3D, 0xffff00);
-            // @ts-ignore
-            h.material.opacity = 0.5;
-            // @ts-ignore
-            h.material.transparent = true;
-            this.scene.threeScene.add(h);
-            this.selectionHelpers.set(go, h);
+            this.applyGameObjectSelection([...current, go], go);
+            return;
         }
 
-        // --- Sync Outline Pass ---
-        this.outlinePass.selectedObjects = this.selectedGameObjects.map(obj => obj.object3D);
-
-        if (this.selectedGameObject) {
-            this.updateTransformControlsAttachment();
-
-            this.gizmos.forEach(g => this.scene.threeScene.remove(g));
-            this.gizmos.clear();
-
-            this.selectedGameObject.components.forEach(c => {
-                if ((c as any).createGizmo) {
-                    const g = (c as any).createGizmo();
-                    if (g) {
-                        this.scene.threeScene.add(g);
-                        this.gizmos.set(c, g);
-                    }
-                }
-            });
-            this.inspectorWindow.selectGameObject(this.selectedGameObject);
-        } else {
-            this.updateTransformControlsAttachment();
-            this.inspectorWindow.selectGameObject(null);
-        }
-
-        this.hierarchyWindow.refresh();
-        this.updateOutlineSelection();
-        this.syncWindowMenuState();
+        this.applyGameObjectSelection([go], go);
     }
 
-    public selectGameObjectRange(gameObjects: GameObject[], additive: boolean = false) {
-        const uniqueTargets = Array.from(new Set(
-            gameObjects.filter((go) => !!go && go !== this.cameraGO)
-        ));
-
+    public selectGameObjectRange(gameObjects: GameObject[], additive: boolean = false, preferredActive: GameObject | null = null) {
+        const uniqueTargets = this.normalizeSelectionTargets(gameObjects);
         const nextSelection = additive
-            ? Array.from(new Set([...this.selectedGameObjects, ...uniqueTargets]))
+            ? [
+                ...this.normalizeSelectionTargets(this.selectedGameObjects).filter((selected) => !uniqueTargets.includes(selected)),
+                ...uniqueTargets
+            ]
             : uniqueTargets;
-
-        this.selectionHelpers.forEach((helper) => this.scene.threeScene.remove(helper));
-        this.selectionHelpers.clear();
-
-        this.selectedGameObjects = nextSelection;
-        this.selectedGameObject = nextSelection[nextSelection.length - 1] ?? null;
-
-        this.selectedGameObjects.forEach((target) => {
-            const helper = new THREE.BoxHelper(target.object3D, 0xffff00);
-            // @ts-ignore
-            helper.material.opacity = 0.5;
-            // @ts-ignore
-            helper.material.transparent = true;
-            this.scene.threeScene.add(helper);
-            this.selectionHelpers.set(target, helper);
-        });
-
-        this.outlinePass.selectedObjects = this.selectedGameObjects.map((obj) => obj.object3D);
-
-        if (this.selectedGameObject) {
-            this.updateTransformControlsAttachment();
-
-            this.gizmos.forEach((gizmo) => this.scene.threeScene.remove(gizmo));
-            this.gizmos.clear();
-
-            this.selectedGameObject.components.forEach((component) => {
-                if (!(component as any).createGizmo) return;
-                const gizmo = (component as any).createGizmo();
-                if (!gizmo) return;
-                this.scene.threeScene.add(gizmo);
-                this.gizmos.set(component, gizmo);
-            });
-            this.inspectorWindow.selectGameObject(this.selectedGameObject);
-        } else {
-            this.updateTransformControlsAttachment();
-            this.gizmos.forEach((gizmo) => this.scene.threeScene.remove(gizmo));
-            this.gizmos.clear();
-            this.inspectorWindow.selectGameObject(null);
-        }
-
-        this.hierarchyWindow.refresh();
-        this.updateOutlineSelection();
-        this.syncWindowMenuState();
+        const nextActive = preferredActive && nextSelection.includes(preferredActive)
+            ? preferredActive
+            : (nextSelection[nextSelection.length - 1] ?? null);
+        this.applyGameObjectSelection(nextSelection, nextActive);
     }
 
     private addGameObjectToSelection(go: GameObject): void {
@@ -7561,7 +7659,119 @@ export class Editor {
     }
 
     public getSelectedGameObjects(): GameObject[] {
-        return this.selectedGameObjects;
+        return [...this.selectedGameObjects];
+    }
+
+    public setSelectionActiveState(nextEnabled: boolean, selectedOverride?: GameObject[]): void {
+        const targets = this.getSelectionStateTargets(selectedOverride);
+        if (targets.length === 0) return;
+
+        const oldValues = targets.map((target) => Boolean(target.enabled));
+        const primary = targets[targets.length - 1] ?? targets[0];
+        CommandHistory.execute({
+            name: `Toggle Active ${primary.name} (${targets.length} selected)`,
+            execute: () => {
+                targets.forEach((target) => target.setActive(nextEnabled));
+                this.hierarchyWindow.refresh();
+                this.inspectorWindow.refresh();
+            },
+            undo: () => {
+                targets.forEach((target, index) => target.setActive(oldValues[index]));
+                this.hierarchyWindow.refresh();
+                this.inspectorWindow.refresh();
+            }
+        });
+    }
+
+    public setSelectionStaticState(nextStatic: boolean, selectedOverride?: GameObject[]): void {
+        const targets = this.getSelectionStateTargets(selectedOverride);
+        if (targets.length === 0) return;
+
+        const oldValues = targets.map((target) => Boolean(target.isStatic));
+        const primary = targets[targets.length - 1] ?? targets[0];
+        CommandHistory.execute({
+            name: `Change Static ${primary.name} (${targets.length} selected)`,
+            execute: () => {
+                targets.forEach((target) => {
+                    target.isStatic = nextStatic;
+                });
+                this.hierarchyWindow.refresh();
+                this.inspectorWindow.refresh();
+            },
+            undo: () => {
+                targets.forEach((target, index) => {
+                    target.isStatic = oldValues[index];
+                });
+                this.hierarchyWindow.refresh();
+                this.inspectorWindow.refresh();
+            }
+        });
+    }
+
+    private normalizeSelectionTargets(targets: Array<GameObject | null | undefined>): GameObject[] {
+        const unique: GameObject[] = [];
+        const seen = new Set<string>();
+        targets.forEach((target) => {
+            if (!target || target === this.cameraGO) return;
+            if (seen.has(target.id)) return;
+            seen.add(target.id);
+            unique.push(target);
+        });
+        return unique;
+    }
+
+    private getSelectionStateTargets(selectedOverride?: GameObject[]): GameObject[] {
+        const normalized = this.normalizeSelectionTargets(selectedOverride ?? this.selectedGameObjects);
+        if (normalized.length > 0) return normalized;
+        return this.selectedGameObject && this.selectedGameObject !== this.cameraGO
+            ? [this.selectedGameObject]
+            : [];
+    }
+
+    private applyGameObjectSelection(targets: Array<GameObject | null | undefined>, preferredActive: GameObject | null = null): void {
+        const normalizedTargets = this.normalizeSelectionTargets(targets);
+        const activeSelection = preferredActive && normalizedTargets.includes(preferredActive)
+            ? preferredActive
+            : (normalizedTargets[normalizedTargets.length - 1] ?? null);
+
+        this.selectionHelpers.forEach((helper) => this.scene.threeScene.remove(helper));
+        this.selectionHelpers.clear();
+
+        this.selectedGameObjects = normalizedTargets;
+        this.selectedGameObject = activeSelection;
+
+        this.selectedGameObjects.forEach((target) => {
+            const helper = new THREE.BoxHelper(target.object3D, 0xffff00);
+            // @ts-ignore
+            helper.material.opacity = 0.5;
+            // @ts-ignore
+            helper.material.transparent = true;
+            this.scene.threeScene.add(helper);
+            this.selectionHelpers.set(target, helper);
+        });
+
+        this.outlinePass.selectedObjects = this.selectedGameObjects.map((obj) => obj.object3D);
+        this.updateTransformControlsAttachment();
+
+        this.gizmos.forEach((gizmo) => this.scene.threeScene.remove(gizmo));
+        this.gizmos.clear();
+
+        if (this.selectedGameObject) {
+            this.selectedGameObject.components.forEach((component) => {
+                if (!(component as any).createGizmo) return;
+                const gizmo = (component as any).createGizmo();
+                if (!gizmo) return;
+                this.scene.threeScene.add(gizmo);
+                this.gizmos.set(component, gizmo);
+            });
+            this.inspectorWindow.selectGameObject(this.selectedGameObject);
+        } else {
+            this.inspectorWindow.selectGameObject(null);
+        }
+
+        this.hierarchyWindow.refresh();
+        this.updateOutlineSelection();
+        this.syncWindowMenuState();
     }
 
     public selectAllSceneObjects() {

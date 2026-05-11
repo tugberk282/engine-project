@@ -112,6 +112,8 @@ export class HierarchyWindow extends EditorWindow {
                 } else {
                     CommandHistory.execute(new GroupCommand(`Unparent ${reparentCommands.length} objects`, reparentCommands));
                 }
+                // @ts-ignore
+                window.Editor?.instance?.selectGameObjectRange?.(topLevelDragged, false, topLevelDragged[topLevelDragged.length - 1] ?? null);
                 this.refreshList();
             } catch {
                 // no-op: ignore invalid drag payload
@@ -313,6 +315,28 @@ export class HierarchyWindow extends EditorWindow {
             container.appendChild(overridesBadge);
         }
 
+        if (prefabContext && !prefabContext.isApplyTargetContextRoot) {
+            const activeApplyOption = prefabContext.applyTargetOptions.find((option: Record<string, any>) => option.id === prefabContext.applyTargetRoot.id) ?? null;
+            const targetBadge = document.createElement('span');
+            targetBadge.innerText = `T${activeApplyOption?.depth ?? 1}`;
+            targetBadge.title = `Apply target switched to outer prefab owner: ${prefabContext.assetLabel} > ${prefabContext.nodeLabel}`;
+            targetBadge.style.cssText = `
+                font-size: 9px;
+                background: rgba(216, 192, 122, 0.14);
+                color: #d8c07a;
+                border: 1px solid rgba(216, 192, 122, 0.34);
+                padding: 0 4px;
+                border-radius: 4px;
+                margin-left: 4px;
+                line-height: 14px;
+                height: 14px;
+                display: inline-flex;
+                align-items: center;
+                flex-shrink: 0;
+            `;
+            container.appendChild(targetBadge);
+        }
+
         // Child count badge
         if (hasChildren) {
             const badge = document.createElement('span');
@@ -374,7 +398,7 @@ export class HierarchyWindow extends EditorWindow {
                     if (anchorIndex > -1 && targetIndex > -1) {
                         const start = Math.min(anchorIndex, targetIndex);
                         const end = Math.max(anchorIndex, targetIndex);
-                        editor.selectGameObjectRange(orderedNodes.slice(start, end + 1), additive);
+                        editor.selectGameObjectRange(orderedNodes.slice(start, end + 1), additive, go);
                     } else {
                         editor.selectGameObject(go, additive);
                     }
@@ -427,7 +451,11 @@ export class HierarchyWindow extends EditorWindow {
                     const topLevelDragged = this.getTopLevelDraggedSources(dragged);
 
                     const reparentCommands = topLevelDragged
-                        .filter((sourceGO) => sourceGO !== go && !this.isDescendant(sourceGO, go))
+                        .filter((sourceGO) =>
+                            sourceGO !== go &&
+                            !this.isDescendant(sourceGO, go) &&
+                            sourceGO.transform.parent !== go.transform
+                        )
                         .map((sourceGO) => new ReparentGameObjectCommand(sourceGO, go.transform));
                     if (reparentCommands.length === 0) return;
 
@@ -436,6 +464,8 @@ export class HierarchyWindow extends EditorWindow {
                     } else {
                         CommandHistory.execute(new GroupCommand(`Reparent ${reparentCommands.length} objects`, reparentCommands));
                     }
+                    // @ts-ignore
+                    window.Editor?.instance?.selectGameObjectRange?.(topLevelDragged, false, topLevelDragged[topLevelDragged.length - 1] ?? null);
                     this.refreshList();
                 } else if (payload.type === 'file') {
                     // Logic for dropping scripts onto GameObjects
@@ -549,7 +579,7 @@ export class HierarchyWindow extends EditorWindow {
                 if (anchorIndex > -1 && targetIndex > -1) {
                     const start = Math.min(anchorIndex, targetIndex);
                     const end = Math.max(anchorIndex, targetIndex);
-                    editor.selectGameObjectRange?.(orderedNodes.slice(start, end + 1), false);
+                    editor.selectGameObjectRange?.(orderedNodes.slice(start, end + 1), false, target);
                 } else {
                     editor.selectGameObject?.(target, false);
                 }
@@ -759,6 +789,9 @@ export class HierarchyWindow extends EditorWindow {
         const selected = (editor?.getSelectedGameObjects?.() as GameObject[] | undefined) ?? [];
         const clickedInSelection = selected.includes(go);
         const selectionScope = clickedInSelection && selected.length > 0 ? selected : [go];
+        const topLevelSelectionScope = this.getTopLevelDraggedSources(selectionScope);
+        const allEnabled = selectionScope.length > 0 && selectionScope.every((entry) => entry.enabled);
+        const allStatic = selectionScope.length > 0 && selectionScope.every((entry) => Boolean(entry.isStatic));
         const primarySelection = selectionScope[selectionScope.length - 1] ?? go;
         const parentTransform = primarySelection.transform.parent;
         const hasParentSelection = !!parentTransform;
@@ -767,7 +800,7 @@ export class HierarchyWindow extends EditorWindow {
         const siblingCount = parentTransform?.children.length ?? 0;
         const hasPrevSiblingSelection = siblingCount > 1 && siblingIndex > 0;
         const hasNextSiblingSelection = siblingCount > 1 && siblingIndex >= 0 && siblingIndex < (siblingCount - 1);
-        const canUnparent = selectionScope.some((entry) => !!entry.transform.parent);
+        const canUnparent = topLevelSelectionScope.some((entry) => !!entry.transform.parent);
         const hasClipboard = (editor?.getClipboardSize?.() ?? 0) > 0;
         const canMoveSiblingUp = editor?.canMoveSelectionSibling?.(-1, selectionScope) ?? false;
         const canMoveSiblingDown = editor?.canMoveSelectionSibling?.(1, selectionScope) ?? false;
@@ -829,6 +862,16 @@ export class HierarchyWindow extends EditorWindow {
             ensureSelection();
             editor.focusOnSelection?.();
         });
+        this.addMenuItem(menu, allEnabled ? 'Set Inactive' : 'Set Active', () => {
+            ensureSelection();
+            editor?.setSelectionActiveState?.(!allEnabled, selectionScope);
+            this.refreshList();
+        });
+        this.addMenuItem(menu, allStatic ? 'Clear Static' : 'Set Static', () => {
+            ensureSelection();
+            editor?.setSelectionStaticState?.(!allStatic, selectionScope);
+            this.refreshList();
+        });
         this.addMenuItem(menu, 'Select Parent (Alt+Up)', () => {
             ensureSelection();
             editor?.selectParentOfSelection?.();
@@ -878,6 +921,20 @@ export class HierarchyWindow extends EditorWindow {
         if (prefabContext) {
             this.addMenuSeparator(menu);
 
+            if (prefabContext.applyTargetOptions.length > 1) {
+                prefabContext.applyTargetOptions.forEach((option: Record<string, any>) => {
+                    const isActiveTarget = option.id === prefabContext.applyTargetRoot.id;
+                    const optionLabel = `${isActiveTarget ? '• ' : ''}Use Prefab Target: ${option.depth === 0 ? 'Nearest' : `Outer ${option.depth}`} - ${option.label}`;
+                    this.addMenuItem(menu, optionLabel, () => {
+                        editor?.setPrefabApplyTargetRoot?.(go, option.id);
+                        this.refreshList();
+                        editor?.inspectorWindow?.refresh?.();
+                    }, undefined, isActiveTarget);
+                });
+
+                this.addMenuSeparator(menu);
+            }
+
             this.addMenuItem(menu, 'Prefab Apply Target', () => {
                 editor?.applyPrefabSelectionToTarget?.(go);
                 this.refreshList();
@@ -923,7 +980,17 @@ export class HierarchyWindow extends EditorWindow {
                 this.refreshList();
                 return;
             }
-            CommandHistory.execute(new ReparentGameObjectCommand(go, null));
+            const commands = topLevelSelectionScope
+                .filter((entry) => !!entry.transform.parent)
+                .map((entry) => new ReparentGameObjectCommand(entry, null));
+            if (commands.length === 0) return;
+            if (commands.length === 1) {
+                CommandHistory.execute(commands[0]);
+            } else {
+                CommandHistory.execute(new GroupCommand(`Unparent ${commands.length} objects`, commands));
+            }
+            // @ts-ignore
+            window.Editor?.instance?.selectGameObjectRange?.(topLevelSelectionScope, false, topLevelSelectionScope[topLevelSelectionScope.length - 1] ?? null);
             this.refreshList();
         }, undefined, !canUnparent);
 

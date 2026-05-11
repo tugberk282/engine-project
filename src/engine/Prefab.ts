@@ -708,6 +708,11 @@ export class PrefabManager {
         return this.getRelativePrefabPath(prefabRoot, gameObject);
     }
 
+    public static findPrefabInstanceNodeByPath(root: GameObject, childPath: string | null): GameObject | null {
+        if (!childPath) return root;
+        return this.findCurrentChildByPath(root, childPath);
+    }
+
     private static resolveComponentPayloadForInstance(
         gameObject: GameObject,
         data: unknown,

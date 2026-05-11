@@ -55,8 +55,16 @@ export interface AssetRefreshResult {
     removed: string[];
     changed: string[];
     metaChanged: string[];
+    metaRepaired: string[];
+    duplicateGuidRepaired: string[];
+    orphanMetaFiles: string[];
     moved: AssetRefreshMove[];
     scannedCount: number;
+}
+
+interface MetaReadResult {
+    meta: AssetMeta | null;
+    malformed: boolean;
 }
 
 export class AssetDatabase {
@@ -67,6 +75,9 @@ export class AssetDatabase {
     private pathToFingerprint: Map<string, AssetFileFingerprint> = new Map();
     private dependencyGuidsBySourceGuid: Map<string, Set<string>> = new Map();
     private referencerGuidsByTargetGuid: Map<string, Set<string>> = new Map();
+    private repairedMalformedMetaPaths: Set<string> = new Set();
+    private repairedDuplicateGuidPaths: Set<string> = new Set();
+    private orphanMetaFilePaths: Set<string> = new Set();
     private fs: DesktopFileSystem;
     private constructor() {
         this.fs = new DesktopFileSystem();
@@ -85,6 +96,9 @@ export class AssetDatabase {
             removed: [],
             changed: [],
             metaChanged: [],
+            metaRepaired: [],
+            duplicateGuidRepaired: [],
+            orphanMetaFiles: [],
             moved: [],
             scannedCount: 0
         };
@@ -98,6 +112,9 @@ export class AssetDatabase {
         this.pathToFingerprint.clear();
         this.dependencyGuidsBySourceGuid.clear();
         this.referencerGuidsByTargetGuid.clear();
+        this.repairedMalformedMetaPaths.clear();
+        this.repairedDuplicateGuidPaths.clear();
+        this.orphanMetaFilePaths.clear();
         this.scanPath(rootPath, new Set<string>());
         this.rebuildDependencyGraph();
 
@@ -148,6 +165,9 @@ export class AssetDatabase {
             removed: removed.sort((left, right) => left.localeCompare(right)),
             changed: changed.sort((left, right) => left.localeCompare(right)),
             metaChanged: metaChanged.sort((left, right) => left.localeCompare(right)),
+            metaRepaired: Array.from(this.repairedMalformedMetaPaths).sort((left, right) => left.localeCompare(right)),
+            duplicateGuidRepaired: Array.from(this.repairedDuplicateGuidPaths).sort((left, right) => left.localeCompare(right)),
+            orphanMetaFiles: Array.from(this.orphanMetaFilePaths).sort((left, right) => left.localeCompare(right)),
             moved,
             scannedCount: this.pathToFingerprint.size
         };
@@ -192,7 +212,7 @@ export class AssetDatabase {
         if (!this.fs || !this.fs.existsSync(assetPath)) return null;
 
         const currentMeta = this.pathToMeta.get(assetPath)
-            ?? this.readMeta(`${assetPath}.meta`)
+            ?? this.readMeta(`${assetPath}.meta`).meta
             ?? this.ensureMetaForPath(assetPath, this.fs.statSync(assetPath).isDirectory(), new Set(this.guidToPath.keys()));
 
         const workingCopy: AssetMeta = JSON.parse(JSON.stringify(currentMeta));
@@ -301,6 +321,8 @@ export class AssetDatabase {
             .filter((entry: { name: string }) => !entry.name.endsWith('.meta'))
             .sort((a: { name: string }, b: { name: string }) => a.name.localeCompare(b.name));
 
+        this.collectOrphanMetaFiles(assetPath, entries.map((entry: { name: string }) => entry.name));
+
         for (const entry of entries) {
             this.scanPath(PathUtils.join(assetPath, entry.name), usedGuids);
         }
@@ -308,8 +330,10 @@ export class AssetDatabase {
 
     private ensureMetaForPath(assetPath: string, isDirectory: boolean, usedGuids: Set<string>): AssetMeta {
         const metaPath = `${assetPath}.meta`;
-        const existingMeta = this.readMeta(metaPath);
+        const metaReadResult = this.readMeta(metaPath);
+        const existingMeta = metaReadResult.meta;
         const assetType = this.inferAssetType(assetPath, isDirectory);
+        const hadDuplicateGuid = typeof existingMeta?.guid === 'string' && existingMeta.guid.trim().length > 0 && usedGuids.has(existingMeta.guid.trim());
         const guid = this.getUniqueGuid(existingMeta?.guid, usedGuids);
 
         const normalizedMeta: AssetMeta = {
@@ -329,9 +353,28 @@ export class AssetDatabase {
         const currentJson = existingMeta ? JSON.stringify(existingMeta, null, 2) : null;
         if (currentJson !== nextJson) {
             this.writeMeta(assetPath, normalizedMeta);
+            if (metaReadResult.malformed) {
+                this.repairedMalformedMetaPaths.add(assetPath);
+            }
+            if (hadDuplicateGuid) {
+                this.repairedDuplicateGuidPaths.add(assetPath);
+            }
         }
 
         return normalizedMeta;
+    }
+
+    private collectOrphanMetaFiles(directoryPath: string, assetEntryNames: string[]) {
+        const assetNames = new Set(assetEntryNames);
+        const metaEntries = this.fs.readdirSync(directoryPath, { withFileTypes: true })
+            .filter((entry: { name: string; isFile?: () => boolean }) => entry.name.endsWith('.meta') && (entry.isFile?.() ?? true));
+
+        metaEntries.forEach((entry: { name: string }) => {
+            const assetName = entry.name.slice(0, -5);
+            if (!assetNames.has(assetName)) {
+                this.orphanMetaFilePaths.add(PathUtils.join(directoryPath, entry.name));
+            }
+        });
     }
 
     private buildFingerprint(assetPath: string, stat: any, meta: AssetMeta): AssetFileFingerprint {
@@ -352,13 +395,19 @@ export class AssetDatabase {
         this.fs.writeFileSync(`${assetPath}.meta`, `${JSON.stringify(meta, null, 2)}\n`, 'utf8');
     }
 
-    private readMeta(metaPath: string): AssetMeta | null {
-        if (!this.fs.existsSync(metaPath)) return null;
+    private readMeta(metaPath: string): MetaReadResult {
+        if (!this.fs.existsSync(metaPath)) return { meta: null, malformed: false };
 
         try {
-            return JSON.parse(this.fs.readFileSync(metaPath, 'utf8')) as AssetMeta;
+            return {
+                meta: JSON.parse(this.fs.readFileSync(metaPath, 'utf8')) as AssetMeta,
+                malformed: false
+            };
         } catch {
-            return null;
+            return {
+                meta: null,
+                malformed: true
+            };
         }
     }
 
@@ -407,11 +456,86 @@ export class AssetDatabase {
             }
         });
 
+        const normalizedSettings = this.sanitizeImporterSettings(assetType, settings);
+
         return {
             name: typeof candidate.name === 'string' && candidate.name.trim().length > 0 ? candidate.name : defaults.name,
             version: typeof candidate.version === 'number' ? candidate.version : defaults.version,
-            settings
+            settings: normalizedSettings
         };
+    }
+
+    private sanitizeImporterSettings(
+        assetType: AssetType,
+        settings: Record<string, string | number | boolean>
+    ): Record<string, string | number | boolean> {
+        const nextSettings = { ...settings };
+
+        const readBoolean = (key: string, fallback: boolean): boolean =>
+            typeof nextSettings[key] === 'boolean' ? nextSettings[key] as boolean : fallback;
+        const readNumber = (key: string, fallback: number): number =>
+            typeof nextSettings[key] === 'number' && Number.isFinite(nextSettings[key]) ? nextSettings[key] as number : fallback;
+        const readString = (key: string, fallback: string): string =>
+            typeof nextSettings[key] === 'string' && (nextSettings[key] as string).trim().length > 0 ? (nextSettings[key] as string).trim() : fallback;
+
+        switch (assetType) {
+            case 'script':
+                nextSettings.autoReferenced = readBoolean('autoReferenced', true);
+                nextSettings.executionOrder = Math.trunc(readNumber('executionOrder', 0));
+                break;
+            case 'scene':
+                nextSettings.includeInBuild = readBoolean('includeInBuild', true);
+                nextSettings.autoLighting = readBoolean('autoLighting', true);
+                break;
+            case 'prefab':
+                nextSettings.autoReconnect = readBoolean('autoReconnect', true);
+                nextSettings.preserveOverrides = readBoolean('preserveOverrides', true);
+                break;
+            case 'material': {
+                const shader = readString('shader', 'Standard').toLowerCase();
+                nextSettings.shader = shader === 'unlit'
+                    ? 'Unlit'
+                    : shader === 'transparent'
+                        ? 'Transparent'
+                        : 'Standard';
+                nextSettings.doubleSidedGI = readBoolean('doubleSidedGI', false);
+                break;
+            }
+            case 'texture': {
+                const wrapMode = readString('wrapMode', 'repeat').toLowerCase();
+                const filterMode = readString('filterMode', 'bilinear').toLowerCase();
+                nextSettings.sRGB = readBoolean('sRGB', true);
+                nextSettings.alphaIsTransparency = readBoolean('alphaIsTransparency', true);
+                nextSettings.wrapMode = ['repeat', 'clamp', 'mirror'].includes(wrapMode) ? wrapMode : 'repeat';
+                nextSettings.filterMode = ['point', 'bilinear', 'trilinear'].includes(filterMode) ? filterMode : 'bilinear';
+                nextSettings.maxSize = Math.max(1, Math.round(readNumber('maxSize', 2048)));
+                break;
+            }
+            case 'model':
+                nextSettings.scaleFactor = Math.max(0.0001, readNumber('scaleFactor', 1));
+                nextSettings.importAnimations = readBoolean('importAnimations', true);
+                nextSettings.generateColliders = readBoolean('generateColliders', false);
+                nextSettings.readWriteEnabled = readBoolean('readWriteEnabled', false);
+                break;
+            case 'audio': {
+                const loadType = readString('loadType', 'decompressOnLoad').toLowerCase();
+                nextSettings.loadType = loadType === 'streaming'
+                    ? 'streaming'
+                    : loadType === 'compressedinmemory'
+                        ? 'compressedInMemory'
+                        : 'decompressOnLoad';
+                nextSettings.preloadAudioData = readBoolean('preloadAudioData', true);
+                nextSettings.forceToMono = readBoolean('forceToMono', false);
+                break;
+            }
+            case 'scriptableObject':
+                nextSettings.inspectorCollapsed = readBoolean('inspectorCollapsed', false);
+                break;
+            default:
+                break;
+        }
+
+        return nextSettings;
     }
 
     private getDefaultImporter(assetType: AssetType): AssetMetaImporter {

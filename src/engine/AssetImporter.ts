@@ -14,6 +14,7 @@ import { DesktopFileSystem } from '../platform/DesktopFileSystem';
 export class AssetImporter {
     private static audioBinaryCache: Map<string, ArrayBuffer> = new Map();
     private static audioDecodedCache: Map<string, AudioBuffer> = new Map();
+    private static assetRevisionByPath: Map<string, number> = new Map();
     private static desktopFileSystem: DesktopFileSystem = new DesktopFileSystem();
 
     /**
@@ -23,15 +24,14 @@ export class AssetImporter {
     public static importModel(filePath: string, onComplete: (rootGO: GameObject) => void, onError?: (err: any) => void): void {
         const loader = new GLTFLoader();
         const settings = AssetImporter.getImporterSettings(filePath, 'model');
-
-        // Normalize path for file protocol
-        const url = filePath.startsWith('file://') ? filePath : `file://${filePath.replace(/\\/g, '/')}`;
+        const normalizedPath = AssetImporter.normalizeAssetPath(filePath);
+        const url = AssetImporter.getVersionedAssetUrl(normalizedPath);
 
         loader.load(url, (gltf) => {
-            const modelName = filePath.split(/[\/\\]/).pop()?.replace(/\.(gltf|glb)$/i, '') || 'Model';
+            const modelName = normalizedPath.split(/[\/\\]/).pop()?.replace(/\.(gltf|glb)$/i, '') || 'Model';
             const rootGO = new GameObject(modelName);
-            rootGO.sourceAssetPath = filePath;
-            rootGO.sourceAssetGuid = AssetDatabase.getInstance().getGuid(filePath) ?? null;
+            rootGO.sourceAssetPath = normalizedPath;
+            rootGO.sourceAssetGuid = AssetDatabase.getInstance().getGuid(normalizedPath) ?? null;
             rootGO.sourceAssetType = 'model';
             const scaleFactor = typeof settings.scaleFactor === 'number' && Number.isFinite(settings.scaleFactor)
                 ? settings.scaleFactor
@@ -48,15 +48,15 @@ export class AssetImporter {
                 gltf.animations.forEach(clip => {
                     animator.addAnimation(clip.name || 'default', clip);
                 });
-                animator.modelPath = filePath;
-                animator.modelGuid = AssetDatabase.getInstance().getGuid(filePath) ?? null;
+                animator.modelPath = normalizedPath;
+                animator.modelGuid = AssetDatabase.getInstance().getGuid(normalizedPath) ?? null;
                 console.log(`Loaded ${gltf.animations.length} animation(s) from ${modelName}`);
             }
 
             console.log(`Model imported: ${modelName} (${AssetImporter.countMeshes(gltf.scene)} meshes)`);
             onComplete(rootGO);
         }, undefined, (error) => {
-            console.error(`Failed to import model: ${filePath}`, error);
+            console.error(`Failed to import model: ${normalizedPath}`, error);
             onError?.(error);
         });
     }
@@ -136,20 +136,35 @@ export class AssetImporter {
      * Import a texture file and return a Three.js Texture.
      */
     public static importTexture(filePath: string, onComplete: (texture: THREE.Texture) => void): void {
+        const normalizedPath = AssetImporter.normalizeAssetPath(filePath);
         const loader = new THREE.TextureLoader();
-        const url = filePath.startsWith('file://') ? filePath : `file://${filePath.replace(/\\/g, '/')}`;
-        const settings = AssetImporter.getImporterSettings(filePath, 'texture');
+        const url = AssetImporter.getVersionedAssetUrl(normalizedPath);
+        const settings = AssetImporter.getImporterSettings(normalizedPath, 'texture');
 
         loader.load(url, (texture) => {
-            texture.name = filePath.split(/[\/\\]/).pop() || 'Texture';
-            texture.userData.assetPath = filePath;
-            texture.userData.assetGuid = AssetDatabase.getInstance().getGuid(filePath) ?? null;
+            texture.name = normalizedPath.split(/[\/\\]/).pop() || 'Texture';
+            texture.userData.assetPath = normalizedPath;
+            texture.userData.assetGuid = AssetDatabase.getInstance().getGuid(normalizedPath) ?? null;
 
             AssetImporter.applyTextureImportSettings(texture, settings);
 
             console.log(`Texture imported: ${texture.name}`);
             onComplete(texture);
         });
+    }
+
+    public static invalidateTextureCache(filePath?: string): void {
+        AssetImporter.bumpAssetRevision(filePath);
+    }
+
+    public static invalidateModelCache(filePath?: string): void {
+        AssetImporter.bumpAssetRevision(filePath);
+    }
+
+    public static shouldImportModelAnimations(filePath: string): boolean {
+        const normalizedPath = AssetImporter.normalizeAssetPath(filePath);
+        const settings = AssetImporter.getImporterSettings(normalizedPath, 'model');
+        return settings.importAnimations !== false;
     }
 
     /**
@@ -196,14 +211,26 @@ export class AssetImporter {
         if (!filePath) {
             AssetImporter.audioBinaryCache.clear();
             AssetImporter.audioDecodedCache.clear();
+            AssetImporter.bumpAssetRevision();
             return;
         }
 
         const normalizedPath = AssetImporter.normalizeAssetPath(filePath);
+        AssetImporter.bumpAssetRevision(normalizedPath);
         AssetImporter.audioBinaryCache.delete(normalizedPath);
         const keysToDelete = Array.from(AssetImporter.audioDecodedCache.keys())
             .filter((key) => key.startsWith(`${normalizedPath}|mono:`));
         keysToDelete.forEach((key) => AssetImporter.audioDecodedCache.delete(key));
+    }
+
+    public static getVersionedAssetUrl(filePath: string): string {
+        const normalizedPath = AssetImporter.normalizeAssetPath(filePath);
+        const baseUrl = normalizedPath.startsWith('file://')
+            ? normalizedPath
+            : `file://${normalizedPath.replace(/\\/g, '/')}`;
+        const revision = AssetImporter.assetRevisionByPath.get(normalizedPath) ?? 0;
+        const separator = baseUrl.includes('?') ? '&' : '?';
+        return `${baseUrl}${separator}rev=${revision}`;
     }
 
     private static getImporterSettings(
@@ -359,6 +386,17 @@ export class AssetImporter {
             preloadAudioData,
             forceToMono
         };
+    }
+
+    private static bumpAssetRevision(filePath?: string): void {
+        if (!filePath) {
+            AssetImporter.assetRevisionByPath.clear();
+            return;
+        }
+
+        const normalizedPath = AssetImporter.normalizeAssetPath(filePath);
+        const currentRevision = AssetImporter.assetRevisionByPath.get(normalizedPath) ?? 0;
+        AssetImporter.assetRevisionByPath.set(normalizedPath, currentRevision + 1);
     }
 
     private static readAudioBinary(

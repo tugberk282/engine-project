@@ -298,12 +298,179 @@ Kapanis notu:
 - `node verify_phase2_layout_mock.cjs` -> `39/39`
 - `node verify_phase1_editor_chrome.cjs` -> `41/41`
 - `npm.cmd run build` -> basarili
+- Faz durumu: Kapandi
+
+### Faz 3 Session Backlogu: Asset Pipeline
+
+Amac:
+
+- `.meta`, GUID, import settings, dependency graph ve reference repair davranislarini daha denetlenebilir hale getirmek
+- Asset refresh/reimport akislarinda sessiz toparlanan sorunlari gorunur raporlamaya tasimak
+- Unity benzeri asset sagligi, moved asset repair ve importer parity hattini daha guvenilir kilmak
+
+Mevcut durum:
+
+- Faz 3 parity olarak kapanmis durumda
+- `AssetDatabase`, `AssetImporter` ve `ProjectWindow` uzerinde saglam bir temel var
+- `.meta` olusturma, GUID saklama, dependency graph ve reference audit ana olarak calisiyor
+- Ancak refresh/reimport diagnostigi ve import-settings derinligi hala polish alinabilecek durumda
+
+Kod gozlemi:
+
+- Asset state `AssetDatabase` icinde `guidToPath`, `pathToMeta`, fingerprint ve dependency map’leriyle tutuluyor
+- `ProjectWindow` zaten refresh, reimport, readiness report ve reference repair akislarini editor UI’ya tasiyor
+- `AssetImporter` texture/model/audio icin import settings kullaniyor ama parity derinligi varlik turune gore degisiyor
+- Faz 3 riskleri artik daha cok gorunurluk, diagnostics ve edge-case recovery tarafinda
+
+Gelistirme maddeleri:
+
+1. Meta/GUID dayanikliligi ve repair gorunurlugu
+- Bozuk `.meta` dosyalari sessizce duzeltiliyorsa bu refresh sonucunda raporlanacak
+- GUID conflict / malformed meta toparlanmasi daha gorunur hale getirilecek
+- Readiness report icinde meta-repair sinyalleri yer alacak
+- Durum notu:
+- Ilk tur tamamlandi
+- `AssetDatabase.refresh()` artik bozuk `.meta` dosyalarindan otomatik toparlanan assetleri `metaRepaired` olarak raporluyor
+- `ProjectWindow` Faz 3 readiness ozeti bu onarim sayisini gorunur sekilde gosteriyor
+- Ikinci tur tamamlandi
+- Duplicate GUID nedeniyle yeniden uretilen `.meta` dosyalari artik `duplicateGuidRepaired` olarak raporlaniyor
+- Asset karsiligi olmayan orphan `.meta` dosyalari refresh/readiness tarafinda ayri sayac ve blocker olarak gorunur hale geldi
+- Sonraki alt is: reimport dependency davranisina gecip runtime refresh ile importer invalidation akislarini sertlestirmek
+
+2. Reimport kapsam ve dependency davranisi
+- Single asset / folder / dependents reimport akislari daha net dogrulanacak
+- Runtime reimport etkileri ile asset refresh etkileri daha acik ayrilacak
+- Reimport sonrasi importer cache invalidation eksikleri taranacak
+- Durum notu:
+- Ilk tur tamamlandi
+- Faz 3 readiness ozeti artik sadece dependency edge sayisini degil, reimport graph tarafini da sayisal olarak gosteriyor
+- `ProjectWindow` icinde direct runtime reimport path sayisi, dependents ile genisleyen graph varlik sayisi, toplam runtime reload ve en yuksek fanout gorunur hale getirildi
+- Ikinci tur tamamlandi
+- Texture/model/audio reimport akislari artik ortak cache-busting revision mantigina baglandi
+- `AssetImporter` versioned file URL kullaniyor; `Animator` da ayni model cache-busting hattini paylasiyor
+- Ucuncu tur tamamlandi
+- Material cache lookup artik sadece ada gore degil asset path tabanli da calisiyor; ayni isimli `.mat` dosyalarinin carpisma riski dusuruldu
+- Mesh/material atama zinciri `materialPath` bilgisi de tasiyor; drag-drop ve deserialize tarafi geriye uyumlu sekilde path-aware oldu
+- Dorduncu tur tamamlandi
+- Model importer `importAnimations` ayari artik runtime clip reload hattinda da gercekten uygulanuyor
+- `Animator` eski clip state’ini temizleyip importer setting false ise yeni clip yuklemeden cikiyor; boylece meta degisimi sonrasi sessiz stale animation kalmiyor
+- Besinci tur tamamlandi
+- Prefab reimportta `preserveOverrides=true` artik sadece source linki koruyup cikmiyor; override snapshot alip base prefab verisini yenileyip mevcut override alanlarini geri uyguluyor
+- Bu iyilestirme root/child/component/transform override alanlarini kapsiyor ve stale prefab tabaninin sessizce kalma riskini dusuruyor
+- Sonraki alt is: prefab structural override bosluklari ve kalan setting-driven runtime refresh kenar durumlarini tek tek taramak
+
+3. Reference repair ve moved asset toparlama
+- Moved asset repair akislarinda otomatik fix / rapor dili sertlestirilecek
+- Broken/orphan guid durumlarinda daha net fixability ayrimi yapilacak
+- Batch repair akislarinda geri bildirim daha okunur hale getirilecek
+- Durum notu:
+- Ilk tur tamamlandi
+- Reference audit/repair ozeti artik issue reason dagilimi, en cok duzeltilen assetler ve degisen dosya listesiyle daha anlamli hale geldi
+- Batch repair sonrasi hangi dosyalarin gercekten yazildigi ve en baskin sorun tiplerinin ne oldugu daha net gorunuyor
+- Ikinci tur tamamlandi
+- Recent repair history ozeti eklendi; project ve asset/folder context menu uzerinden son auto-repair kosulari gorulebiliyor
+- Scope, issue/fix/unresolved sayilari, top reason dagilimi ve degisen dosya ozetleri artik operasyonel takip icin saklaniyor
+- Ucuncu tur tamamlandi
+- Recent repair history artik editor oturumlari arasinda da saklaniyor; Faz 3 takip izi sadece gecici session state olmaktan cikti
+- Project ve asset/folder context menu uzerinde clear history aksiyonu da var; operasyonel temizlik akisi netlesti
+
+4. Import settings parity
+- Texture/model/audio importer settings kapsam bosluklari taranacak
+- Settings degisimi sonrasi reimport davranisi daha deterministik hale getirilecek
+- Asset type bazli default importer profilleri polish edilecek
+- Durum notu:
+- Ilk tur tamamlandi
+- Importer settings normalize hatti artik asset type bazli daha sikı; shader, wrap/filter, loadType, scaleFactor ve benzeri alanlar canonical degerlere zorlanıyor
+- Reimport davranisi sadece UI tarafinda degil, meta normalization tarafinda da daha deterministik hale geldi
+
+5. Asset sagligi ve diagnostics
+- Health/readiness raporlarina daha kullanisli sayaclar eklenecek
+- Unused/missing/circular reference sinyalleri daha kolay okunur hale getirilecek
+- Gerekirse project-wide diagnostics ozeti ayri komut olarak guclendirilecek
+- Durum notu:
+- Ilk tur tamamlandi
+- Reference audit/repair ozetleri artik sadece toplam sayi vermiyor; en cok etkilenen assetler ve ornek issue satirlariyla daha aksiyon alinabilir hale geldi
+- Ikinci tur tamamlandi
+- Faz 3 readiness ozeti artik unused asset candidate, circular dependency, missing-target ve orphan-guid sinyallerini sayisal olarak veriyor
+- Health/readiness katmani artik sadece refresh ve reference toplamlarina degil, daha dogrudan triage sinyallerine de bakiyor
+- Ucuncu tur tamamlandi
+- Circular dependency, missing-target ve orphan-guid sinyalleri artik readiness blocker mantigina da baglandi
+- Dorduncu tur tamamlandi
+- `ambiguous-by-name` sinyali ayri issue nedeni olarak ayrildi; readiness ve triage akislarinda belirsiz isim eslesmeleri artik daha net gorunuyor
+
+6. Prefab/asset ownership ve delete-impact polish
+- Prefab kaynak varlik iliskileri ve delete impact raporlari tekrar gozden gecirilecek
+- Asset silme/yeniden adlandirma sonrasi repair beklentileri daha netlestirilecek
+- Durum notu:
+- Ilk tur tamamlandi
+- Delete impact ozeti artik sadece kac referencer oldugunu degil, bunlarin asset type dagilimini da gosteriyor
+- Ikinci tur tamamlandi
+- Delete confirmation mesaji da referencer type dagilimini gostermeye basladi; silme riski daha okunur hale geldi
+- Ucuncu tur tamamlandi
+- Delete/rename impact ozeti artik auto-patchable referencer ve manual-review gerektirebilecek referencer ayrimini da gosteriyor
+- Rename onayi sirasinda bu beklenti gorunur hale geldi; moved-reference auto patch kapsamiyla uyumlu daha durust bir risk dili olustu
+
+Oncelik sirasi:
+
+1. Meta/GUID dayanikliligi ve repair gorunurlugu
+2. Reimport kapsam ve dependency davranisi
+3. Reference repair ve moved asset toparlama
+4. Import settings parity
+5. Asset sagligi ve diagnostics
+6. Prefab/asset ownership ve delete-impact polish
+
+Riskli noktalar:
+
+- Faz 3 degisiklikleri Faz 5 serialization ve Faz 6 inspector asset secimi akisini dolayli etkileyebilir
+- `.meta` normalization mantigina dokunmak gereksiz GUID churn riski yaratabilir
+- Refresh/reimport tarafindaki davranis degisiklikleri ProjectWindow beklentilerini bozabilir
+
+Session kapanis kriterleri:
+
+- Refresh/reimport akislarinda bozuk meta ve moved asset senaryolari daha gorunur raporlanmali
+- Reference repair ve dependency graph deterministik davranmali
+- `verify_phase3_asset_pipeline`, `verify_phase2_layout_mock` ve build temiz gecmeli
 
 Session sonunda calistirilacaklar:
 
 - `node verify_phase1_editor_chrome.cjs`
 - `node test_all_phases.cjs`
 - `npm.cmd run build`
+
+### Faz 3 Closure Checklist
+
+- Durum: Kapandi
+
+Kapanis maddeleri:
+
+1. Meta/GUID gorunurlugu
+- `metaRepaired`, `duplicateGuidRepaired` ve `orphanMetaFiles` refresh/readiness tarafinda gorunur
+- Durum: Tamamlandi
+
+2. Reimport/runtime parity
+- dependency graph, runtime reload fanout, cache-busting ve setting-driven runtime refresh tutarli
+- Durum: Tamamlandi
+
+3. Reference repair operasyonelligi
+- reason dagilimi, changed file listesi, fixed-by-asset ozeti ve recent repair history mevcut
+- Durum: Tamamlandi
+
+4. Import settings normalization
+- asset-type bazli canonical importer settings normalize ediliyor
+- Durum: Tamamlandi
+
+5. Delete/rename risk gorunurlugu
+- referencer type dagilimi, auto-patchable vs manual-review ayrimi ve rename confirm dili mevcut
+- Durum: Tamamlandi
+
+6. Faz 3 verify/build kapisi
+- `verify_phase3_asset_pipeline.cjs` temiz
+- production build temiz
+- Durum: Tamamlandi
+
+7. Final closure adimi
+- Faz 3 closure raporu donduruldu ve roadmap uzerinde kapanis durumu sabitlendi
+- Durum: Tamamlandi
 
 ## Urun Tanimi
 
@@ -319,6 +486,148 @@ Bu nedenle projeyi anlarken iki urun katmani ayri dusunulmelidir:
 
 1. Engine/editor parity katmani
 2. Desktop app productization katmani
+
+### Faz 4 Session Backlogu: Scene ve GameObject Workflow
+
+Amac:
+
+- Scene, hierarchy, selection, parenting, create/delete/duplicate ve scene context akislarini daha deterministik ve daha operasyonel hale getirmek
+- Unity benzeri object workflow davranislarinda kalan edge-case ve polish bosluklarini kapatmak
+- Hierarchy, scene view ve prefab workflow arasindaki gecisleri daha guvenilir hale getirmek
+
+Mevcut durum:
+
+- Faz 4 parity olarak kapanmis durumda
+- `verify_phase4_scene_workflow.cjs` kapsamli bir temel dogrulama kati sunuyor
+- `Editor`, `HierarchyWindow`, `Scene`, `GameObject`, `InspectorWindow` ve prefab akislarinda saglam bir omurga var
+- Ancak Faz 4 tarafinda artik ana eksik daha cok edge-case sertlestirme, selection tutarliligi ve context-operation polish tarafinda
+
+Kod gozlemi:
+
+- Selection ve hierarchy akislarinin merkezi agirlik noktasi `src/editor/Editor.ts` ile `src/editor/HierarchyWindow.ts`
+- Parenting, sibling sirasi ve hierarchy serialization davranislarinin runtime tarafi `src/engine/GameObject.ts` ve `src/engine/Scene.ts`
+- Inspector, prefab ve scene command zinciri Faz 4 davranislarini dolayli etkiliyor
+- Faz 4 riskleri artik yeni feature eklemekten cok mevcut akislari bozmadan deterministik hale getirme tarafinda
+
+Gelistirme maddeleri:
+
+1. Selection ve multi-selection tutarliligi
+- Hierarchy, scene view ve inspector arasinda secim gecisleri tekrar taranacak
+- Shift/Ctrl benzeri secim davranislarinin kalan kenar durumlari temizlenecek
+- Aktif secim, primary secim ve multi-select order daha netlestirilecek
+- Durum notu:
+- Ilk tur tamamlandi
+- `Editor` icindeki secim uygulama akisi tek merkezde toplandi; helper/outline/gizmo/inspector/hierarchy senkronu daha deterministik hale geldi
+- Shift-range seciminde tiklanan hedef artik aktif secim olarak daha tutarli korunuyor; ozellikle yukari yone secimde primary selection kaymasi azaltildi
+
+2. Hierarchy drag-drop ve parenting edge-case’leri
+- Parent/sibling hedefleme daha sertlestirilecek
+- Illegal cycle veya stale selection durumlari tekrar gozden gecirilecek
+- Multi-object reparent sonrasi order ve world/local transform beklentileri test edilecek
+- Durum notu:
+- Ilk tur tamamlandi
+- Root drop ve node drop akislari artik top-level selection kapsaminda secimi koruyor; operasyon sonrasi selection dagilmiyor
+- Aynı parent altina tekrar drop edilen no-op reparent durumlari history’ye gereksiz komut yazmiyor
+- Context menu `Unparent` fallback’i de multi-selection top-level mantigina cekildi
+
+3. Create / delete / duplicate / copy-paste operasyonelligi
+- Bu akislarin command history, selection restore ve hierarchy refresh tutarliligi tekrar taranacak
+- Bulk operation senaryolarinda inspector/hierarchy stale-state kalmamasina odaklanilacak
+- Durum notu:
+- Ilk tur tamamlandi
+- Duplicate/copy/cut artik nested secimlerde tum secili objeleri degil top-level selection hedeflerini esas aliyor
+- Boylece parent ve child ayni anda seciliyken bulk operation’larda cift kopyalama / cift duplicate gibi istenmeyen durumlar azaldi
+- Paste ve duplicate sonrasi secim de tek tek additive secim yerine range-selection hattindan gecerek daha tutarli hale geldi
+
+4. Scene context menu ve object state management polish
+- Context aksiyonlari ile hierarchy toolbar/menu aksiyonlari ayni semantic sonuca baglanacak
+- Active/inactive, layer, tag, static ve lock benzeri state akislarinda tekrar davranis kontrolu yapilacak
+- Durum notu:
+- Ilk tur tamamlandi
+- Scene ve hierarchy context menu uzerinden active/static state degisiklikleri artik canonical editor command akisiyle calisiyor
+- Boylece context menu degisikligi ile inspector degisikligi ayni undo/redo ve refresh davranisini paylasiyor
+- Selection korunurken hierarchy ve inspector refresh’i de ayni state komutuna baglandi
+
+5. Gizmo ve transform workflow polish
+- Pivot/center, local/world ve snap zincirinin selection ile beraber tutarliligi taranacak
+- Scene navigation ve frame/focus akislarinda kalan durum bosluklari aranacak
+- Durum notu:
+- Ilk tur tamamlandi
+- `Q/W/E/R/T` tool akisi editor icinde daha net ayrildi; `Q` artik view-state olarak transform handle’ı detach ediyor
+- `T` kısayolu RectTransform/Canvas secimlerinde rect-benzeri translate girisi veriyor, diger secimlerde kontrollu fallback ile move akisini kullaniyor
+- Tool secimi ile transform attach/detach davranisi tek yardimci uzerinden toplandi; gizmo state’i selection degistiginde daha tutarli
+
+6. Prefab ve hierarchy workflow kesişimleri
+- Prefab instance parenting, duplicate ve reparent akislarinin override beklentileri tekrar kontrol edilecek
+- Scene-hierarchy operasyonlarinin prefab lineage uzerindeki etkileri daha gorunur hale getirilecek
+- Durum notu:
+- Ilk tur tamamlandi
+- Duplicate ve copy/paste artÄ±k subtree icindeki explicit prefab apply-target tercihini relative ownership depth uzerinden yeni instance’a tasiyor
+- Ozellikle nested prefab zincirlerinde hierarchy clone sonrasi apply/revert hedefinin nearest-root’a sessizce dusmesi engellendi
+- Hierarchy satiri artik outer prefab apply-target seciliyse ayri bir target badge gosteriyor ve context menu icinden hedef prefab owner dogrudan degistirilebiliyor
+- `Create Empty Child/Parent` akisi da explicit prefab target’i miras aliyor; nested prefab authoring sirasinda yeni override’lar istemsiz olarak inner owner’a kaymiyor
+
+Oncelik sirasi:
+
+1. Selection ve multi-selection tutarliligi
+2. Hierarchy drag-drop ve parenting edge-case’leri
+3. Create / delete / duplicate / copy-paste operasyonelligi
+4. Scene context menu ve object state management polish
+5. Gizmo ve transform workflow polish
+6. Prefab ve hierarchy workflow kesişimleri
+
+Riskli noktalar:
+
+- Faz 4 degisiklikleri Faz 5 command history/serialization, Faz 6 inspector ve Faz 8 prefab/UI akislarini dolayli etkileyebilir
+- Selection davranisina dokunmak editor genelinde beklenmedik stale UI veya wrong-active-target riski tasir
+- Parenting/order degisiklikleri undo/redo zincirinde dikkatli ele alinmali
+
+Session kapanis kriterleri:
+
+- Selection, hierarchy ve parenting akislarinda stale-state veya beklenmedik order bozulmasi kalmamali
+- Create/delete/duplicate/copy-paste operasyonlari hierarchy + inspector + scene tarafinda tutarli gorunmeli
+- `verify_phase4_scene_workflow`, ilgili parity suite’ler ve build temiz gecmeli
+
+Session sonunda calistirilacaklar:
+
+- `node verify_phase4_scene_workflow.cjs`
+- `node test_all_phases.cjs`
+- `npm.cmd run build`
+
+### Faz 4 Closure Checklist
+
+- Durum: Kapandi
+
+Kapanis maddeleri:
+
+1. Selection ve multi-selection tutarliligi
+- active selection, range selection ve hierarchy/inspector/gizmo senkronu tek secim hattina toplandi
+- Durum: Tamamlandi
+
+2. Hierarchy parenting ve drag-drop sertlestirmesi
+- top-level selection korunuyor, no-op reparent history’ye yazilmiyor ve unparent akisi tutarli
+- Durum: Tamamlandi
+
+3. Bulk create/delete/duplicate/copy-paste davranisi
+- nested secimlerde top-level hedef mantigi kullaniliyor, duplicate/paste sonrasi secim restore zinciri tutarli
+- Durum: Tamamlandi
+
+4. Context/state ve gizmo workflow polish
+- active/static context aksiyonlari canonical command hattina baglandi, `Q/W/E/R/T` tool akisi netlestirildi
+- Durum: Tamamlandi
+
+5. Prefab-hierarchy workflow kesisimleri
+- duplicate/copy/paste ve create empty child/parent explicit prefab apply-target tercihlerini koruyor
+- hierarchy badge ve context menu uzerinden outer prefab target gorunur ve degistirilebilir
+- Durum: Tamamlandi
+
+6. Faz 4 verify/build kapisi
+- `verify_phase4_scene_workflow.cjs`, full parity suite ve production build temiz
+- Durum: Tamamlandi
+
+7. Final closure adimi
+- Faz 4 closure raporu donduruldu ve roadmap uzerinde kapanis durumu sabitlendi
+- Durum: Tamamlandi
 
 ## Ana Mimari
 

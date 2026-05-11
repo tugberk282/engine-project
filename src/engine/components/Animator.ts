@@ -3,6 +3,7 @@ import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { serialize } from '../Decorators';
 import { AssetDatabase } from '../AssetDatabase';
+import { AssetImporter } from '../AssetImporter';
 
 /**
  * Animator - Unity-style animation component
@@ -33,11 +34,25 @@ export class Animator extends Component {
         }
     }
 
+    public clearAnimations(resetCurrentAnimation: boolean = false): void {
+        this.stop();
+        this.animations.clear();
+        if (resetCurrentAnimation) {
+            this.currentAnimation = null;
+        }
+    }
+
     public loadModelClips(path: string): void {
         this.modelPath = path;
         this.modelGuid = AssetDatabase.getInstance().getGuid(path) ?? this.modelGuid ?? null;
+        this.clearAnimations(false);
+
+        if (!AssetImporter.shouldImportModelAnimations(path)) {
+            return;
+        }
+
         const loader = new GLTFLoader();
-        loader.load(path, (gltf) => {
+        loader.load(AssetImporter.getVersionedAssetUrl(path), (gltf) => {
             gltf.animations.forEach(clip => {
                 this.addAnimation(clip.name, clip);
             });

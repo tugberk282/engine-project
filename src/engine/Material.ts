@@ -216,6 +216,7 @@ export class Material {
     public serialize(): any {
         return {
             name: this.name,
+            assetPath: this.assetPath,
             shader: this.shader,
             doubleSidedGI: this.doubleSidedGI,
             depthWrite: this.depthWrite,
@@ -243,6 +244,7 @@ export class Material {
 
     public static deserialize(data: any): Material {
         const mat = new Material(data.name);
+        mat.assetPath = typeof data.assetPath === 'string' ? data.assetPath : null;
         mat.applyAssetData(data);
         return mat;
     }
@@ -273,30 +275,53 @@ export class MaterialManager {
 
     public static createMaterial(name: string): Material {
         const mat = new Material(name);
-        this.materials.set(name, mat);
+        this.materials.set(this.getPrimaryKey(mat), mat);
         return mat;
     }
 
     public static registerMaterial(mat: Material): void {
-        this.materials.set(mat.name, mat);
+        const key = this.getPrimaryKey(mat);
+        this.removeExistingReferences(mat, key);
+        this.materials.set(key, mat);
     }
 
-    public static getMaterial(name: string): Material | null {
-        return this.materials.get(name) || null;
+    public static getMaterial(identifier: string | null | undefined): Material | null {
+        if (!identifier) return null;
+
+        const normalizedIdentifier = this.normalizeKey(identifier);
+        const directMatch = this.materials.get(normalizedIdentifier);
+        if (directMatch) return directMatch;
+
+        for (const material of this.materials.values()) {
+            if (material.assetPath && this.normalizeKey(material.assetPath) === normalizedIdentifier) {
+                return material;
+            }
+            if (material.name === identifier) {
+                return material;
+            }
+        }
+
+        return null;
     }
 
     public static getAllMaterials(): Material[] {
-        return Array.from(this.materials.values());
+        return Array.from(new Set(this.materials.values()));
     }
 
-    public static deleteMaterial(name: string): void {
-        this.materials.delete(name);
+    public static deleteMaterial(identifier: string): void {
+        const normalizedIdentifier = this.normalizeKey(identifier);
+        this.materials.delete(normalizedIdentifier);
+        Array.from(this.materials.entries()).forEach(([key, material]) => {
+            if ((material.assetPath && this.normalizeKey(material.assetPath) === normalizedIdentifier) || material.name === identifier) {
+                this.materials.delete(key);
+            }
+        });
     }
 
     public static save(): void {
         const data: any = {};
-        this.materials.forEach((mat, name) => {
-            data[name] = mat.serialize();
+        this.getAllMaterials().forEach((mat) => {
+            data[this.getPrimaryKey(mat)] = mat.serialize();
         });
         localStorage.setItem('tugberkengine_materials', JSON.stringify(data));
     }
@@ -305,10 +330,26 @@ export class MaterialManager {
         const saved = localStorage.getItem('tugberkengine_materials');
         if (saved) {
             const data = JSON.parse(saved);
-            Object.keys(data).forEach(name => {
-                const mat = Material.deserialize(data[name]);
-                this.materials.set(name, mat);
+            Object.keys(data).forEach((key) => {
+                const mat = Material.deserialize(data[key]);
+                this.materials.set(this.normalizeKey(mat.assetPath || key || mat.name), mat);
             });
         }
+    }
+
+    private static getPrimaryKey(mat: Material): string {
+        return this.normalizeKey(mat.assetPath || mat.name);
+    }
+
+    private static normalizeKey(value: string): string {
+        return value.replace(/\\/g, '/');
+    }
+
+    private static removeExistingReferences(material: Material, nextKey: string): void {
+        Array.from(this.materials.entries()).forEach(([key, value]) => {
+            if (value === material && key !== nextKey) {
+                this.materials.delete(key);
+            }
+        });
     }
 }

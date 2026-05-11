@@ -10,6 +10,7 @@ export class MeshRenderer extends Component {
 
     public textureName: string | null = null;
     public materialName: string | null = null;
+    public materialPath: string | null = null;
     public sortingPriority: number = 0;
 
     private _castShadow: boolean = true;
@@ -72,10 +73,12 @@ export class MeshRenderer extends Component {
         if (this._material) {
             this.mesh.material = this._material.getThreeMaterial();
             this.materialName = this._material.name;
+            this.materialPath = this._material.assetPath;
             this.syncMaterialRenderSettings();
         } else {
             this.mesh.material = new THREE.MeshStandardMaterial({ color: 0xcccccc });
             this.materialName = null;
+            this.materialPath = null;
             this.mesh.renderOrder = 0;
         }
     }
@@ -112,6 +115,7 @@ export class MeshRenderer extends Component {
             data: {
                 color: this.color,
                 materialName: this.materialName,
+                materialPath: this.materialPath,
                 sortingPriority: this.sortingPriority,
                 castShadow: this.castShadow,
                 receiveShadow: this.receiveShadow
@@ -123,8 +127,8 @@ export class MeshRenderer extends Component {
         if (data.color) {
             this.color = data.color;
         }
-        if (data.materialName) {
-            const mat = MaterialManager.getMaterial(data.materialName);
+        if (data.materialPath || data.materialName) {
+            const mat = MaterialManager.getMaterial(data.materialPath || data.materialName);
             if (mat) this.material = mat;
         }
         this.sortingPriority = Number.isFinite(data.sortingPriority) ? Math.trunc(data.sortingPriority) : 0;

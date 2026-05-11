@@ -10,11 +10,19 @@ export default defineConfig({
         rollupOptions: {
             output: {
                 manualChunks(id) {
-                    if (!id.includes('node_modules')) return;
+                    const normalizedId = id.replace(/\\/g, '/');
 
-                    if (id.includes('three/examples')) return 'three-examples';
-                    if (id.includes('three')) return 'three-core';
-                    if (id.includes('cannon-es')) return 'physics';
+                    if (!normalizedId.includes('node_modules')) {
+                        if (normalizedId.includes('/src/editor/') && !normalizedId.endsWith('/src/editor/Editor.ts')) {
+                            return 'editor-windows';
+                        }
+
+                        return;
+                    }
+
+                    if (normalizedId.includes('three/examples')) return 'three-examples';
+                    if (normalizedId.includes('three')) return 'three-core';
+                    if (normalizedId.includes('cannon-es')) return 'physics';
 
                     return 'vendor';
                 }
