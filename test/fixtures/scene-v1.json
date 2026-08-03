@@ -1,0 +1,16 @@
+{
+  "environment": {},
+  "formatVersion": 1,
+  "gameObjects": [
+    {
+      "children": [],
+      "components": [],
+      "enabled": true,
+      "id": "object-player",
+      "name": "Player"
+    }
+  ],
+  "name": "Main",
+  "sceneId": "scene-main",
+  "version": "1.4"
+}

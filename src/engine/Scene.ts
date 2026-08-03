@@ -9,14 +9,18 @@ import { CoroutineManager } from './CoroutineManager';
 import {
     normalizeSceneData,
     resolveSerializedReferences,
+    SCENE_FORMAT_VERSION,
     SCENE_SCHEMA_VERSION,
     stableStringify,
     SerializedSceneEnvironment,
     SerializedGameObjectData,
-    SerializedComponentData
+    SerializedComponentData,
+    mergePreservingUnknown
 } from './Serialization';
 
 export class Scene {
+    public sceneId: string;
+    public name: string = 'Untitled';
     public threeScene: THREE.Scene;
     public gameObjects: GameObject[] = [];
 
@@ -64,8 +68,11 @@ export class Scene {
 
     private ambientLight: THREE.AmbientLight;
     private isLoadingFromSerializedData: boolean = false;
+    private serializedTemplate: Record<string, unknown> | null = null;
 
     constructor() {
+        this.sceneId = globalThis.crypto?.randomUUID?.()
+            ?? `scene-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
         this.threeScene = new THREE.Scene();
         this.threeScene.background = new THREE.Color(this.backgroundColor);
 
@@ -216,11 +223,14 @@ export class Scene {
     public toJSON(): string {
         const roots = this.getRootGameObjectsInHierarchyOrder();
         const data = {
+            formatVersion: SCENE_FORMAT_VERSION,
+            sceneId: this.sceneId,
+            name: this.name,
             version: SCENE_SCHEMA_VERSION,
             environment: this.serializeEnvironmentSettings(),
             gameObjects: roots.map(go => go.serialize())
         };
-        return stableStringify(data, 2);
+        return stableStringify(mergePreservingUnknown(this.serializedTemplate, data), 2);
     }
 
     public loadFromJSON(json: string): void {
@@ -233,6 +243,9 @@ export class Scene {
         }
 
         const data = normalizeSceneData(parsed);
+        this.serializedTemplate = data;
+        if (data.sceneId) this.sceneId = data.sceneId;
+        this.name = data.name;
         this.applySerializedEnvironment(data.environment);
         this.isLoadingFromSerializedData = true;
         try {
@@ -242,7 +255,11 @@ export class Scene {
 
             // First Pass: Reconstruct all GameObjects and Components
             const idMap = new Map<string, GameObject>();
-            const pendingComponentData: Array<{ component: any; data: Record<string, unknown> }> = [];
+            const pendingComponentData: Array<{
+                component: any;
+                data: Record<string, unknown>;
+                template: SerializedComponentData;
+            }> = [];
             const deserializeGameObject = (goData: SerializedGameObjectData, parent: GameObject | null = null): GameObject => {
                 const go = new GameObject(goData.name);
                 go.id = goData.id;
@@ -265,16 +282,21 @@ export class Scene {
                 go.transform.scale.fromArray(goData.transform.scale);
 
                 // Restore Components
+                const unknownComponents: SerializedComponentData[] = [];
                 goData.components.forEach((compData: SerializedComponentData) => {
                     const ComponentClass = ScriptRegistry.getComponentClass(compData.type);
                     if (ComponentClass) {
                         const comp = go.addComponent(ComponentClass, { invokeLifecycle: false });
                         pendingComponentData.push({
                             component: comp,
-                            data: compData.data
+                            data: compData.data,
+                            template: compData
                         });
+                    } else {
+                        unknownComponents.push(compData);
                     }
                 });
+                go.preserveSerializedData(goData, unknownComponents);
 
                 this.addGameObject(go, { start: false });
                 go.setActive(go.enabled);
@@ -288,6 +310,7 @@ export class Scene {
 
             // Second Pass: Resolve references
             pendingComponentData.forEach((entry) => {
+                entry.component.preserveSerializedData?.(entry.template);
                 const resolvedData = resolveSerializedReferences(entry.data, idMap);
                 const resolvedObject = (resolvedData && typeof resolvedData === 'object' && !Array.isArray(resolvedData))
                     ? resolvedData as Record<string, unknown>

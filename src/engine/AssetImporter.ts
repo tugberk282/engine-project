@@ -12,6 +12,9 @@ import { DesktopFileSystem } from '../platform/DesktopFileSystem';
  * Handles GLTF/GLB model loading, texture optimization, and automatic component setup.
  */
 export class AssetImporter {
+    private static readonly MAX_MODEL_SOURCE_BYTES = 256 * 1024 * 1024;
+    private static readonly MAX_TEXTURE_SOURCE_BYTES = 128 * 1024 * 1024;
+    private static readonly MAX_AUDIO_SOURCE_BYTES = 64 * 1024 * 1024;
     private static audioBinaryCache: Map<string, ArrayBuffer> = new Map();
     private static audioDecodedCache: Map<string, AudioBuffer> = new Map();
     private static assetRevisionByPath: Map<string, number> = new Map();
@@ -21,10 +24,16 @@ export class AssetImporter {
      * Import a 3D model (GLTF/GLB) and convert it into a hierarchy of GameObjects.
      * Automatically adds MeshFilter, MeshRenderer, and Animator components where appropriate.
      */
-    public static importModel(filePath: string, onComplete: (rootGO: GameObject) => void, onError?: (err: any) => void): void {
+    public static async importModel(filePath: string, onComplete: (rootGO: GameObject) => void, onError?: (err: any) => void): Promise<void> {
         const loader = new GLTFLoader();
         const settings = AssetImporter.getImporterSettings(filePath, 'model');
         const normalizedPath = AssetImporter.normalizeAssetPath(filePath);
+        try {
+            await AssetImporter.assertAssetWithinLimit(normalizedPath, AssetImporter.MAX_MODEL_SOURCE_BYTES, 'Model');
+        } catch (error) {
+            onError?.(error);
+            return;
+        }
         const url = AssetImporter.getVersionedAssetUrl(normalizedPath);
 
         loader.load(url, (gltf) => {
@@ -135,8 +144,14 @@ export class AssetImporter {
     /**
      * Import a texture file and return a Three.js Texture.
      */
-    public static importTexture(filePath: string, onComplete: (texture: THREE.Texture) => void): void {
+    public static async importTexture(filePath: string, onComplete: (texture: THREE.Texture) => void, onError?: (error: unknown) => void): Promise<void> {
         const normalizedPath = AssetImporter.normalizeAssetPath(filePath);
+        try {
+            await AssetImporter.assertAssetWithinLimit(normalizedPath, AssetImporter.MAX_TEXTURE_SOURCE_BYTES, 'Texture');
+        } catch (error) {
+            onError?.(error);
+            return;
+        }
         const loader = new THREE.TextureLoader();
         const url = AssetImporter.getVersionedAssetUrl(normalizedPath);
         const settings = AssetImporter.getImporterSettings(normalizedPath, 'texture');
@@ -150,7 +165,7 @@ export class AssetImporter {
 
             console.log(`Texture imported: ${texture.name}`);
             onComplete(texture);
-        });
+        }, undefined, onError);
     }
 
     public static invalidateTextureCache(filePath?: string): void {
@@ -170,7 +185,7 @@ export class AssetImporter {
     /**
      * Import an audio file and return an AudioBuffer.
      */
-    public static importAudio(filePath: string, onComplete: (buffer: AudioBuffer) => void): void {
+    public static async importAudio(filePath: string, onComplete: (buffer: AudioBuffer) => void): Promise<void> {
         const normalizedPath = AssetImporter.normalizeAssetPath(filePath);
         const settings = AssetImporter.normalizeAudioImportSettings(
             AssetImporter.getImporterSettings(normalizedPath, 'audio')
@@ -186,8 +201,8 @@ export class AssetImporter {
             }
         }
 
-        void AssetImporter.readAudioBinary(normalizedPath, settings).then((binary) => {
-            AssetImporter.decodeAudioBinary(binary).then((decodedBuffer) => {
+        void await AssetImporter.readAudioBinary(normalizedPath, settings).then( async(binary) => {
+            await AssetImporter.decodeAudioBinary(binary).then((decodedBuffer) => {
                 const finalBuffer = settings.forceToMono
                     ? AssetImporter.convertAudioBufferToMono(decodedBuffer)
                     : decodedBuffer;
@@ -399,7 +414,7 @@ export class AssetImporter {
         AssetImporter.assetRevisionByPath.set(normalizedPath, currentRevision + 1);
     }
 
-    private static readAudioBinary(
+    private static async readAudioBinary(
         filePath: string,
         settings: { loadType: 'decompressOnLoad' | 'compressedInMemory' | 'streaming'; preloadAudioData: boolean; forceToMono: boolean }
     ): Promise<ArrayBuffer> {
@@ -407,11 +422,11 @@ export class AssetImporter {
         if (canUseBinaryCache) {
             const cached = AssetImporter.audioBinaryCache.get(filePath);
             if (cached) {
-                return Promise.resolve(cached.slice(0));
+                return await Promise.resolve(cached.slice(0));
             }
         }
 
-        return AssetImporter.readAudioBinaryFromFile(filePath).then((binary) => {
+        return await AssetImporter.readAudioBinaryFromFile(filePath).then((binary) => {
             if (canUseBinaryCache && (settings.loadType === 'compressedInMemory' || settings.preloadAudioData)) {
                 AssetImporter.audioBinaryCache.set(filePath, binary.slice(0));
             } else if (!canUseBinaryCache) {
@@ -421,22 +436,23 @@ export class AssetImporter {
         });
     }
 
-    private static readAudioBinaryFromFile(filePath: string): Promise<ArrayBuffer> {
-        if (this.desktopFileSystem.existsSync(filePath)) {
-            const buffer = this.desktopFileSystem.readFileSync(filePath) as Uint8Array;
+    private static async readAudioBinaryFromFile(filePath: string): Promise<ArrayBuffer> {
+        if (await this.desktopFileSystem.exists(filePath)) {
+            await AssetImporter.assertAssetWithinLimit(filePath, AssetImporter.MAX_AUDIO_SOURCE_BYTES, 'Audio');
+            const buffer = await this.desktopFileSystem.readFile(filePath) as Uint8Array;
             const bytes = new Uint8Array(buffer.byteLength);
             bytes.set(buffer);
-            return Promise.resolve(bytes.buffer);
+            return await Promise.resolve(bytes.buffer);
         }
 
         const url = filePath.startsWith('file://') ? filePath : `file://${filePath.replace(/\\/g, '/')}`;
-        return fetch(url)
-            .then((response) => response.arrayBuffer());
+        return await fetch(url)
+            .then( async(response) => await response.arrayBuffer());
     }
 
-    private static decodeAudioBinary(binary: ArrayBuffer): Promise<AudioBuffer> {
+    private static async decodeAudioBinary(binary: ArrayBuffer): Promise<AudioBuffer> {
         const audioContext = THREE.AudioContext.getContext();
-        return audioContext.decodeAudioData(binary.slice(0));
+        return await audioContext.decodeAudioData(binary.slice(0));
     }
 
     private static convertAudioBufferToMono(source: AudioBuffer): AudioBuffer {
@@ -477,6 +493,16 @@ export class AssetImporter {
             return decodeURIComponent(assetPath.replace(/^file:\/\//, ''));
         } catch {
             return assetPath.replace(/^file:\/\//, '');
+        }
+    }
+
+    private static async assertAssetWithinLimit(filePath: string, maxBytes: number, assetKind: string): Promise<void> {
+        const stat = await AssetImporter.desktopFileSystem.stat(filePath);
+        if (!stat || !stat.isFile()) {
+            throw new Error(`${assetKind} asset is unavailable or is not a file: ${filePath}`);
+        }
+        if (stat.size > maxBytes) {
+            throw new Error(`${assetKind} asset exceeds the ${maxBytes}-byte import limit: ${filePath}`);
         }
     }
 

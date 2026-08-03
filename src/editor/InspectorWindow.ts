@@ -11,11 +11,20 @@ import { PrefabManager } from '../engine/Prefab';
 import { ScriptableObject } from '../engine/ScriptableObject';
 import { ScriptRegistry } from '../engine/ScriptRegistry';
 import { CommandHistory } from './Command';
-import { AddComponentCommand, RemoveComponentCommand, ReorderComponentCommand, SetPropertyCommand } from './LifecycleCommands';
+import {
+    AddComponentCommand,
+    DeserializeComponentCommand,
+    RemoveComponentCommand,
+    ReorderComponentCommand,
+    ResetComponentCommand,
+    SetPropertyCommand
+} from './LifecycleCommands';
 import { ProjectSettingsWindow } from './ProjectSettingsWindow';
+import { EditorSettings } from './EditorSettings';
 import type { AssetDeleteImpactSummary, AssetReferenceAuditIssue, AssetReferenceAuditResult, ProjectAssetSelection } from './ProjectWindow';
 import type { AssetMeta } from '../engine/AssetDatabase';
 import { PathUtils } from '../platform/PathUtils';
+import { escapeHtml } from './Security';
 
 export class InspectorWindow extends EditorWindow {
     private selection: any = null;
@@ -31,13 +40,11 @@ export class InspectorWindow extends EditorWindow {
     }
 
     private loadCollapsedStateForGameObject(goId: string): void {
-        const { EditorSettings } = require('./EditorSettings');
         const collapsedList = EditorSettings.collapsedComponentsPerGameObject[goId] || [];
         this.collapsedComponents = new Set(collapsedList);
     }
 
     private saveCollapsedStateForGameObject(goId: string): void {
-        const { EditorSettings } = require('./EditorSettings');
         EditorSettings.collapsedComponentsPerGameObject[goId] = Array.from(this.collapsedComponents);
         EditorSettings.save();
     }
@@ -132,7 +139,7 @@ export class InspectorWindow extends EditorWindow {
         header.innerHTML = `
             <div class="inspector-go-top">
                 <input type="checkbox" ${!isEnabledMixed && go.enabled ? 'checked' : ''} id="go-enabled">
-                <input type="text" value="${go.name}" class="unity-input" id="go-name" style="flex:1; margin: 0 5px;">
+                <input type="text" value="${escapeHtml(go.name)}" class="unity-input" id="go-name" style="flex:1; margin: 0 5px;">
                 <label style="font-size: 10px;"><input type="checkbox" id="go-static" ${!isStaticMixed && go.isStatic ? 'checked' : ''}> Static</label>
             </div>
             <div class="inspector-go-metadata" style="display: flex; gap: 4px; margin-top: 5px;">
@@ -187,11 +194,11 @@ export class InspectorWindow extends EditorWindow {
             prefabBar.style.borderBottom = '1px solid rgba(79, 164, 255, 0.2)';
             prefabBar.innerHTML = `
                 <div style="display: flex; flex-direction: column; gap: 1px;">
-                    <span style="font-size: 10px; color: #4fa4ff; font-weight: bold;">Prefab: ${prefabLabel}</span>
-                    <span style="font-size: 9px; color: var(--unity-text-dim);">Target Node: ${prefabContext.nodeLabel}</span>
-                    <span style="font-size: 9px; color: var(--unity-text-dim);">Context Root: ${prefabContext.contextRootLabel}</span>
+                    <span style="font-size: 10px; color: #4fa4ff; font-weight: bold;">Prefab: ${escapeHtml(prefabLabel)}</span>
+                    <span style="font-size: 9px; color: var(--unity-text-dim);">Target Node: ${escapeHtml(prefabContext.nodeLabel)}</span>
+                    <span style="font-size: 9px; color: var(--unity-text-dim);">Context Root: ${escapeHtml(prefabContext.contextRootLabel)}</span>
                     <span style="font-size: 9px; color: var(--unity-text-dim);">${statusText}</span>
-                    ${isContextRoot ? '' : `<span style="font-size: 9px; color: #d8c07a;">Child selection in ${prefabContext.contextRootLabel}. Use item-level Apply or jump to the root.</span>`}
+                    ${isContextRoot ? '' : `<span style="font-size: 9px; color: #d8c07a;">Child selection in ${escapeHtml(prefabContext.contextRootLabel)}. Use item-level Apply or jump to the root.</span>`}
                     ${prefabContext.isApplyTargetContextRoot ? '' : `<span style="font-size: 9px; color: #d8c07a;">Apply target switched to outer owner.</span>`}
                 </div>
                 <div style="display: flex; gap: 4px;">
@@ -264,7 +271,7 @@ export class InspectorWindow extends EditorWindow {
             targetSelect.style.padding = '0 4px';
             targetSelect.innerHTML = prefabContext.applyTargetOptions
                 .map((option: Record<string, any>) =>
-                    `<option value="${option.id}" ${option.id === prefabContext.applyTargetRoot.id ? 'selected' : ''}>${option.depth === 0 ? 'Nearest' : `Outer ${option.depth}`} - ${option.label}</option>`
+                    `<option value="${escapeHtml(option.id)}" ${option.id === prefabContext.applyTargetRoot.id ? 'selected' : ''}>${option.depth === 0 ? 'Nearest' : `Outer ${option.depth}`} - ${escapeHtml(option.label)}</option>`
                 )
                 .join('');
             targetSelect.onchange = () => {
@@ -857,6 +864,29 @@ export class InspectorWindow extends EditorWindow {
             }
         });
 
+        const missingComponents = go.getUnknownSerializedComponents();
+        missingComponents.forEach((serializedComponent) => {
+            const container = document.createElement('div');
+            container.className = 'unity-component-container missing-component';
+            container.style.cssText = 'margin-bottom: 2px; border: 1px solid #a85b5b; background: rgba(120, 35, 35, 0.16);';
+
+            const heading = document.createElement('div');
+            heading.style.cssText = 'padding: 6px 8px; color: #ffb3b3; font-size: 11px; font-weight: 700;';
+            heading.innerText = `Missing Component: ${serializedComponent.type}`;
+            container.appendChild(heading);
+
+            const explanation = document.createElement('div');
+            explanation.style.cssText = 'padding: 0 8px 6px; color: #d7b9b9; font-size: 10px;';
+            explanation.innerText = 'The component type is unavailable. Its serialized data is preserved and will be restored if the component becomes available.';
+            container.appendChild(explanation);
+
+            const payload = document.createElement('pre');
+            payload.style.cssText = 'margin: 0 8px 8px; padding: 6px; max-height: 120px; overflow: auto; user-select: text; white-space: pre-wrap; color: #ddd; background: rgba(0,0,0,0.24); font-size: 10px;';
+            payload.textContent = JSON.stringify(serializedComponent, null, 2);
+            container.appendChild(payload);
+            content.appendChild(container);
+        });
+
         // Add Component Button
         const addComponentBtnContainer = document.createElement('div');
         addComponentBtnContainer.style.cssText = 'padding: 20px 40px; display: flex; justify-content: center;';
@@ -1086,7 +1116,7 @@ export class InspectorWindow extends EditorWindow {
             const rawName = layerMap.get(i) ?? '';
             const displayName = rawName.trim().length > 0 ? rawName : `Layer ${i}`;
             const selectedAttr = !mixed && i === normalizedSelected ? 'selected' : '';
-            html += `<option value="${i}" ${selectedAttr}>${i}: ${displayName}</option>`;
+            html += `<option value="${i}" ${selectedAttr}>${i}: ${escapeHtml(displayName)}</option>`;
         }
         html += '<option value="__add_layer__">Add Layer...</option>';
         return html;
@@ -1105,7 +1135,7 @@ export class InspectorWindow extends EditorWindow {
         }
         uniqueTags.forEach((tag) => {
             const selectedAttr = !mixed && tag === normalizedSelected ? 'selected' : '';
-            html += `<option value="${tag}" ${selectedAttr}>${tag}</option>`;
+            html += `<option value="${escapeHtml(tag)}" ${selectedAttr}>${escapeHtml(tag)}</option>`;
         });
         html += '<option value="__add_tag__">Add Tag...</option>';
         return html;
@@ -1218,12 +1248,15 @@ export class InspectorWindow extends EditorWindow {
         menu.appendChild(headerContainer);
 
         // Category tabs
-        const { ScriptRegistry: SR } = require('../engine/ScriptRegistry');
         const categoryTabs = document.createElement('div');
         categoryTabs.style.cssText = 'display: flex; gap: 2px; padding: 4px; background: #1a1a1a; overflow-x: auto;';
         headerContainer.appendChild(categoryTabs);
 
-        const categories = ['All', ...Object.keys(SR.getComponentsByCategory()).filter(c => SR.getComponentsByCategory()[c].length > 0)] as const;
+        const componentCategories = ScriptRegistry.getComponentsByCategory();
+        const categories = ['All', ...Object.keys(componentCategories).filter((category) => {
+            const key = category as keyof typeof componentCategories;
+            return componentCategories[key].length > 0;
+        })] as const;
         let selectedCategory: string = 'All';
 
         categories.forEach(cat => {
@@ -1268,15 +1301,16 @@ export class InspectorWindow extends EditorWindow {
             listContainer.innerHTML = '';
 
             if (selectedCategory === 'All') {
-                const allComponents = SR.getAddableComponentNames().sort();
+                const allComponents = ScriptRegistry.getAddableComponentNames().sort();
                 const filtered = allComponents.filter((name: string) =>
                     name.toLowerCase().includes(filter.toLowerCase()) &&
                     name !== 'Transform' && name !== 'RectTransform'
                 );
                 this.renderComponentItems(listContainer, filtered, existingComponents, go);
             } else {
-                const byCategory = SR.getComponentsByCategory();
-                const components = byCategory[selectedCategory] || [];
+                const byCategory = ScriptRegistry.getComponentsByCategory();
+                const categoryKey = selectedCategory as keyof typeof byCategory;
+                const components = byCategory[categoryKey] || [];
                 const filtered = components.filter((name: string) =>
                     name.toLowerCase().includes(filter.toLowerCase()) &&
                     name !== 'Transform' && name !== 'RectTransform'
@@ -1371,9 +1405,7 @@ export class InspectorWindow extends EditorWindow {
     };
 
     addItem('Reset', () => {
-    if (comp.reset) comp.reset();
-    this.refresh();
-    console.log(`Reset component: ${comp.constructor.name}`);
+    CommandHistory.execute(new ResetComponentCommand(comp, () => this.refresh()));
 });
 
 addItem('Remove Component', () => {
@@ -1405,15 +1437,19 @@ addItem('Copy Component', () => {
 addItem('Paste Component Values', () => {
     const data = (window as any).copiedComponentData;
     if (data && data.type === comp.constructor.name) {
-        comp.deserialize(data.data);
-        this.refresh();
+        CommandHistory.execute(new DeserializeComponentCommand(
+            comp,
+            data.data,
+            `Paste ${comp.constructor.name} Values`,
+            () => this.refresh()
+        ));
     }
 });
 
 if (go.prefabSource) {
     this.addMenuSeparator(menu);
-    addItem('Revert to Prefab', () => {
-        PrefabManager.revertComponentToPrefab(go, comp);
+    addItem('Revert to Prefab',  async() => {
+        await PrefabManager.revertComponentToPrefab(go, comp);
         this.refresh();
         console.log(`Reverted component ${comp.constructor.name} to prefab`);
     });
@@ -1440,7 +1476,7 @@ setTimeout(() => document.addEventListener('mousedown', close), 0);
     private renderAssetInspector(content: HTMLElement, asset: ProjectAssetSelection): void {
     const header = document.createElement('div');
     header.className = 'inspector-header';
-    header.innerHTML = `<div style="font-weight: bold; padding: 5px;">${asset.name} (${asset.meta.assetType})</div>`;
+    header.innerHTML = `<div style="font-weight: bold; padding: 5px;">${escapeHtml(asset.name)} (${escapeHtml(asset.meta.assetType)})</div>`;
     content.appendChild(header);
 
     const infoSection = document.createElement('div');
@@ -1958,7 +1994,7 @@ setTimeout(() => document.addEventListener('mousedown', close), 0);
     private renderMaterialInspector(content: HTMLElement, mat: any): void {
     const header = document.createElement('div');
     header.className = 'inspector-header';
-    header.innerHTML = `<div style="font-weight: bold; padding: 5px;">${mat.name} (Material)</div>`;
+    header.innerHTML = `<div style="font-weight: bold; padding: 5px;">${escapeHtml(mat.name)} (Material)</div>`;
     content.appendChild(header);
 
     const section = document.createElement('div');
@@ -1974,7 +2010,7 @@ setTimeout(() => document.addEventListener('mousedown', close), 0);
     private renderScriptableObjectInspector(content: HTMLElement, so: ScriptableObject): void {
     const header = document.createElement('div');
     header.className = 'inspector-header';
-    header.innerHTML = `<div style="font-weight: bold; padding: 5px;">${so.assetName} (${so.typeName})</div>`;
+    header.innerHTML = `<div style="font-weight: bold; padding: 5px;">${escapeHtml(so.assetName)} (${escapeHtml(so.typeName)})</div>`;
     content.appendChild(header);
 
     const section = document.createElement('div');

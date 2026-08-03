@@ -1,7 +1,6 @@
 import { AssetIcons } from './AssetIcons';
 import { Prefab, PrefabManager } from '../engine/Prefab';
 import { Material, MaterialManager } from '../engine/Material';
-import { SceneManager } from '../engine/SceneManager';
 import { Scene } from '../engine/Scene';
 import { ScriptableObjectRegistry } from '../engine/ScriptableObject';
 import { GameObject } from '../engine/GameObject';
@@ -11,6 +10,7 @@ import { AssetImporter } from '../engine/AssetImporter';
 import { AudioSource } from '../engine/components/AudioSource';
 import { DesktopFileSystem } from '../platform/DesktopFileSystem';
 import { PathUtils } from '../platform/PathUtils';
+import { escapeHtml } from './Security';
 
 export interface ProjectAssetSelection {
     kind: 'asset';
@@ -151,6 +151,8 @@ export class ProjectWindow {
     private searchQuery: string = "";
     private activeFilter: string = "All";
     private selectedAssetPath: string | null = null;
+    private focusedAssetPath: string | null = null;
+    private focusedFolderPath: string | null = null;
     private recentRepairHistory: AssetRepairHistoryEntry[] = [];
 
     constructor(editor: any) {
@@ -159,28 +161,35 @@ export class ProjectWindow {
         this.loadRecentRepairHistory();
     }
 
-    public initialize() {
+    public async initialize() {
         if (!this.fs) return;
 
         this.rootPath = this.editor.rootPath;
 
-        if (!this.fs.existsSync(this.rootPath)) {
-            this.fs.mkdirSync(this.rootPath, { recursive: true });
+        if (!await this.fs.exists(this.rootPath)) {
+            await this.fs.mkdir(this.rootPath, { recursive: true });
         }
 
         this.currentPath = this.rootPath;
         this.expandedPaths.add(this.rootPath); // Always expand root
-        this.refreshAssetDatabaseAndView();
+        await this.refreshAssetDatabaseAndView();
     }
 
-    public refresh() {
+    public async refresh() {
         if (!this.rootPath) {
-            this.initialize();
+            await this.initialize();
             return;
         }
 
         const content = document.getElementById('assets-content');
         if (!content) return;
+        const restoreSearchFocus = (document.activeElement as HTMLElement | null)?.dataset.projectSearch === 'true';
+        const searchSelectionStart = restoreSearchFocus && document.activeElement instanceof HTMLInputElement
+            ? document.activeElement.selectionStart
+            : null;
+        const searchSelectionEnd = restoreSearchFocus && document.activeElement instanceof HTMLInputElement
+            ? document.activeElement.selectionEnd
+            : null;
         content.innerHTML = '';
 
         const splitContainer = document.createElement('div');
@@ -190,6 +199,9 @@ export class ProjectWindow {
 
         // Left Pane (Folder Tree)
         const leftPane = document.createElement('div');
+        leftPane.className = 'project-folder-tree';
+        leftPane.setAttribute('role', 'tree');
+        leftPane.setAttribute('aria-label', 'Project folders');
         leftPane.style.width = '200px';
         leftPane.style.minWidth = '150px';
         leftPane.style.borderRight = '1px solid var(--unity-border)';
@@ -199,7 +211,7 @@ export class ProjectWindow {
         leftPane.style.overflowY = 'auto';
 
         // Tree Content
-        this.drawFolderTree(leftPane, this.rootPath, 0);
+        await this.drawFolderTree(leftPane, this.rootPath, 0);
 
         // Right Pane (Grid)
         const rightPane = document.createElement('div');
@@ -233,10 +245,10 @@ export class ProjectWindow {
         upBtn.style.cursor = 'pointer';
         upBtn.onmouseenter = () => upBtn.style.background = 'var(--unity-bg-hover)';
         upBtn.onmouseleave = () => upBtn.style.background = 'transparent';
-        upBtn.onclick = () => {
+        upBtn.onclick =  async() => {
             if (this.currentPath !== this.rootPath) {
                 this.currentPath = PathUtils.dirname(this.currentPath);
-                this.refresh();
+                await this.refresh();
             }
         };
         upBtn.disabled = this.currentPath === this.rootPath;
@@ -261,9 +273,9 @@ export class ProjectWindow {
             if (opt === this.activeFilter) o.selected = true;
             filterSelect.appendChild(o);
         });
-        filterSelect.onchange = () => {
+        filterSelect.onchange =  async() => {
             this.activeFilter = filterSelect.value;
-            this.refresh();
+            await this.refresh();
         };
         toolbar.appendChild(filterSelect);
 
@@ -275,6 +287,8 @@ export class ProjectWindow {
         searchContainer.style.alignItems = 'center';
 
         const searchInput = document.createElement('input');
+        searchInput.dataset.projectSearch = 'true';
+        searchInput.setAttribute('aria-label', 'Search project assets');
         searchInput.type = 'text';
         searchInput.placeholder = 'Search Assets...';
         searchInput.value = this.searchQuery;
@@ -287,9 +301,9 @@ export class ProjectWindow {
         searchInput.style.fontSize = '11px';
         searchInput.style.borderRadius = '10px'; // Rounded like Unity search
 
-        searchInput.oninput = () => {
+        searchInput.oninput =  async() => {
             this.searchQuery = searchInput.value.toLowerCase();
-            this.refresh();
+            await this.refresh();
         };
         searchContainer.appendChild(searchInput);
 
@@ -310,9 +324,9 @@ export class ProjectWindow {
             clearBtn.style.fontSize = '10px';
             clearBtn.style.cursor = 'pointer';
             clearBtn.style.color = 'var(--unity-text-dim)';
-            clearBtn.onclick = () => {
+            clearBtn.onclick =  async() => {
                 this.searchQuery = "";
-                this.refresh();
+                await this.refresh();
             };
             searchContainer.appendChild(clearBtn);
             searchInput.style.paddingRight = '20px';
@@ -320,11 +334,23 @@ export class ProjectWindow {
         searchInput.style.paddingLeft = '20px';
 
         toolbar.appendChild(searchContainer);
+        if (restoreSearchFocus) {
+            requestAnimationFrame(() => {
+                searchInput.focus();
+                if (searchSelectionStart !== null && searchSelectionEnd !== null) {
+                    searchInput.setSelectionRange(searchSelectionStart, searchSelectionEnd);
+                }
+            });
+        }
 
         rightPane.appendChild(toolbar);
 
         // Grid Container
         const grid = document.createElement('div');
+        grid.className = 'project-asset-grid';
+        grid.setAttribute('role', 'grid');
+        grid.setAttribute('aria-label', 'Project assets');
+        grid.tabIndex = -1;
         grid.style.display = 'flex';
         grid.style.flexWrap = 'wrap';
         grid.style.gap = '2px'; // Unity grid is tight
@@ -349,7 +375,7 @@ export class ProjectWindow {
             e.dataTransfer!.dropEffect = 'copy';
         };
 
-        grid.ondrop = (e) => {
+        grid.ondrop =  async(e) => {
             e.preventDefault();
             try {
                 const data = e.dataTransfer!.getData('text/plain');
@@ -362,11 +388,11 @@ export class ProjectWindow {
                     if (go) {
                         // Create Prefab
                         console.log(`Creating prefab from ${go.name}...`);
-                        PrefabManager.savePrefab(go.name, go);
+                        await PrefabManager.savePrefab(go.name, go);
 
                         // Notify user and refresh
                         console.log(`Prefab ${go.name} created successfully.`);
-                        this.refresh();
+                        await this.refresh();
                     }
                 }
             } catch (err) {
@@ -393,10 +419,10 @@ export class ProjectWindow {
             let files: any[] = [];
             if (this.searchQuery) {
                 // Recursive search from root
-                files = this.getAllFilesRecursive(this.rootPath);
+                files = await this.getAllFilesRecursive(this.rootPath);
             } else {
                 // Standard view of current folder
-                files = this.fs.readdirSync(this.currentPath, { withFileTypes: true }).map((f: any) => ({
+                files = (await this.fs.readdir(this.currentPath, { withFileTypes: true })).map((f: any) => ({
                     name: f.name,
                     isDirectory: () => f.isDirectory(),
                     fullPath: PathUtils.join(this.currentPath, f.name)
@@ -406,6 +432,11 @@ export class ProjectWindow {
             const createItem = (name: string, icon: string, isFolder: boolean, onDblClick: () => void, fullPath: string) => {
                 const item = document.createElement('div');
                 item.className = 'asset-item';
+                item.dataset.assetPath = fullPath;
+                item.setAttribute('role', 'gridcell');
+                item.setAttribute('aria-label', `${isFolder ? 'Folder' : 'Asset'} ${name}`);
+                item.setAttribute('aria-selected', 'false');
+                item.tabIndex = -1;
                 item.style.width = '70px'; // Slightly wider
                 item.style.height = '80px';
                 item.style.textAlign = 'center';
@@ -448,26 +479,80 @@ export class ProjectWindow {
                 if (this.selectedAssetPath && this.pathsEqual(this.selectedAssetPath, fullPath)) {
                     item.style.background = 'var(--unity-bg-selected)';
                     label.style.color = 'white';
+                    item.setAttribute('aria-selected', 'true');
                 }
 
                 item.ondblclick = onDblClick;
 
                 // Selection logic
-                item.onclick = (e) => {
-                    e.stopPropagation();
+                const selectItem = async (focusItem: boolean) => {
                     // Deselect others
-                    grid.querySelectorAll('.asset-item').forEach((el: any) => el.style.background = 'transparent');
+                    grid.querySelectorAll<HTMLElement>('.asset-item').forEach((el) => {
+                        el.style.background = 'transparent';
+                        el.setAttribute('aria-selected', 'false');
+                        el.tabIndex = -1;
+                    });
                     item.style.background = 'var(--unity-bg-selected)';
                     label.style.color = 'white';
+                    item.setAttribute('aria-selected', 'true');
+                    item.tabIndex = 0;
                     footer.innerText = PathUtils.relative(PathUtils.dirname(this.rootPath), fullPath).replace(/\\/g, '/');
                     this.selectedAssetPath = fullPath;
-                    this.editor.inspectorWindow.selectAsset(this.buildAssetSelection(fullPath, name, isFolder));
+                    this.focusedAssetPath = fullPath;
+                    this.editor.inspectorWindow.selectAsset(await this.buildAssetSelection(fullPath, name, isFolder));
+                    if (focusItem) item.focus();
                 };
 
-                item.oncontextmenu = (e) => {
+                item.onclick = async (e) => {
+                    e.stopPropagation();
+                    await selectItem(true);
+                };
+
+                item.oncontextmenu =  async(e) => {
                     e.preventDefault();
                     e.stopPropagation();
-                    this.showItemContextMenu(e.clientX, e.clientY, name, fullPath, label);
+                    await selectItem(true);
+                    await this.showItemContextMenu(e.clientX, e.clientY, name, fullPath, label);
+                };
+
+                item.onfocus = () => {
+                    this.focusedAssetPath = fullPath;
+                };
+
+                item.onkeydown = async (e) => {
+                    const items = Array.from(grid.querySelectorAll<HTMLElement>('.asset-item'));
+                    const currentIndex = items.indexOf(item);
+                    const columnCount = this.getGridColumnCount(items);
+                    let nextIndex = currentIndex;
+                    if (e.key === 'ArrowLeft') nextIndex = Math.max(0, currentIndex - 1);
+                    else if (e.key === 'ArrowRight') nextIndex = Math.min(items.length - 1, currentIndex + 1);
+                    else if (e.key === 'ArrowUp') nextIndex = Math.max(0, currentIndex - columnCount);
+                    else if (e.key === 'ArrowDown') nextIndex = Math.min(items.length - 1, currentIndex + columnCount);
+                    else if (e.key === 'Home') nextIndex = 0;
+                    else if (e.key === 'End') nextIndex = items.length - 1;
+                    else if (e.key === 'Enter') {
+                        e.preventDefault();
+                        onDblClick();
+                        return;
+                    } else if (e.key === 'F2') {
+                        e.preventDefault();
+                        this.startInlineRename(label, fullPath);
+                        return;
+                    } else if (e.key === 'Delete') {
+                        e.preventDefault();
+                        await this.deleteAssetFromKeyboard(name, fullPath, isFolder);
+                        return;
+                    } else if (e.key === 'ContextMenu' || (e.shiftKey && e.key === 'F10')) {
+                        e.preventDefault();
+                        const rect = item.getBoundingClientRect();
+                        await this.showItemContextMenu(rect.left + 12, rect.top + 12, name, fullPath, label);
+                        return;
+                    } else {
+                        return;
+                    }
+
+                    e.preventDefault();
+                    if (nextIndex !== currentIndex) items[nextIndex].click();
                 };
 
                 // Drag Logic
@@ -498,14 +583,25 @@ export class ProjectWindow {
                 if (this.searchQuery) return; // Hide folders during global search
                 if (this.activeFilter !== "All") return;
 
-                const item = createItem(f.name, AssetIcons.Folder, true, () => {
+                const item = createItem(f.name, AssetIcons.Folder, true,  async() => {
                     this.currentPath = f.fullPath;
                     this.selectedAssetPath = f.fullPath;
-                    this.editor.inspectorWindow.selectAsset(this.buildAssetSelection(f.fullPath, f.name, true));
-                    this.refresh();
+                    this.editor.inspectorWindow.selectAsset(await this.buildAssetSelection(f.fullPath, f.name, true));
+                    await this.refresh();
                 }, f.fullPath);
                 grid.appendChild(item);
             });
+
+            const renderedItems = Array.from(grid.querySelectorAll<HTMLElement>('.asset-item'));
+            if (renderedItems.length > 0) {
+                const focusCandidate = renderedItems.find((item) =>
+                    !!item.dataset.assetPath
+                    && !!this.focusedAssetPath
+                    && this.pathsEqual(item.dataset.assetPath, this.focusedAssetPath)
+                ) ?? renderedItems.find((item) => item.getAttribute('aria-selected') === 'true')
+                    ?? renderedItems[0];
+                focusCandidate.tabIndex = 0;
+            }
 
             // 2. Files
             files.filter((f: any) => !f.isDirectory()).forEach((f: any) => {
@@ -533,16 +629,14 @@ export class ProjectWindow {
 
                 const fullPath = f.fullPath;
 
-                const item = createItem(f.name, icon, false, () => {
+                const item = createItem(f.name, icon, false,  async() => {
                     if (ext === '.cs' || ext === '.ts') {
                         // Open in VSCode or script editor
                         console.log("Opening script:", fullPath);
                     } else if (ext === '.json' || ext === '.scene') {
-                        SceneManager.getInstance().loadScene(fullPath).then((newScene) => {
-                            this.editor.setScene(newScene);
-                        });
+                        await this.editor.openScene(fullPath);
                     } else if (ext === '.prefab') {
-                        const prefab = PrefabManager.loadPrefabFromPath(fullPath);
+                        const prefab = await PrefabManager.loadPrefabFromPath(fullPath);
                         if (prefab) {
                             const go = prefab.instantiate();
                             if (this.editor.scene) {
@@ -551,16 +645,12 @@ export class ProjectWindow {
                             }
                         }
                     } else if (ext === '.mat') {
-                        const mat = this.loadMaterialAsset(fullPath);
+                        const mat = await this.loadMaterialAsset(fullPath);
                         if (mat) {
                             this.editor.inspectorWindow.selectAsset(mat);
                         }
-                    } else if (ext === '.scene') {
-                        SceneManager.getInstance().loadScene(fullPath).then((newScene) => {
-                            this.editor.setScene(newScene);
-                        });
                     } else if (ext === '.asset') {
-                        const asset = this.loadScriptableObjectAsset(fullPath);
+                        const asset = await this.loadScriptableObjectAsset(fullPath);
                         if (asset) {
                             this.editor.inspectorWindow.selectAsset(asset);
                         }
@@ -587,7 +677,7 @@ export class ProjectWindow {
                 empty.style.width = '100%';
                 empty.innerHTML = this.searchQuery
                     ? `
-                        <div class="editor-empty-state-title">No assets matched "${this.searchQuery}"</div>
+                        <div class="editor-empty-state-title">No assets matched "${escapeHtml(this.searchQuery)}"</div>
                         <div class="editor-empty-state-hint">Try a shorter search term or switch the asset filter back to All.</div>
                     `
                     : this.activeFilter !== 'All'
@@ -624,7 +714,7 @@ export class ProjectWindow {
             content.style.background = 'transparent';
         };
 
-        content.ondrop = (e) => {
+        content.ondrop =  async(e) => {
             e.preventDefault();
             content.style.background = 'transparent';
             try {
@@ -636,7 +726,7 @@ export class ProjectWindow {
                     if (go) {
                         const name = prompt("Prefab Name", go.name);
                         if (name) {
-                            this.savePrefabToFile(name, go);
+                            await this.savePrefabToFile(name, go);
                         }
                     }
                 }
@@ -644,174 +734,175 @@ export class ProjectWindow {
         };
     }
 
-    public savePrefabToFile(name: string, go: GameObject) {
-        PrefabManager.savePrefab(name, go);
-        const prefab = PrefabManager.loadPrefab(name);
+    public async savePrefabToFile(name: string, go: GameObject) {
+        await PrefabManager.savePrefab(name, go);
+        const prefab = await PrefabManager.loadPrefab(name);
         if (prefab) {
             // Find if file already exists in Assets to overwrite same path
-            let targetPath = this.findFileRecursive(this.rootPath, `${name}.prefab`);
+            let targetPath = await this.findFileRecursive(this.rootPath, `${name}.prefab`);
             if (!targetPath) {
                 targetPath = PathUtils.join(this.currentPath, `${name}.prefab`);
             }
-            this.fs.writeFileSync(targetPath, prefab.toJSON(), 'utf8');
-            this.refreshAssetDatabaseAndView({ focusAssetPath: targetPath });
+            await this.fs.writeFile(targetPath, prefab.toJSON(), 'utf8');
+            await this.refreshAssetDatabaseAndView({ focusAssetPath: targetPath });
             console.log(`Saved prefab to file: ${targetPath}`);
         }
     }
 
-    public savePrefabInstanceToSource(go: GameObject): string | null {
-        const targetPath = PrefabManager.savePrefabInstance(go);
+    public async savePrefabInstanceToSource(go: GameObject): Promise<string | null> {
+        const targetPath = await PrefabManager.savePrefabInstance(go);
         if (!targetPath) return null;
-        this.refreshAssetDatabaseAndView({ focusAssetPath: targetPath });
+        await this.refreshAssetDatabaseAndView({ focusAssetPath: targetPath });
         return targetPath;
     }
 
-    public saveMaterialToFile(mat: Material) {
+    public async saveMaterialToFile(mat: Material) {
         if (!mat.assetPath) return;
         try {
             const data = JSON.stringify(mat.serialize(), null, 4);
-            this.fs.writeFileSync(mat.assetPath, data, 'utf8');
-            this.refreshAssetDatabaseAndView({ focusAssetPath: mat.assetPath });
+            await this.fs.writeFile(mat.assetPath, data, 'utf8');
+            await this.refreshAssetDatabaseAndView({ focusAssetPath: mat.assetPath });
         } catch (e) {
             console.error("Failed to save material to file:", e);
         }
     }
 
-    public saveScriptableObject(so: any) {
-        const targetPath = this.findFileRecursive(this.rootPath, `${so.assetName}.asset`);
+    public async saveScriptableObject(so: any) {
+        const targetPath = await this.findFileRecursive(this.rootPath, `${so.assetName}.asset`);
         if (!targetPath) return;
 
         try {
-            this.fs.writeFileSync(targetPath, so.toAssetJSON(), 'utf8');
-            this.refreshAssetDatabaseAndView({ focusAssetPath: targetPath });
+            await this.fs.writeFile(targetPath, so.toAssetJSON(), 'utf8');
+            await this.refreshAssetDatabaseAndView({ focusAssetPath: targetPath });
         } catch (e) {
             console.error('Failed to save ScriptableObject to file:', e);
         }
     }
 
-    public updateAssetMeta(assetPath: string, updater: (meta: AssetMeta) => void): AssetMeta | null {
-        const meta = AssetDatabase.getInstance().updateMeta(assetPath, (draft) => {
+    public async updateAssetMeta(assetPath: string, updater: (meta: AssetMeta) => void): Promise<AssetMeta | null> {
+        const meta = await AssetDatabase.getInstance().updateMeta(assetPath, (draft) => {
             updater(draft);
         });
         if (meta) {
-            const runtimeAssetPaths = this.getRuntimeReimportPathsForAsset(assetPath, true);
-            this.refreshAssetDatabaseAndView({ focusAssetPath: assetPath, runtimeAssetPaths });
+            const runtimeAssetPaths = await this.getRuntimeReimportPathsForAsset(assetPath, true);
+            await this.refreshAssetDatabaseAndView({ focusAssetPath: assetPath, runtimeAssetPaths });
         }
         return meta;
     }
 
-    public reimportAsset(assetPath: string): ProjectAssetSelection | null {
-        if (this.fs.existsSync(assetPath) && this.fs.statSync(assetPath).isDirectory()) {
-            return this.reimportAssetScope(assetPath, false);
+    public async reimportAsset(assetPath: string): Promise<ProjectAssetSelection | null> {
+        if ((await this.fs.exists(assetPath) && await this.fs.stat(assetPath)).isDirectory()) {
+            return await this.reimportAssetScope(assetPath, false);
         }
-        const runtimeAssetPaths = this.getRuntimeReimportPathsForAsset(assetPath, false);
-        this.refreshAssetDatabaseAndView({ focusAssetPath: assetPath, runtimeAssetPaths });
-        const selection = this.buildAssetSelection(assetPath, PathUtils.basename(assetPath), this.fs.statSync(assetPath).isDirectory());
+        const runtimeAssetPaths = await this.getRuntimeReimportPathsForAsset(assetPath, false);
+        await this.refreshAssetDatabaseAndView({ focusAssetPath: assetPath, runtimeAssetPaths });
+        const selection = await this.buildAssetSelection(assetPath, PathUtils.basename(assetPath), (await this.fs.stat(assetPath)).isDirectory());
         this.editor.inspectorWindow.selectAsset(selection);
         return selection;
     }
 
-    public reimportAssetWithDependents(assetPath: string): ProjectAssetSelection | null {
-        if (this.fs.existsSync(assetPath) && this.fs.statSync(assetPath).isDirectory()) {
-            return this.reimportAssetScope(assetPath, true);
+    public async reimportAssetWithDependents(assetPath: string): Promise<ProjectAssetSelection | null> {
+        if ((await this.fs.exists(assetPath) && await this.fs.stat(assetPath)).isDirectory()) {
+            return await this.reimportAssetScope(assetPath, true);
         }
-        const runtimeAssetPaths = this.getRuntimeReimportPathsForAsset(assetPath, true);
-        this.refreshAssetDatabaseAndView({ focusAssetPath: assetPath, runtimeAssetPaths });
-        if (!this.fs.existsSync(assetPath)) return null;
+        const runtimeAssetPaths = await this.getRuntimeReimportPathsForAsset(assetPath, true);
+        await this.refreshAssetDatabaseAndView({ focusAssetPath: assetPath, runtimeAssetPaths });
+        if (!await this.fs.exists(assetPath)) return null;
 
-        const selection = this.buildAssetSelection(assetPath, PathUtils.basename(assetPath), this.fs.statSync(assetPath).isDirectory());
+        const selection = await this.buildAssetSelection(assetPath, PathUtils.basename(assetPath), (await this.fs.stat(assetPath)).isDirectory());
         this.editor.inspectorWindow.selectAsset(selection);
         return selection;
     }
 
-    public reimportAssetScope(scopePath: string, includeDependents: boolean): ProjectAssetSelection | null {
-        if (!scopePath || !this.fs.existsSync(scopePath)) return null;
+    public async reimportAssetScope(scopePath: string, includeDependents: boolean): Promise<ProjectAssetSelection | null> {
+        if (!scopePath || !await this.fs.exists(scopePath)) return null;
 
-        const scopeAssets = this.collectAssetPathsWithinScope(scopePath).filter((assetPath) => this.isFileAssetPath(assetPath));
+        const scopeAssets = (await this.collectAssetPathsWithinScope(scopePath))
+            .filter((assetPath) => this.isFileAssetPath(assetPath));
         const runtimePaths = new Set<string>();
 
-        scopeAssets.forEach((assetPath) => {
-            this.getRuntimeReimportPathsForAsset(assetPath, includeDependents)
+        for (const assetPath of scopeAssets) {
+            (await this.getRuntimeReimportPathsForAsset(assetPath, includeDependents))
                 .forEach((pathValue) => runtimePaths.add(pathValue));
-        });
+        }
 
-        this.refreshAssetDatabaseAndView({
+        await this.refreshAssetDatabaseAndView({
             focusAssetPath: scopePath,
             runtimeAssetPaths: Array.from(runtimePaths)
         });
 
-        if (!this.fs.existsSync(scopePath)) return null;
-        const isDirectory = this.fs.statSync(scopePath).isDirectory();
-        const selection = this.buildAssetSelection(scopePath, PathUtils.basename(scopePath), isDirectory);
+        if (!await this.fs.exists(scopePath)) return null;
+        const isDirectory = (await this.fs.stat(scopePath)).isDirectory();
+        const selection = await this.buildAssetSelection(scopePath, PathUtils.basename(scopePath), isDirectory);
         this.editor.inspectorWindow.selectAsset(selection);
         return selection;
     }
 
-    private getRuntimeReimportPathsForAsset(assetPath: string, includeDependents: boolean): string[] {
-        if (!assetPath || !this.fs.existsSync(assetPath) || this.fs.statSync(assetPath).isDirectory()) return [];
+    private async getRuntimeReimportPathsForAsset(assetPath: string, includeDependents: boolean): Promise<string[]> {
+        if (!assetPath || !(await this.fs.exists(assetPath) || await this.fs.stat(assetPath)).isDirectory()) return [];
 
         const runtimePaths = new Set<string>();
-        if (this.isRuntimeRefreshCandidate(assetPath)) {
+        if (await this.isRuntimeRefreshCandidate(assetPath)) {
             runtimePaths.add(assetPath);
         }
 
         if (includeDependents) {
             AssetDatabase.getInstance().getReferencerClosurePaths(assetPath, false)
-                .filter((pathValue) => this.isRuntimeRefreshCandidate(pathValue))
+                .filter( async(pathValue) => await this.isRuntimeRefreshCandidate(pathValue))
                 .forEach((pathValue) => runtimePaths.add(pathValue));
         }
 
         return Array.from(runtimePaths);
     }
 
-    public refreshAssetRuntime(assetPath: string) {
-        this.refreshAssetDatabaseAndView({ preserveSelection: true, runtimeAssetPaths: [assetPath] });
+    public async refreshAssetRuntime(assetPath: string) {
+        await this.refreshAssetDatabaseAndView({ preserveSelection: true, runtimeAssetPaths: [assetPath] });
     }
 
-    public auditAssetReferences(assetPath: string): AssetReferenceAuditResult | null {
-        const candidates = this.getReferenceAuditCandidatePaths(assetPath);
+    public async auditAssetReferences(assetPath: string): Promise<AssetReferenceAuditResult | null> {
+        const candidates = await this.getReferenceAuditCandidatePaths(assetPath);
         if (candidates.length === 0) return null;
         return this.auditAndRepairReferenceFiles(candidates, false);
     }
 
-    public repairAssetReferences(assetPath: string): AssetReferenceAuditResult | null {
-        const candidates = this.getReferenceAuditCandidatePaths(assetPath);
+    public async repairAssetReferences(assetPath: string): Promise<AssetReferenceAuditResult | null> {
+        const candidates = await this.getReferenceAuditCandidatePaths(assetPath);
         if (candidates.length === 0) return null;
 
         const result = this.auditAndRepairReferenceFiles(candidates, true);
         this.recordRepairHistory(assetPath, result);
         if (result.filesChanged > 0) {
-            this.refreshAssetDatabaseAndView({
-                focusAssetPath: this.fs.existsSync(assetPath) ? assetPath : null,
+            await this.refreshAssetDatabaseAndView({
+                focusAssetPath: await this.fs.exists(assetPath) ? assetPath : null,
                 preserveSelection: true
             });
         }
         return result;
     }
 
-    public auditAllAssetReferences(): AssetReferenceAuditResult {
-        return this.auditAndRepairReferenceFiles(this.getReferenceAuditCandidatePaths(), false);
+    public async auditAllAssetReferences(): Promise<AssetReferenceAuditResult> {
+        return this.auditAndRepairReferenceFiles(await this.getReferenceAuditCandidatePaths(), false);
     }
 
-    public repairAllAssetReferences(): AssetReferenceAuditResult {
-        const result = this.auditAndRepairReferenceFiles(this.getReferenceAuditCandidatePaths(), true);
+    public async repairAllAssetReferences(): Promise<AssetReferenceAuditResult> {
+        const result = this.auditAndRepairReferenceFiles(await this.getReferenceAuditCandidatePaths(), true);
         this.recordRepairHistory(this.rootPath, result);
         if (result.filesChanged > 0) {
-            this.refreshAssetDatabaseAndView({ preserveSelection: true });
+            await this.refreshAssetDatabaseAndView({ preserveSelection: true });
         }
         return result;
     }
 
-    public runPhase3ReadinessCheck(scopePath?: string): Phase3ReadinessReport {
-        const effectiveScopePath = scopePath && scopePath.length > 0 && this.fs.existsSync(scopePath)
+    public async runPhase3ReadinessCheck(scopePath?: string): Promise<Phase3ReadinessReport> {
+        const effectiveScopePath = scopePath && scopePath.length > 0 && await this.fs.exists(scopePath)
             ? scopePath
             : this.rootPath;
-        const refreshResult = this.refreshAssetDatabaseAndView({ preserveSelection: true });
+        const refreshResult = await this.refreshAssetDatabaseAndView({ preserveSelection: true });
         const scopeEntries = AssetDatabase.getInstance()
             .getAllEntries()
-            .filter((entry) => this.isPathInsideScope(entry.path, effectiveScopePath) && this.isFileAssetPath(entry.path));
+            .filter( async(entry) => this.isPathInsideScope(entry.path, effectiveScopePath) && await this.isFileAssetPath(entry.path));
         const scopeAssetPaths = scopeEntries.map((entry) => entry.path);
-        const referenceAudit = this.auditAndRepairReferenceFiles(this.getReferenceAuditCandidatePaths(effectiveScopePath), false);
+        const referenceAudit = this.auditAndRepairReferenceFiles(await this.getReferenceAuditCandidatePaths(effectiveScopePath), false);
 
         const scriptEntries = scopeEntries.filter((entry) => entry.meta.assetType === 'script');
         const scriptsWithCustomExecutionOrder = scriptEntries.filter((entry) => {
@@ -820,7 +911,7 @@ export class ProjectWindow {
         }).length;
         const scriptsAutoReferencedDisabled = scriptEntries.filter((entry) => entry.meta.importer.settings.autoReferenced === false).length;
 
-        const runtimeCandidateCount = scopeAssetPaths.filter((assetPath) => this.isRuntimeRefreshCandidate(assetPath)).length;
+        const runtimeCandidateCount = scopeAssetPaths.filter( async(assetPath) => await this.isRuntimeRefreshCandidate(assetPath)).length;
         const dependencyEdgeCount = scopeAssetPaths.reduce((sum, assetPath) => sum + AssetDatabase.getInstance().getDependencyPaths(assetPath).length, 0);
         const reimportDiagnostics = this.collectReimportDiagnostics(scopeAssetPaths);
         const healthDiagnostics = this.collectHealthDiagnostics(scopeEntries, referenceAudit, effectiveScopePath);
@@ -877,11 +968,11 @@ export class ProjectWindow {
         };
     }
 
-    public getDeleteImpactSummary(assetPath: string): AssetDeleteImpactSummary | null {
-        if (!assetPath || !this.fs.existsSync(assetPath)) return null;
+    public async getDeleteImpactSummary(assetPath: string): Promise<AssetDeleteImpactSummary | null> {
+        if (!assetPath || !await this.fs.exists(assetPath)) return null;
 
-        const targetIsDirectory = this.fs.statSync(assetPath).isDirectory();
-        const targetPaths = this.collectAssetPathsWithinScope(assetPath);
+        const targetIsDirectory = (await this.fs.stat(assetPath)).isDirectory();
+        const targetPaths = await this.collectAssetPathsWithinScope(assetPath);
         if (targetPaths.length === 0) {
             return {
                 targetPath: assetPath,
@@ -933,25 +1024,25 @@ export class ProjectWindow {
         return AssetDatabase.getInstance().getReferencerPaths(assetPath);
     }
 
-    public focusAssetByPath(assetPath: string): ProjectAssetSelection | null {
-        if (!assetPath || !this.fs.existsSync(assetPath)) return null;
+    public async focusAssetByPath(assetPath: string): Promise<ProjectAssetSelection | null> {
+        if (!assetPath || !await this.fs.exists(assetPath)) return null;
 
-        const isDirectory = this.fs.statSync(assetPath).isDirectory();
-        this.refreshAssetDatabaseAndView({ focusAssetPath: assetPath });
-        const selection = this.buildAssetSelection(assetPath, PathUtils.basename(assetPath), isDirectory);
+        const isDirectory = (await this.fs.stat(assetPath)).isDirectory();
+        await this.refreshAssetDatabaseAndView({ focusAssetPath: assetPath });
+        const selection = await this.buildAssetSelection(assetPath, PathUtils.basename(assetPath), isDirectory);
         this.editor.inspectorWindow.selectAsset(selection);
         return selection;
     }
 
-    public highlightAsset(filename: string) {
+    public async highlightAsset(filename: string) {
         // 1. Find the file recursively
-        const foundPath = this.findFileRecursive(this.rootPath, filename);
+        const foundPath = await this.findFileRecursive(this.rootPath, filename);
 
         if (foundPath) {
             // 2. Navigate to folder
             this.currentPath = PathUtils.dirname(foundPath);
             this.selectedAssetPath = foundPath;
-            this.refresh();
+            await this.refresh();
 
             // 3. Highlight item
             setTimeout(() => {
@@ -977,13 +1068,13 @@ export class ProjectWindow {
         }
     }
 
-    private findFileRecursive(dir: string, filename: string): string | null {
+    private async findFileRecursive(dir: string, filename: string): Promise<string | null> {
         try {
-            const files = this.fs.readdirSync(dir, { withFileTypes: true });
+            const files = await this.fs.readdir(dir, { withFileTypes: true });
             for (const file of files) {
                 const fullPath = PathUtils.join(dir, file.name);
                 if (file.isDirectory()) {
-                    const found = this.findFileRecursive(fullPath, filename);
+                    const found = await this.findFileRecursive(fullPath, filename);
                     if (found) return found;
                 } else if (file.name === filename) {
                     return fullPath;
@@ -995,51 +1086,51 @@ export class ProjectWindow {
         return null;
     }
 
-    public selectAssetByName(name: string) {
-        this.highlightAsset(name);
+    public async selectAssetByName(name: string) {
+        await this.highlightAsset(name);
     }
 
-    private refreshAssetDatabaseAndView(options?: {
+    private async refreshAssetDatabaseAndView(options?: {
         focusAssetPath?: string | null;
         preserveSelection?: boolean;
         runtimeAssetPaths?: string[];
-    }): AssetRefreshResult {
-        const refreshResult = AssetDatabase.getInstance().refresh(this.rootPath);
+    }): Promise<AssetRefreshResult> {
+        const refreshResult = await AssetDatabase.getInstance().refresh(this.rootPath);
         ScriptRegistry.refreshScriptExecutionOrderFromAssetDatabase();
         if (refreshResult.moved.length > 0) {
             this.applyMovedAssetReferenceEffects(refreshResult.moved);
         }
-        const nextSelectionPath = this.resolveSelectionPathAfterRefresh(refreshResult, options?.focusAssetPath, options?.preserveSelection);
+        const nextSelectionPath = await this.resolveSelectionPathAfterRefresh(refreshResult, options?.focusAssetPath, options?.preserveSelection);
 
-        if (nextSelectionPath && this.fs.existsSync(nextSelectionPath)) {
+        if (nextSelectionPath && await this.fs.exists(nextSelectionPath)) {
             this.selectedAssetPath = nextSelectionPath;
-            const isDirectory = this.fs.statSync(nextSelectionPath).isDirectory();
+            const isDirectory = (await this.fs.stat(nextSelectionPath)).isDirectory();
             this.currentPath = isDirectory ? nextSelectionPath : PathUtils.dirname(nextSelectionPath);
-        } else if (options?.focusAssetPath === null || (this.selectedAssetPath && !this.fs.existsSync(this.selectedAssetPath))) {
+        } else if (options?.focusAssetPath === null || (this.selectedAssetPath && !await this.fs.exists(this.selectedAssetPath))) {
             this.selectedAssetPath = null;
         }
 
-        this.refresh();
+        await this.refresh();
         if (options?.runtimeAssetPaths?.length) {
             Array.from(new Set(options.runtimeAssetPaths))
                 .filter((assetPath) => typeof assetPath === 'string' && assetPath.length > 0)
-                .forEach((assetPath) => this.applyRuntimeReimportEffects(assetPath));
+                .forEach( async(assetPath) => await this.applyRuntimeReimportEffects(assetPath));
         }
 
-        if (this.selectedAssetPath && this.fs.existsSync(this.selectedAssetPath)) {
+        if (this.selectedAssetPath && await this.fs.exists(this.selectedAssetPath)) {
             const assetName = PathUtils.basename(this.selectedAssetPath);
-            const isFolder = this.fs.statSync(this.selectedAssetPath).isDirectory();
-            this.editor.inspectorWindow.selectAsset(this.buildAssetSelection(this.selectedAssetPath, assetName, isFolder));
+            const isFolder = (await this.fs.stat(this.selectedAssetPath)).isDirectory();
+            this.editor.inspectorWindow.selectAsset(await this.buildAssetSelection(this.selectedAssetPath, assetName, isFolder));
         }
 
         return refreshResult;
     }
 
-    private resolveSelectionPathAfterRefresh(
+    private async resolveSelectionPathAfterRefresh(
         refreshResult: AssetRefreshResult,
         focusAssetPath?: string | null,
         preserveSelection: boolean = true
-    ): string | null {
+    ): Promise<string | null> {
         if (typeof focusAssetPath === 'string' && focusAssetPath.length > 0) {
             return focusAssetPath;
         }
@@ -1053,7 +1144,7 @@ export class ProjectWindow {
         }
 
         const entry = AssetDatabase.getInstance().getEntry(this.selectedAssetPath);
-        if (entry || this.fs.existsSync(this.selectedAssetPath)) {
+        if (entry || await this.fs.exists(this.selectedAssetPath)) {
             return this.selectedAssetPath;
         }
 
@@ -1064,7 +1155,7 @@ export class ProjectWindow {
         return AssetDatabase.getInstance().getEntry(assetPath) ?? null;
     }
 
-    private buildAssetSelection(assetPath: string, assetName: string, isFolder: boolean): ProjectAssetSelection {
+    private async buildAssetSelection(assetPath: string, assetName: string, isFolder: boolean): Promise<ProjectAssetSelection> {
         const entry = this.getAssetEntry(assetPath);
         const extension = isFolder ? '' : PathUtils.extname(assetPath).toLowerCase();
 
@@ -1074,29 +1165,29 @@ export class ProjectWindow {
             path: assetPath,
             extension,
             meta: entry?.meta ?? AssetDatabase.getInstance().getMeta(assetPath)!,
-            payload: isFolder ? null : this.loadAssetPayload(assetPath, extension)
+            payload: isFolder ? null : await this.loadAssetPayload(assetPath, extension)
         };
     }
 
-    private loadAssetPayload(fullPath: string, extension: string): any | null {
+    private async loadAssetPayload(fullPath: string, extension: string): Promise<any | null> {
         if (extension === '.mat') {
-            return this.loadMaterialAsset(fullPath);
+            return await this.loadMaterialAsset(fullPath);
         }
 
         if (extension === '.asset') {
-            return this.loadScriptableObjectAsset(fullPath);
+            return await this.loadScriptableObjectAsset(fullPath);
         }
 
         return null;
     }
 
-    private loadMaterialAsset(fullPath: string): Material | null {
+    private async loadMaterialAsset(fullPath: string): Promise<Material | null> {
         const cached = MaterialManager.getMaterial(fullPath);
 
         try {
-            const data = JSON.parse(this.fs.readFileSync(fullPath, 'utf8'));
+            const data = JSON.parse(await this.fs.readFile(fullPath, 'utf8'));
             const material = cached ?? Material.deserialize(data);
-            this.applyMaterialAssetData(material, data, fullPath);
+            await this.applyMaterialAssetData(material, data, fullPath);
             if (!cached) {
                 MaterialManager.registerMaterial(material);
             }
@@ -1107,9 +1198,9 @@ export class ProjectWindow {
         }
     }
 
-    private loadScriptableObjectAsset(fullPath: string): any | null {
+    private async loadScriptableObjectAsset(fullPath: string): Promise<any | null> {
         try {
-            const json = this.fs.readFileSync(fullPath, 'utf8');
+            const json = await this.fs.readFile(fullPath, 'utf8');
             const data = JSON.parse(json);
             const ScriptableCtor = ScriptableObjectRegistry.get(data.type);
             if (!ScriptableCtor) return null;
@@ -1137,7 +1228,7 @@ export class ProjectWindow {
         return null;
     }
 
-    private applyRuntimeReimportEffects(assetPath: string) {
+    private async applyRuntimeReimportEffects(assetPath: string) {
         const meta = AssetDatabase.getInstance().getMeta(assetPath);
         if (!meta) return;
 
@@ -1145,12 +1236,12 @@ export class ProjectWindow {
             AssetImporter.invalidateTextureCache(assetPath);
             this.reloadMaterialTextureReferences(assetPath);
         } else if (meta.assetType === 'material') {
-            this.loadMaterialAsset(assetPath);
+            await this.loadMaterialAsset(assetPath);
         } else if (meta.assetType === 'audio') {
             AssetImporter.invalidateAudioCache(assetPath);
             this.reloadAudioSourcesForAsset(assetPath);
         } else if (meta.assetType === 'prefab') {
-            this.reloadPrefabInstancesForAsset(assetPath);
+            await this.reloadPrefabInstancesForAsset(assetPath);
         } else if (meta.assetType === 'model') {
             AssetImporter.invalidateModelCache(assetPath);
             this.reloadModelInstancesForAsset(assetPath);
@@ -1161,7 +1252,7 @@ export class ProjectWindow {
         this.editor.inspectorWindow.refresh();
     }
 
-    private applyMaterialAssetData(material: Material, data: any, fullPath: string) {
+    private async applyMaterialAssetData(material: Material, data: any, fullPath: string) {
         const importerSettings = this.getImporterSettings(fullPath, 'material');
         const shaderOverride = this.normalizeMaterialShader(importerSettings.shader);
         const mergedData = {
@@ -1175,37 +1266,37 @@ export class ProjectWindow {
 
         material.assetPath = fullPath;
 
-        this.loadTextureReference(data.mainTexturePath, data.mainTextureGuid, (texture) => material.setTextureSilently('mainTexture', texture));
-        this.loadTextureReference(data.normalMapPath, data.normalMapGuid, (texture) => material.setTextureSilently('normalMap', texture));
-        this.loadTextureReference(data.metallicMapPath, data.metallicMapGuid, (texture) => material.setTextureSilently('metallicMap', texture));
-        this.loadTextureReference(data.roughnessMapPath, data.roughnessMapGuid, (texture) => material.setTextureSilently('roughnessMap', texture));
+        await this.loadTextureReference(data.mainTexturePath, data.mainTextureGuid, (texture) => material.setTextureSilently('mainTexture', texture));
+        await this.loadTextureReference(data.normalMapPath, data.normalMapGuid, (texture) => material.setTextureSilently('normalMap', texture));
+        await this.loadTextureReference(data.metallicMapPath, data.metallicMapGuid, (texture) => material.setTextureSilently('metallicMap', texture));
+        await this.loadTextureReference(data.roughnessMapPath, data.roughnessMapGuid, (texture) => material.setTextureSilently('roughnessMap', texture));
     }
 
-    private loadTextureReference(
+    private async loadTextureReference(
         reference: string | null | undefined,
         guid: string | null | undefined,
         assign: (texture: any | null) => void
     ) {
-        const resolvedPath = this.resolveTextureReference(reference, guid);
+        const resolvedPath = await this.resolveTextureReference(reference, guid);
         if (!resolvedPath) {
             assign(null);
             return;
         }
 
-        AssetImporter.importTexture(resolvedPath, (texture) => {
+        await AssetImporter.importTexture(resolvedPath, (texture) => {
             assign(texture);
         });
     }
 
-    private resolveTextureReference(reference: string | null | undefined, guid?: string | null): string | null {
+    private async resolveTextureReference(reference: string | null | undefined, guid?: string | null): Promise<string | null> {
         if (guid) {
             const guidPath = AssetDatabase.getInstance().getPath(guid);
             if (guidPath) return guidPath;
         }
         if (!reference || typeof reference !== 'string') return null;
-        if (this.fs.existsSync(reference)) return reference;
+        if (await this.fs.exists(reference)) return reference;
 
-        const directMatch = this.findFileRecursive(this.rootPath, PathUtils.basename(reference));
+        const directMatch = await this.findFileRecursive(this.rootPath, PathUtils.basename(reference));
         if (directMatch) return directMatch;
 
         const ext = PathUtils.extname(reference);
@@ -1221,15 +1312,15 @@ export class ProjectWindow {
     }
 
     private reloadMaterialTextureReferences(assetPath: string) {
-        MaterialManager.getAllMaterials().forEach((material) => {
-            this.reloadMaterialTextureSlot(material, 'mainTexture', assetPath, (texture) => material.setMainTexture(texture));
-            this.reloadMaterialTextureSlot(material, 'normalMap', assetPath, (texture) => material.setNormalMap(texture));
-            this.reloadMaterialTextureSlot(material, 'metallicMap', assetPath, (texture) => material.setMetallicMap(texture));
-            this.reloadMaterialTextureSlot(material, 'roughnessMap', assetPath, (texture) => material.setRoughnessMap(texture));
+        MaterialManager.getAllMaterials().forEach( async(material) => {
+            await this.reloadMaterialTextureSlot(material, 'mainTexture', assetPath, (texture) => material.setMainTexture(texture));
+            await this.reloadMaterialTextureSlot(material, 'normalMap', assetPath, (texture) => material.setNormalMap(texture));
+            await this.reloadMaterialTextureSlot(material, 'metallicMap', assetPath, (texture) => material.setMetallicMap(texture));
+            await this.reloadMaterialTextureSlot(material, 'roughnessMap', assetPath, (texture) => material.setRoughnessMap(texture));
         });
     }
 
-    private reloadMaterialTextureSlot(
+    private async reloadMaterialTextureSlot(
         material: Material,
         key: 'mainTexture' | 'normalMap' | 'metallicMap' | 'roughnessMap',
         assetPath: string,
@@ -1242,7 +1333,7 @@ export class ProjectWindow {
         const matchesByGuid = !!currentAssetGuid && !!assetGuid && currentAssetGuid === assetGuid;
         if ((!currentAssetPath || !this.pathsEqual(currentAssetPath, assetPath)) && !matchesByGuid) return;
 
-        AssetImporter.importTexture(assetPath, (reimportedTexture) => {
+        await AssetImporter.importTexture(assetPath, (reimportedTexture) => {
             assign(reimportedTexture);
         });
     }
@@ -1251,17 +1342,17 @@ export class ProjectWindow {
         const normalizedAssetPath = this.normalizeAssetPath(assetPath);
         const assetGuid = AssetDatabase.getInstance().getGuid(assetPath) ?? null;
         this.editor.scene.gameObjects.forEach((go: GameObject) => {
-            go.getComponents(AudioSource).forEach((source) => {
+            go.getComponents(AudioSource).forEach( async(source) => {
                 const matchesByPath = !!source.clipPath && this.pathsEqual(source.clipPath, normalizedAssetPath);
                 const matchesByGuid = !!assetGuid && source.clipGuid === assetGuid;
                 if (!matchesByPath && !matchesByGuid) return;
-                source.loadClip(normalizedAssetPath);
+                await source.loadClip(normalizedAssetPath);
             });
         });
     }
 
-    private reloadPrefabInstancesForAsset(assetPath: string) {
-        const prefab = PrefabManager.loadPrefabFromPath(assetPath);
+    private async reloadPrefabInstancesForAsset(assetPath: string) {
+        const prefab = await PrefabManager.loadPrefabFromPath(assetPath);
         if (!prefab) return;
         const assetGuid = AssetDatabase.getInstance().getGuid(assetPath) ?? null;
         const importerSettings = this.getImporterSettings(assetPath, 'prefab');
@@ -1270,14 +1361,14 @@ export class ProjectWindow {
         if (!autoReconnect) return;
         const prefabName = PathUtils.basename(assetPath, PathUtils.extname(assetPath));
 
-        this.editor.scene.gameObjects.forEach((go: GameObject) => {
+        this.editor.scene.gameObjects.forEach( async(go: GameObject) => {
             const matchesByPath = !!go.sourceAssetPath && this.pathsEqual(go.sourceAssetPath, assetPath);
             const matchesByGuid = !!assetGuid && go.sourceAssetGuid === assetGuid;
             if (go.sourceAssetType !== 'prefab' || (!matchesByPath && !matchesByGuid)) return;
             if (preserveOverrides) {
                 const overrideSnapshot = this.capturePrefabOverrideSnapshot(go);
                 const structuralOverrideSnapshot = this.capturePrefabStructuralOverrideSnapshot(go);
-                PrefabManager.revertToPrefab(go);
+                await PrefabManager.revertToPrefab(go);
                 this.restorePrefabOverrideSnapshot(go, overrideSnapshot);
                 this.restorePrefabStructuralOverrideSnapshot(go, structuralOverrideSnapshot);
                 go.sourceAssetPath = assetPath;
@@ -1287,7 +1378,7 @@ export class ProjectWindow {
                 return;
             }
 
-            PrefabManager.revertToPrefab(go);
+            await PrefabManager.revertToPrefab(go);
         });
     }
 
@@ -1512,8 +1603,8 @@ export class ProjectWindow {
             )
         );
 
-        targets.forEach((target: GameObject) => {
-            AssetImporter.importModel(assetPath, (importedGO) => {
+        targets.forEach( async(target: GameObject) => {
+            await AssetImporter.importModel(assetPath, (importedGO) => {
                 PrefabManager.applySerializedData(target, importedGO.serialize(), {
                     preserveTransform: true,
                     preserveSourceLink: true
@@ -1612,32 +1703,32 @@ export class ProjectWindow {
             .filter((entry) => entry.meta.assetType === 'scriptableObject')
             .map((entry) => entry.path);
 
-        materialPaths.forEach((assetPath) => {
-            this.patchJsonAssetFile(assetPath, (data) => this.patchMaterialAssetDataReferences(data, movedEntries, movedByGuid));
+        materialPaths.forEach( async(assetPath) => {
+            await this.patchJsonAssetFile(assetPath, (data) => this.patchMaterialAssetDataReferences(data, movedEntries, movedByGuid));
         });
 
-        scenePaths.forEach((assetPath) => {
-            this.patchJsonAssetFile(assetPath, (data) => this.patchSceneAssetDataReferences(data, movedEntries, movedByGuid));
+        scenePaths.forEach( async(assetPath) => {
+            await this.patchJsonAssetFile(assetPath, (data) => this.patchSceneAssetDataReferences(data, movedEntries, movedByGuid));
         });
 
-        prefabPaths.forEach((assetPath) => {
-            this.patchJsonAssetFile(assetPath, (data) => this.patchPrefabAssetDataReferences(data, movedEntries, movedByGuid));
+        prefabPaths.forEach( async(assetPath) => {
+            await this.patchJsonAssetFile(assetPath, (data) => this.patchPrefabAssetDataReferences(data, movedEntries, movedByGuid));
         });
 
-        scriptableObjectPaths.forEach((assetPath) => {
-            this.patchJsonAssetFile(assetPath, (data) => this.patchGenericAssetDataReferences(data, movedEntries, movedByGuid));
+        scriptableObjectPaths.forEach( async(assetPath) => {
+            await this.patchJsonAssetFile(assetPath, (data) => this.patchGenericAssetDataReferences(data, movedEntries, movedByGuid));
         });
     }
 
-    private patchJsonAssetFile(assetPath: string, patcher: (data: any) => boolean): void {
-        if (!this.fs || !this.fs.existsSync(assetPath)) return;
+    private async patchJsonAssetFile(assetPath: string, patcher: (data: any) => boolean): Promise<void> {
+        if (!this.fs || !await this.fs.exists(assetPath)) return;
 
         try {
-            const raw = this.fs.readFileSync(assetPath, 'utf8');
+            const raw = await this.fs.readFile(assetPath, 'utf8');
             const data = JSON.parse(raw);
             const changed = patcher(data);
             if (!changed) return;
-            this.fs.writeFileSync(assetPath, JSON.stringify(data, null, 2), 'utf8');
+            await this.fs.writeFile(assetPath, JSON.stringify(data, null, 2), 'utf8');
         } catch (e) {
             console.warn(`Failed to patch moved references in ${assetPath}:`, e);
         }
@@ -1823,8 +1914,8 @@ export class ProjectWindow {
         return this.normalizeAssetPath(a).replace(/\//g, '\\').toLowerCase() === this.normalizeAssetPath(b).replace(/\//g, '\\').toLowerCase();
     }
 
-    private getDuplicateTargetPath(fullPath: string): string {
-        const isDirectory = this.fs.statSync(fullPath).isDirectory();
+    private async getDuplicateTargetPath(fullPath: string): Promise<string> {
+        const isDirectory = (await this.fs.stat(fullPath)).isDirectory();
         const dir = PathUtils.dirname(fullPath);
         const ext = isDirectory ? '' : PathUtils.extname(fullPath);
         const baseName = isDirectory ? PathUtils.basename(fullPath) : PathUtils.basename(fullPath, ext);
@@ -1833,16 +1924,16 @@ export class ProjectWindow {
         while (true) {
             const suffix = index === 1 ? ' (Copy)' : ` (Copy ${index})`;
             const candidate = PathUtils.join(dir, `${baseName}${suffix}${ext}`);
-            if (!this.fs.existsSync(candidate)) {
+            if (!await this.fs.exists(candidate)) {
                 return candidate;
             }
             index += 1;
         }
     }
 
-    private copyDirectoryWithoutMeta(sourcePath: string, targetPath: string) {
-        this.fs.mkdirSync(targetPath, { recursive: true });
-        const entries = this.fs.readdirSync(sourcePath, { withFileTypes: true });
+    private async copyDirectoryWithoutMeta(sourcePath: string, targetPath: string) {
+        await this.fs.mkdir(targetPath, { recursive: true });
+        const entries = await this.fs.readdir(sourcePath, { withFileTypes: true });
 
         for (const entry of entries) {
             if (entry.name.endsWith('.meta')) continue;
@@ -1851,31 +1942,31 @@ export class ProjectWindow {
             const targetEntryPath = PathUtils.join(targetPath, entry.name);
 
             if (entry.isDirectory()) {
-                this.copyDirectoryWithoutMeta(sourceEntryPath, targetEntryPath);
+                await this.copyDirectoryWithoutMeta(sourceEntryPath, targetEntryPath);
             } else {
-                this.fs.copyFileSync(sourceEntryPath, targetEntryPath);
+                await this.fs.copyFile(sourceEntryPath, targetEntryPath);
             }
         }
     }
 
-    private duplicateAsset(fullPath: string) {
-        const targetPath = this.getDuplicateTargetPath(fullPath);
-        const stat = this.fs.statSync(fullPath);
+    private async duplicateAsset(fullPath: string) {
+        const targetPath = await this.getDuplicateTargetPath(fullPath);
+        const stat = await this.fs.stat(fullPath);
 
         if (stat.isDirectory()) {
-            this.copyDirectoryWithoutMeta(fullPath, targetPath);
+            await this.copyDirectoryWithoutMeta(fullPath, targetPath);
         } else {
-            this.fs.copyFileSync(fullPath, targetPath);
+            await this.fs.copyFile(fullPath, targetPath);
         }
 
-        this.refreshAssetDatabaseAndView();
+        await this.refreshAssetDatabaseAndView();
     }
 
-    private drawFolderTree(parent: HTMLElement, path: string, indent: number) {
+    private async drawFolderTree(parent: HTMLElement, path: string, indent: number) {
         // Read directory safely
         let entries: any[] = [];
         try {
-            entries = this.fs.readdirSync(path, { withFileTypes: true });
+            entries = await this.fs.readdir(path, { withFileTypes: true });
         } catch (e) {
             return;
         }
@@ -1885,6 +1976,15 @@ export class ProjectWindow {
 
         // Tree Item Interaction
         const item = document.createElement('div');
+        item.className = 'project-folder-item';
+        item.dataset.folderPath = path;
+        item.setAttribute('role', 'treeitem');
+        item.setAttribute('aria-level', String(indent + 1));
+        item.setAttribute('aria-selected', String(this.pathsEqual(path, this.currentPath)));
+        item.setAttribute('aria-expanded', folders.length > 0 ? String(this.expandedPaths.has(path)) : 'false');
+        item.tabIndex = this.focusedFolderPath
+            ? (this.pathsEqual(this.focusedFolderPath, path) ? 0 : -1)
+            : (this.pathsEqual(path, this.currentPath) ? 0 : -1);
         item.style.paddingLeft = `${indent * 12 + 4}px`;
         item.style.cursor = 'pointer';
         item.style.display = 'flex';
@@ -1910,12 +2010,12 @@ export class ProjectWindow {
         arrow.innerText = folders.length > 0 ? (this.expandedPaths.has(path) ? 'v' : '>') : '';
         arrow.style.color = '#999';
         arrow.style.marginRight = '2px';
-        arrow.onclick = (e) => {
+        arrow.onclick =  async(e) => {
             e.stopPropagation();
             if (folders.length > 0) {
                 if (this.expandedPaths.has(path)) this.expandedPaths.delete(path);
                 else this.expandedPaths.add(path);
-                this.refresh();
+                await this.refresh();
             }
         };
 
@@ -1933,65 +2033,161 @@ export class ProjectWindow {
         item.appendChild(icon);
         item.appendChild(label);
 
-        item.onclick = () => {
+        item.onclick =  async() => {
+            this.focusedFolderPath = path;
             this.currentPath = path;
-            this.editor.inspectorWindow.selectAsset(this.buildAssetSelection(path, name, true));
-            this.refresh();
+            this.editor.inspectorWindow.selectAsset(await this.buildAssetSelection(path, name, true));
+            await this.refresh();
+            this.focusFolderAfterRefresh(path);
         };
 
-        item.oncontextmenu = (e) => {
+        item.onfocus = () => {
+            this.focusedFolderPath = path;
+        };
+
+        item.onkeydown = async (e) => {
+            if (e.key === 'ArrowRight') {
+                e.preventDefault();
+                if (folders.length > 0 && !this.expandedPaths.has(path)) {
+                    this.expandedPaths.add(path);
+                    await this.refresh();
+                    this.focusFolderAfterRefresh(path);
+                } else {
+                    this.focusAdjacentFolder(path, 1);
+                }
+            } else if (e.key === 'ArrowLeft') {
+                e.preventDefault();
+                if (this.expandedPaths.has(path) && folders.length > 0) {
+                    this.expandedPaths.delete(path);
+                    await this.refresh();
+                    this.focusFolderAfterRefresh(path);
+                } else {
+                    this.focusParentFolder(path);
+                }
+            } else if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+                e.preventDefault();
+                this.focusAdjacentFolder(path, e.key === 'ArrowDown' ? 1 : -1);
+            } else if (e.key === 'Home' || e.key === 'End') {
+                e.preventDefault();
+                this.focusFolderBoundary(e.key === 'End');
+            } else if (e.key === 'Enter' || e.key === ' ') {
+                e.preventDefault();
+                item.click();
+            } else if (e.key === 'ContextMenu' || (e.shiftKey && e.key === 'F10')) {
+                e.preventDefault();
+                const rect = item.getBoundingClientRect();
+                await this.showItemContextMenu(rect.left + 12, rect.top + 12, name, path, label);
+            }
+        };
+
+        item.oncontextmenu =  async(e) => {
             e.preventDefault();
             e.stopPropagation();
-            this.showItemContextMenu(e.clientX, e.clientY, name, path, label);
+            await this.showItemContextMenu(e.clientX, e.clientY, name, path, label);
         };
 
         parent.appendChild(item);
 
         // Recursive Children
         if (this.expandedPaths.has(path)) {
-            folders.forEach(f => {
-                this.drawFolderTree(parent, PathUtils.join(path, f.name), indent + 1);
-            });
+            for (const folder of folders) {
+                await this.drawFolderTree(parent, PathUtils.join(path, folder.name), indent + 1);
+            }
         }
+    }
+
+    private getGridColumnCount(items: HTMLElement[]): number {
+        if (items.length < 2) return 1;
+        const firstTop = items[0].offsetTop;
+        const firstDifferentRow = items.findIndex((item) => item.offsetTop > firstTop);
+        return firstDifferentRow > 0 ? firstDifferentRow : items.length;
+    }
+
+    private getVisibleFolderItems(): HTMLElement[] {
+        return Array.from(document.querySelectorAll<HTMLElement>('#assets-content .project-folder-item'));
+    }
+
+    private focusFolderAfterRefresh(path: string): void {
+        requestAnimationFrame(() => {
+            const target = this.getVisibleFolderItems().find((item) =>
+                !!item.dataset.folderPath && this.pathsEqual(item.dataset.folderPath, path)
+            );
+            target?.focus();
+        });
+    }
+
+    private focusAdjacentFolder(path: string, offset: number): void {
+        const items = this.getVisibleFolderItems();
+        const currentIndex = items.findIndex((item) =>
+            !!item.dataset.folderPath && this.pathsEqual(item.dataset.folderPath, path)
+        );
+        if (currentIndex < 0) return;
+        items[Math.max(0, Math.min(items.length - 1, currentIndex + offset))]?.focus();
+    }
+
+    private focusFolderBoundary(end: boolean): void {
+        const items = this.getVisibleFolderItems();
+        items[end ? items.length - 1 : 0]?.focus();
+    }
+
+    private focusParentFolder(path: string): void {
+        if (this.pathsEqual(path, this.rootPath)) return;
+        this.focusFolderAfterRefresh(PathUtils.dirname(path));
+    }
+
+    private async deleteAssetFromKeyboard(name: string, fullPath: string, isDirectory: boolean): Promise<void> {
+        const impactSummary = await this.getDeleteImpactSummary(fullPath);
+        if (!confirm(this.buildDeleteConfirmationMessage(name, impactSummary))) return;
+
+        if (isDirectory) {
+            await this.fs.rm(fullPath, { recursive: true, force: true });
+        } else {
+            await this.fs.unlink(fullPath);
+        }
+        const metaPath = fullPath + '.meta';
+        if (await this.fs.exists(metaPath)) await this.fs.unlink(metaPath);
+        this.selectedAssetPath = null;
+        this.focusedAssetPath = null;
+        await this.refreshAssetDatabaseAndView();
     }
 
     private showContextMenu(x: number, y: number) {
         this.removeExistingMenus();
         const menu = this.createMenu(x, y);
 
-        this.addMenuItem(menu, 'Create Folder', () => {
+        this.addMenuItem(menu, 'Create Folder',  async() => {
             const name = prompt("Folder Name", "New Folder");
             if (name) {
                 const p = PathUtils.join(this.currentPath, name);
-                if (!this.fs.existsSync(p)) this.fs.mkdirSync(p);
-                this.refreshAssetDatabaseAndView();
+                if (!await this.fs.exists(p)) await this.fs.mkdir(p);
+                await this.refreshAssetDatabaseAndView();
             }
         });
 
-        this.addMenuItem(menu, 'Create Script', () => {
+        this.addMenuItem(menu, 'Create Script',  async() => {
             const name = prompt("Script Name", "NewScript");
             if (name) {
-                this.createFileFromTemplate(name, 'ts');
+                await this.createFileFromTemplate(name, 'ts');
             }
         });
 
-        this.addMenuItem(menu, 'Create Material', () => {
+        this.addMenuItem(menu, 'Create Material',  async() => {
             const name = prompt("Material Name", "NewMaterial");
             if (name) {
                 const mat = new Material(name);
                 const p = PathUtils.join(this.currentPath, `${name}.mat`);
-                this.fs.writeFileSync(p, JSON.stringify(mat.serialize(), null, 4));
-                this.refreshAssetDatabaseAndView();
+                await this.fs.writeFile(p, JSON.stringify(mat.serialize(), null, 4));
+                await this.refreshAssetDatabaseAndView();
             }
         });
 
-        this.addMenuItem(menu, 'Create Scene', () => {
+        this.addMenuItem(menu, 'Create Scene',  async() => {
             const name = prompt("Scene Name", "NewScene");
             if (name) {
                 const scene = new Scene();
                 const p = PathUtils.join(this.currentPath, `${name}.scene`);
-                this.fs.writeFileSync(p, scene.toJSON(), 'utf8');
-                this.refreshAssetDatabaseAndView();
+                await this.fs.writeFile(p, scene.toJSON(), 'utf8');
+                await this.refreshAssetDatabaseAndView();
             }
         });
 
@@ -2000,26 +2196,26 @@ export class ProjectWindow {
         if (soTypes.length > 0) {
             this.addMenuSeparator(menu);
             soTypes.forEach(typeName => {
-                this.addMenuItem(menu, `Create ${typeName}`, () => {
+                this.addMenuItem(menu, `Create ${typeName}`,  async() => {
                     const name = prompt(`${typeName} Name`, typeName);
                     if (!name) return;
                     const Ctor = ScriptableObjectRegistry.get(typeName)!;
                     const instance = new Ctor();
                     instance.assetName = name;
                     const p = PathUtils.join(this.currentPath, `${name}.asset`);
-                    this.fs.writeFileSync(p, instance.toAssetJSON(), 'utf8');
-                    this.refreshAssetDatabaseAndView();
+                    await this.fs.writeFile(p, instance.toAssetJSON(), 'utf8');
+                    await this.refreshAssetDatabaseAndView();
                 });
             });
         }
 
         this.addMenuSeparator(menu);
-        this.addMenuItem(menu, 'Validate References (All)', () => {
-            const result = this.auditAllAssetReferences();
+        this.addMenuItem(menu, 'Validate References (All)',  async() => {
+            const result = await this.auditAllAssetReferences();
             alert(this.formatReferenceAuditSummary(result, 'Reference Validation (All)'));
         });
-        this.addMenuItem(menu, 'Auto Repair References (All)', () => {
-            const result = this.repairAllAssetReferences();
+        this.addMenuItem(menu, 'Auto Repair References (All)',  async() => {
+            const result = await this.repairAllAssetReferences();
             alert(this.formatReferenceAuditSummary(result, 'Reference Auto Repair (All)'));
         });
         this.addMenuItem(menu, 'Recent Repair History', () => {
@@ -2029,22 +2225,22 @@ export class ProjectWindow {
             this.clearRecentRepairHistory();
             alert('Recent repair history cleared.');
         });
-        this.addMenuItem(menu, 'Phase 3 Readiness (Project)', () => {
-            const report = this.runPhase3ReadinessCheck(this.rootPath);
+        this.addMenuItem(menu, 'Phase 3 Readiness (Project)',  async() => {
+            const report = await this.runPhase3ReadinessCheck(this.rootPath);
             alert(this.formatPhase3ReadinessSummary(report, 'Phase 3 Readiness (Project)'));
         });
-        this.addMenuItem(menu, 'Phase 3 Readiness (Current Folder)', () => {
-            const report = this.runPhase3ReadinessCheck(this.currentPath);
+        this.addMenuItem(menu, 'Phase 3 Readiness (Current Folder)',  async() => {
+            const report = await this.runPhase3ReadinessCheck(this.currentPath);
             alert(this.formatPhase3ReadinessSummary(report, 'Phase 3 Readiness (Current Folder)'));
         });
-        this.addMenuItem(menu, 'Reimport Current Folder', () => {
-            this.reimportAssetScope(this.currentPath, false);
+        this.addMenuItem(menu, 'Reimport Current Folder',  async() => {
+            await this.reimportAssetScope(this.currentPath, false);
         });
-        this.addMenuItem(menu, 'Reimport Current Folder + Dependents', () => {
-            this.reimportAssetScope(this.currentPath, true);
+        this.addMenuItem(menu, 'Reimport Current Folder + Dependents',  async() => {
+            await this.reimportAssetScope(this.currentPath, true);
         });
-        this.addMenuItem(menu, 'Show Current Folder Impact', () => {
-            const summary = this.getDeleteImpactSummary(this.currentPath);
+        this.addMenuItem(menu, 'Show Current Folder Impact',  async() => {
+            const summary = await this.getDeleteImpactSummary(this.currentPath);
             if (!summary) {
                 alert('Impact summary is not available for current folder.');
                 return;
@@ -2053,45 +2249,45 @@ export class ProjectWindow {
         });
 
         this.addMenuSeparator(menu);
-        this.addMenuItem(menu, 'Refresh', () => this.refreshAssetDatabaseAndView());
+        this.addMenuItem(menu, 'Refresh',  async() => await this.refreshAssetDatabaseAndView());
 
         document.body.appendChild(menu);
         setTimeout(() => document.addEventListener('click', () => this.removeExistingMenus(), { once: true }), 0);
     }
 
-    private showItemContextMenu(x: number, y: number, name: string, fullPath: string, labelElement: HTMLElement) {
+    private async showItemContextMenu(x: number, y: number, name: string, fullPath: string, labelElement: HTMLElement) {
         this.removeExistingMenus();
         const menu = this.createMenu(x, y);
-        const isDirectory = this.fs.statSync(fullPath).isDirectory();
+        const isDirectory = (await this.fs.stat(fullPath)).isDirectory();
 
         if (!isDirectory) {
-            this.addMenuItem(menu, 'Reimport', () => {
-                this.reimportAsset(fullPath);
+            this.addMenuItem(menu, 'Reimport',  async() => {
+                await this.reimportAsset(fullPath);
             });
-            this.addMenuItem(menu, 'Reimport + Dependents', () => {
-                this.reimportAssetWithDependents(fullPath);
+            this.addMenuItem(menu, 'Reimport + Dependents',  async() => {
+                await this.reimportAssetWithDependents(fullPath);
             });
             this.addMenuSeparator(menu);
         } else {
-            this.addMenuItem(menu, 'Reimport Folder', () => {
-                this.reimportAssetScope(fullPath, false);
+            this.addMenuItem(menu, 'Reimport Folder',  async() => {
+                await this.reimportAssetScope(fullPath, false);
             });
-            this.addMenuItem(menu, 'Reimport Folder + Dependents', () => {
-                this.reimportAssetScope(fullPath, true);
+            this.addMenuItem(menu, 'Reimport Folder + Dependents',  async() => {
+                await this.reimportAssetScope(fullPath, true);
             });
             this.addMenuSeparator(menu);
         }
 
-        this.addMenuItem(menu, isDirectory ? 'Validate References in Folder' : 'Validate References', () => {
-            const result = this.auditAssetReferences(fullPath);
+        this.addMenuItem(menu, isDirectory ? 'Validate References in Folder' : 'Validate References',  async() => {
+            const result = await this.auditAssetReferences(fullPath);
             if (!result) {
                 alert('No auditable assets were found in this scope.');
                 return;
             }
             alert(this.formatReferenceAuditSummary(result, 'Reference Validation'));
         });
-        this.addMenuItem(menu, isDirectory ? 'Auto Repair References in Folder' : 'Auto Repair References', () => {
-            const result = this.repairAssetReferences(fullPath);
+        this.addMenuItem(menu, isDirectory ? 'Auto Repair References in Folder' : 'Auto Repair References',  async() => {
+            const result = await this.repairAssetReferences(fullPath);
             if (!result) {
                 alert('No auditable assets were found in this scope.');
                 return;
@@ -2105,12 +2301,12 @@ export class ProjectWindow {
             this.clearRecentRepairHistory();
             alert('Recent repair history cleared.');
         });
-        this.addMenuItem(menu, isDirectory ? 'Phase 3 Readiness in Folder' : 'Phase 3 Readiness for Asset', () => {
-            const report = this.runPhase3ReadinessCheck(fullPath);
+        this.addMenuItem(menu, isDirectory ? 'Phase 3 Readiness in Folder' : 'Phase 3 Readiness for Asset',  async() => {
+            const report = await this.runPhase3ReadinessCheck(fullPath);
             alert(this.formatPhase3ReadinessSummary(report, 'Phase 3 Readiness'));
         });
-        this.addMenuItem(menu, 'Show Dependency Impact', () => {
-            const summary = this.getDeleteImpactSummary(fullPath);
+        this.addMenuItem(menu, 'Show Dependency Impact',  async() => {
+            const summary = await this.getDeleteImpactSummary(fullPath);
             if (!summary) {
                 alert('Impact summary is not available for this selection.');
                 return;
@@ -2119,8 +2315,8 @@ export class ProjectWindow {
         });
         this.addMenuSeparator(menu);
 
-        this.addMenuItem(menu, 'Duplicate', () => {
-            this.duplicateAsset(fullPath);
+        this.addMenuItem(menu, 'Duplicate',  async() => {
+            await this.duplicateAsset(fullPath);
         });
 
         this.addMenuItem(menu, 'Rename', () => {
@@ -2144,19 +2340,19 @@ export class ProjectWindow {
 
         this.addMenuSeparator(menu);
 
-        this.addMenuItem(menu, 'Delete', () => {
-            const impactSummary = this.getDeleteImpactSummary(fullPath);
+        this.addMenuItem(menu, 'Delete',  async() => {
+            const impactSummary = await this.getDeleteImpactSummary(fullPath);
             if (confirm(this.buildDeleteConfirmationMessage(name, impactSummary))) {
                 if (isDirectory) {
-                    this.fs.rmSync(fullPath, { recursive: true, force: true });
+                    await this.fs.rm(fullPath, { recursive: true, force: true });
                     const metaPath = fullPath + '.meta';
-                    if (this.fs.existsSync(metaPath)) this.fs.unlinkSync(metaPath);
+                    if (await this.fs.exists(metaPath)) await this.fs.unlink(metaPath);
                 } else {
-                    this.fs.unlinkSync(fullPath);
+                    await this.fs.unlink(fullPath);
                     const metaPath = fullPath + '.meta';
-                    if (this.fs.existsSync(metaPath)) this.fs.unlinkSync(metaPath);
+                    if (await this.fs.exists(metaPath)) await this.fs.unlink(metaPath);
                 }
-                this.refreshAssetDatabaseAndView();
+                await this.refreshAssetDatabaseAndView();
             }
         }, '#ff6b6b');
 
@@ -2164,12 +2360,12 @@ export class ProjectWindow {
         setTimeout(() => document.addEventListener('click', () => this.removeExistingMenus(), { once: true }), 0);
     }
 
-    private isRuntimeRefreshCandidate(assetPath: string): boolean {
+    private async isRuntimeRefreshCandidate(assetPath: string): Promise<boolean> {
         if (!assetPath || typeof assetPath !== 'string') return false;
-        if (!this.fs.existsSync(assetPath)) return false;
+        if (!await this.fs.exists(assetPath)) return false;
 
         try {
-            if (this.fs.statSync(assetPath).isDirectory()) return false;
+            if ((await this.fs.stat(assetPath)).isDirectory()) return false;
         } catch {
             return false;
         }
@@ -2182,16 +2378,16 @@ export class ProjectWindow {
             || assetType === 'model';
     }
 
-    private isFileAssetPath(assetPath: string): boolean {
-        if (!assetPath || !this.fs.existsSync(assetPath)) return false;
+    private async isFileAssetPath(assetPath: string): Promise<boolean> {
+        if (!assetPath || !await this.fs.exists(assetPath)) return false;
         try {
-            return !this.fs.statSync(assetPath).isDirectory();
+            return !(await this.fs.stat(assetPath)).isDirectory();
         } catch {
             return false;
         }
     }
 
-    private getReferenceAuditCandidatePaths(scopePath?: string): string[] {
+    private async getReferenceAuditCandidatePaths(scopePath?: string): Promise<string[]> {
         const allAuditable = AssetDatabase.getInstance()
             .getAllEntries()
             .filter((entry) => this.isReferenceAuditAssetType(entry.meta.assetType))
@@ -2202,11 +2398,11 @@ export class ProjectWindow {
             return allAuditable;
         }
 
-        if (!this.fs.existsSync(scopePath)) {
+        if (!await this.fs.exists(scopePath)) {
             return [];
         }
 
-        const stat = this.fs.statSync(scopePath);
+        const stat = await this.fs.stat(scopePath);
         if (!stat.isDirectory()) {
             const metaType = AssetDatabase.getInstance().getMeta(scopePath)?.assetType ?? null;
             return this.isReferenceAuditAssetType(metaType) ? [scopePath] : [];
@@ -2248,23 +2444,23 @@ export class ProjectWindow {
         const result = this.createEmptyReferenceAuditResult();
         if (!this.fs || assetPaths.length === 0) return result;
 
-        assetPaths.forEach((assetPath) => {
-            this.auditAndRepairReferenceFile(assetPath, applyFixes, result);
+        assetPaths.forEach( async(assetPath) => {
+            await this.auditAndRepairReferenceFile(assetPath, applyFixes, result);
         });
         return result;
     }
 
-    private auditAndRepairReferenceFile(assetPath: string, applyFixes: boolean, result: AssetReferenceAuditResult): void {
-        if (!this.fs || !this.fs.existsSync(assetPath) || this.fs.statSync(assetPath).isDirectory()) return;
+    private async auditAndRepairReferenceFile(assetPath: string, applyFixes: boolean, result: AssetReferenceAuditResult): Promise<void> {
+        if (!this.fs || !(await this.fs.exists(assetPath) || await this.fs.stat(assetPath)).isDirectory()) return;
 
         try {
-            const raw = this.fs.readFileSync(assetPath, 'utf8');
+            const raw = await this.fs.readFile(assetPath, 'utf8');
             const data = JSON.parse(raw);
             result.scannedAssets += 1;
 
             const changed = this.auditAndRepairReferenceNode(data, assetPath, '$', applyFixes, result);
             if (changed) {
-                this.fs.writeFileSync(assetPath, JSON.stringify(data, null, 2), 'utf8');
+                await this.fs.writeFile(assetPath, JSON.stringify(data, null, 2), 'utf8');
                 result.filesChanged += 1;
                 result.changedAssetPaths.push(assetPath);
             }
@@ -2470,7 +2666,7 @@ export class ProjectWindow {
         referenceAudit: AssetReferenceAuditResult,
         scopePath: string
     ): Phase3ReadinessReport['healthDiagnostics'] {
-        const fileEntries = scopeEntries.filter((entry) => this.isFileAssetPath(entry.path));
+        const fileEntries = scopeEntries.filter( async(entry) => await this.isFileAssetPath(entry.path));
         const unusedAssetCount = fileEntries.filter((entry) => {
             if (!this.isUnusedAssetCandidate(entry.meta.assetType)) return false;
             return AssetDatabase.getInstance()
@@ -2555,12 +2751,12 @@ export class ProjectWindow {
         let totalDependentRuntimeReloads = 0;
         let maxDependentRuntimeReloads = 0;
 
-        scopeAssetPaths.forEach((assetPath) => {
-            if (this.isRuntimeRefreshCandidate(assetPath)) {
+        scopeAssetPaths.forEach( async(assetPath) => {
+            if (await this.isRuntimeRefreshCandidate(assetPath)) {
                 directRuntimeReimportCount++;
             }
 
-            const dependentRuntimePaths = this.getRuntimeReimportPathsForAsset(assetPath, true)
+            const dependentRuntimePaths = (await this.getRuntimeReimportPathsForAsset(assetPath, true))
                 .filter((candidatePath) => !this.pathsEqual(candidatePath, assetPath));
 
             if (dependentRuntimePaths.length > 0) {
@@ -2722,12 +2918,12 @@ export class ProjectWindow {
         }
     }
 
-    private collectAssetPathsWithinScope(scopePath: string): string[] {
-        if (!scopePath || !this.fs.existsSync(scopePath)) return [];
+    private async collectAssetPathsWithinScope(scopePath: string): Promise<string[]> {
+        if (!scopePath || !await this.fs.exists(scopePath)) return [];
 
-        const stat = this.fs.statSync(scopePath);
+        const stat = await this.fs.stat(scopePath);
         if (!stat.isDirectory()) {
-            return this.fs.existsSync(scopePath) ? [scopePath] : [];
+            return await this.fs.exists(scopePath) ? [scopePath] : [];
         }
 
         return AssetDatabase.getInstance()
@@ -2824,8 +3020,8 @@ export class ProjectWindow {
         visible.forEach((assetPath) => {
             const fileName = PathUtils.basename(assetPath);
             const folderName = PathUtils.basename(PathUtils.dirname(assetPath));
-            this.addMenuItem(menu, `  ${fileName} - ${folderName}`, () => {
-                this.focusAssetByPath(assetPath);
+            this.addMenuItem(menu, `  ${fileName} - ${folderName}`,  async() => {
+                await this.focusAssetByPath(assetPath);
             });
         });
 
@@ -2836,6 +3032,7 @@ export class ProjectWindow {
 
     private startInlineRename(label: HTMLElement, fullPath: string) {
         const oldName = label.innerText;
+        let settled = false;
         const input = document.createElement('input');
         input.type = 'text';
         input.value = oldName;
@@ -2848,34 +3045,48 @@ export class ProjectWindow {
         input.style.padding = '0';
         input.style.margin = '0';
 
-        const finish = () => {
+        const finish =  async() => {
+            if (settled) return;
+            settled = true;
             const newName = input.value.trim();
             if (newName && newName !== oldName) {
                 const newPath = PathUtils.join(PathUtils.dirname(fullPath), newName);
-                if (!this.fs.existsSync(newPath)) {
+                if (!await this.fs.exists(newPath)) {
                     try {
-                        const renameImpactSummary = this.getDeleteImpactSummary(fullPath);
+                        const renameImpactSummary = await this.getDeleteImpactSummary(fullPath);
                         const renameMessage = this.buildRenameConfirmationMessage(oldName, newName, renameImpactSummary);
                         if (renameMessage && !confirm(renameMessage)) {
-                            this.refresh();
+                            await this.refresh();
                             return;
                         }
-                        this.fs.renameSync(fullPath, newPath);
+                        await this.fs.rename(fullPath, newPath);
                         const oldMeta = fullPath + '.meta';
                         const newMeta = newPath + '.meta';
-                        if (this.fs.existsSync(oldMeta)) this.fs.renameSync(oldMeta, newMeta);
+                        if (await this.fs.exists(oldMeta)) await this.fs.rename(oldMeta, newMeta);
                     } catch (err) {
                         console.error("Rename failed", err);
                     }
                 }
             }
-            this.refreshAssetDatabaseAndView();
+            await this.refreshAssetDatabaseAndView();
         };
 
         input.onblur = finish;
-        input.onkeydown = (e) => {
-            if (e.key === 'Enter') finish();
-            if (e.key === 'Escape') this.refresh();
+        input.onkeydown =  async(e) => {
+            if (e.key === 'Enter') {
+                e.preventDefault();
+                await finish();
+            }
+            if (e.key === 'Escape') {
+                e.preventDefault();
+                settled = true;
+                await this.refresh();
+                requestAnimationFrame(() => {
+                    const target = Array.from(document.querySelectorAll<HTMLElement>('.asset-item'))
+                        .find((item) => item.dataset.assetPath && this.pathsEqual(item.dataset.assetPath, fullPath));
+                    target?.focus();
+                });
+            }
         };
 
         label.innerHTML = '';
@@ -2939,7 +3150,7 @@ export class ProjectWindow {
         document.querySelectorAll('.unity-context-menu').forEach(m => m.remove());
     }
 
-    private createFileFromTemplate(name: string, ext: string) {
+    private async createFileFromTemplate(name: string, ext: string) {
         let filename = name;
         if (!filename.endsWith('.' + ext)) filename += '.' + ext;
 
@@ -2964,18 +3175,18 @@ export default class ${name} extends Component {
         }
 
         let target = PathUtils.join(this.currentPath, filename);
-        if (this.fs.existsSync(target)) {
+        if (await this.fs.exists(target)) {
             const base = PathUtils.basename(filename, '.' + ext);
             target = PathUtils.join(this.currentPath, `${base}_1.${ext}`);
         }
 
-        this.fs.writeFileSync(target, template);
-        this.refreshAssetDatabaseAndView();
+        await this.fs.writeFile(target, template);
+        await this.refreshAssetDatabaseAndView();
     }
 
-    private getAllFilesRecursive(dir: string): any[] {
+    private async getAllFilesRecursive(dir: string): Promise<any[]> {
         let results: any[] = [];
-        const list = this.fs.readdirSync(dir, { withFileTypes: true });
+        const list = await this.fs.readdir(dir, { withFileTypes: true });
         for (const file of list) {
             const fullPath = PathUtils.join(dir, file.name);
             results.push({
@@ -2984,7 +3195,7 @@ export default class ${name} extends Component {
                 fullPath: fullPath
             });
             if (file.isDirectory()) {
-                results = results.concat(this.getAllFilesRecursive(fullPath));
+                results = results.concat(await this.getAllFilesRecursive(fullPath));
             }
         }
         return results;

@@ -4,6 +4,8 @@
 <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta http-equiv="Content-Security-Policy"
+        content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: file:; media-src 'self' blob: file:; font-src 'self' data:; connect-src 'self' http://localhost:5174 ws://localhost:5174; worker-src 'self' blob:; object-src 'none'; base-uri 'none'; frame-src 'none'; form-action 'none'">
     <title>Engine Project</title>
     <link rel="stylesheet" href="./src/style.css">
 </head>
@@ -29,7 +31,8 @@
                     <button id="btn-open-project" class="launcher-btn">Open</button>
                     <button id="btn-new-project" class="launcher-btn primary">New project</button>
                 </div>
-                <div id="launcher-project-list" class="project-list">
+                <div id="launcher-status" class="launcher-status" role="status" aria-live="polite" aria-atomic="true"></div>
+                <div id="launcher-project-list" class="project-list" aria-label="Recent projects" aria-busy="true">
                     <!-- Recent projects will be listed here -->
                 </div>
             </div>

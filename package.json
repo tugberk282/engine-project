@@ -2,26 +2,71 @@
   "name": "engine-project",
   "version": "0.1.0",
   "private": true,
+  "packageManager": "npm@11.6.2",
+  "engines": {
+    "node": ">=22.12.0"
+  },
   "main": "electron/main.js",
   "scripts": {
     "dev": "concurrently \"vite --port 5174\" \"wait-on tcp:5174 && node scripts/start-electron.js\"",
-    "build": "tsc && vite build",
+    "build": "tsc && vite build && node scripts/fix-dist-paths.js",
     "test:parity": "node test_all_phases.cjs",
     "test:phase8": "node verify_phase8_ui_rendering.cjs",
     "test:phase9": "node verify_phase9_desktop_productization.cjs",
+    "test:editor-workflow": "node --test test/editor-workflow-contract.test.cjs test/editor-interaction.test.cjs",
+    "test:phase2-authoring-matrix": "node --test test/phase-2-authoring-matrix.test.cjs",
+    "test:persistence": "node --test test/persistence.test.cjs",
+    "test:security": "node --test test/electron-boundary.test.cjs test/project-capabilities.test.cjs test/project-trust.test.cjs test/editor-html-injection.test.cjs test/asset-security.test.cjs",
+    "test:execution-broker": "node --test test/execution-broker.test.cjs",
+    "test:runtime": "node --test test/runtime-bridge.test.cjs test/runtime-supervisor.test.cjs",
+    "test:diagnostics": "node --test test/diagnostics-lifecycle.test.cjs",
+    "test:viewport-sizing": "node --experimental-strip-types --test test/viewport-sizing.test.mjs",
+    "test:scene-view": "node --experimental-strip-types --test test/scene-view-navigation.test.mjs",
+    "test:release-integrity": "node --test test/release-integrity.test.cjs",
+    "test:source-built-smoke": "node scripts/source-built-editor-smoke.cjs",
+    "test:source-built-smoke-contract": "node --test test/source-built-editor-smoke.test.cjs",
+    "test:packaged-smoke": "node scripts/packaged-smoke.cjs",
+    "test:phase1-packaged-persistence": "node scripts/phase1-packaged-persistence.cjs",
+    "test:installer": "node scripts/verify-installer.cjs",
+    "audit:release": "npm audit --omit=dev --audit-level=high && npm audit --audit-level=critical",
+    "verify:vertical-slice": "node --test test/vertical-slice.test.cjs && npm run build",
     "preview": "vite preview",
     "watch:csharp": "node scripts/watch-csharp.js",
-    "electron:build": "vite build && electron-builder"
+    "electron:build": "vite build && node scripts/fix-dist-paths.js && electron-builder"
+  },
+  "build": {
+    "appId": "com.tugberk.engine",
+    "productName": "Tugberk Engine",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/index.html",
+      "dist/assets/**/*",
+      "electron/**/*",
+      "package.json"
+    ],
+    "win": {
+      "target": [
+        "nsis"
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "artifactName": "${productName}-Setup-${version}.${ext}"
+    }
   },
   "devDependencies": {
     "chokidar": "^3.6.0",
-    "concurrently": "^8.2.2",
+    "concurrently": "10.0.4",
     "cross-env": "^10.1.0",
-    "electron": "^28.3.3",
-    "electron-builder": "^24.9.1",
+    "electron": "43.2.0",
+    "electron-builder": "26.15.3",
     "typescript": "^5.2.2",
-    "vite": "^5.0.8",
-    "wait-on": "^7.2.0"
+    "vite": "8.1.5",
+    "wait-on": "9.1.0"
   },
   "dependencies": {
     "@types/three": "^0.160.0",
@@ -29,4 +74,3 @@
     "three": "^0.160.0"
   }
 }
-

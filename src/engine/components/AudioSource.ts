@@ -16,18 +16,18 @@ export class AudioSource extends Component {
     private audio: any = null;
     private buffer: AudioBuffer | null = null;
 
-    public awake(): void {
+    public async awake(): Promise<void> {
         const resolvedClipPath = this.resolveClipReference();
         if (resolvedClipPath) {
-            this.loadClip(resolvedClipPath);
+            await this.loadClip(resolvedClipPath);
         }
     }
 
-    public loadClip(path: string): void {
+    public async loadClip(path: string): Promise<void> {
         const normalizedPath = this.normalizeClipPath(path);
         this.clipPath = normalizedPath;
         this.clipGuid = AssetDatabase.getInstance().getGuid(normalizedPath) ?? this.clipGuid ?? null;
-        AssetImporter.importAudio(normalizedPath, (buffer) => {
+        await AssetImporter.importAudio(normalizedPath, (buffer) => {
             this.buffer = buffer;
             this.setupAudio();
             if (this.playOnAwake) this.play();
@@ -98,11 +98,11 @@ export class AudioSource extends Component {
         }
     }
 
-    public deserialize(data: any): void {
+    public async deserialize(data: any): Promise<void> {
         super.deserialize(data);
         const resolvedClipPath = this.resolveClipReference();
         if (resolvedClipPath) {
-            this.loadClip(resolvedClipPath);
+            await this.loadClip(resolvedClipPath);
         }
     }
 

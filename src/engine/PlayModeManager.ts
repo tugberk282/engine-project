@@ -5,6 +5,7 @@
 
 import { Scene } from './Scene';
 import { SceneManager } from './SceneManager';
+import { RuntimeBridge, RuntimeFailure, RuntimeState } from './RuntimeBridge';
 
 export type PlayMode = 'edit' | 'play' | 'paused';
 export type PlayStep = 'frame' | 'physics' | 'full';
@@ -19,6 +20,8 @@ export class PlayModeManager {
     private deltaTime: number = 0;
     private lastFrameTime: number = 0;
     private targetFrameTime: number = 1 / 60; // 60 FPS default
+    private readonly runtime = new RuntimeBridge();
+    private runtimeError: RuntimeFailure | null = null;
 
     private sceneSnapshot: any = null;
     private editorState: any = null;
@@ -27,7 +30,14 @@ export class PlayModeManager {
     private onStopCallbacks: Array<() => void> = [];
     private onFrameCallbacks: Array<(deltaTime: number) => void> = [];
 
-    private constructor() { }
+    private constructor() {
+        this.runtime.onStateChange((state) => this.handleRuntimeState(state));
+        this.runtime.onError((error) => {
+            this.runtimeError = error;
+            console.error(`[PlayMode] ${error.code}: ${error.message}`);
+            this.exitPlayMode();
+        });
+    }
 
     public static getInstance(): PlayModeManager {
         if (!PlayModeManager.instance) {
@@ -59,10 +69,8 @@ export class PlayModeManager {
         this.isPaused = false;
         this.lastFrameTime = performance.now() / 1000;
 
-        if (scene) {
-            this.initializeScene(scene);
-            this.enableAllGameObjects(scene);
-        }
+        this.runtimeError = null;
+        if (this.sceneSnapshot) this.runtime.start(this.sceneSnapshot);
 
         // Trigger callbacks
         this.onPlayCallbacks.forEach(cb => cb());
@@ -77,11 +85,7 @@ export class PlayModeManager {
     public exitPlayMode(): void {
         if (this.mode === 'edit') return;
 
-        // Call OnDisable for all active GameObjects
-        const scene = SceneManager.getInstance().getActiveScene();
-        if (scene) {
-            this.disableAllGameObjects(scene);
-        }
+        this.runtime.stop();
 
         // Restore scene from snapshot
         if (this.sceneSnapshot) {
@@ -109,6 +113,7 @@ export class PlayModeManager {
         if (this.isPaused) return;
 
         this.isPaused = true;
+        this.runtime.pause();
         this.onPauseCallbacks.forEach(cb => cb());
 
         console.log('[PlayMode] Paused');
@@ -122,6 +127,7 @@ export class PlayModeManager {
         if (!this.isPaused) return;
 
         this.isPaused = false;
+        this.runtime.resume();
         this.lastFrameTime = performance.now() / 1000;
 
         console.log('[PlayMode] Resumed');
@@ -161,44 +167,10 @@ export class PlayModeManager {
         this.time += delta;
         this.frame++;
 
-        const scene = SceneManager.getInstance().getActiveScene();
-        if (scene) {
-            scene.update(delta);
-        }
+        this.runtime.tick(delta);
 
         // Call frame callbacks
         this.onFrameCallbacks.forEach(cb => cb(delta));
-    }
-
-    /**
-     * Initialize scene on play start
-     * Flushes deferred lifecycle and re-runs start for play mode.
-     */
-    private initializeScene(scene: Scene): void {
-        scene.gameObjects.forEach((go) => go.flushPendingLifecycle(false));
-        scene.gameObjects.forEach((go) => go.start());
-    }
-
-    /**
-     * Enable all GameObjects (call OnEnable)
-     */
-    private enableAllGameObjects(scene: Scene): void {
-        scene.gameObjects.forEach((go) => {
-            if (go.enabled) {
-                go.setActive(true);
-            }
-        });
-    }
-
-    /**
-     * Disable all GameObjects (call OnDisable)
-     */
-    private disableAllGameObjects(scene: Scene): void {
-        scene.gameObjects.forEach((go) => {
-            if (go.enabled) {
-                go.setActive(false);
-            }
-        });
     }
 
     /**
@@ -278,7 +250,30 @@ export class PlayModeManager {
     }
 
     public setTargetFrameRate(fps: number): void {
-        this.targetFrameTime = 1 / fps;
+        if (Number.isFinite(fps) && fps > 0) this.targetFrameTime = 1 / fps;
+    }
+
+    public restartPlayMode(): void {
+        if (this.mode === 'edit' || !this.sceneSnapshot) return;
+        this.frame = 0;
+        this.time = 0;
+        this.deltaTime = 0;
+        this.isPaused = false;
+        this.runtimeError = null;
+        this.runtime.restart(this.sceneSnapshot);
+    }
+
+    public getRuntimeState(): RuntimeState {
+        return this.runtime.getState();
+    }
+
+    public getRuntimeError(): RuntimeFailure | null {
+        return this.runtimeError;
+    }
+
+    private handleRuntimeState(state: RuntimeState): void {
+        if (state === 'paused') this.isPaused = true;
+        if (state === 'running') this.isPaused = false;
     }
 
     // Event listeners

@@ -16,30 +16,30 @@ export class BuildSettingsWindow extends EditorWindow {
         this.onGUI();
     }
 
-    public refreshScenes(): void {
+    public async refreshScenes(): Promise<void> {
         const rootPath = (window as any).Editor?.instance?.rootPath ?? 'Assets';
         const assetsPath = rootPath;
-        if (!this.fs.existsSync(assetsPath)) {
+        if (!await this.fs.exists(assetsPath)) {
             this.scenes = [];
             return;
         }
 
-        const findScenes = (dir: string) => {
+        const findScenes =  async(dir: string) => {
             let results: string[] = [];
-            const list = this.fs.readdirSync(dir);
-            list.forEach((file: string) => {
+            const list = await this.fs.readdir(dir);
+            for (let file of list) {
                 file = PathUtils.join(dir, file);
-                const stat = this.fs.statSync(file);
+                const stat = await this.fs.stat(file);
                 if (stat && stat.isDirectory()) {
-                    results = results.concat(findScenes(file));
+                    results = results.concat(await findScenes(file));
                 } else {
                     if (file.endsWith('.scene')) results.push(file);
                 }
-            });
+            }
             return results;
         };
 
-        const sceneFiles = findScenes(assetsPath);
+        const sceneFiles = await findScenes(assetsPath);
         const projectRoot = PathUtils.dirname(rootPath);
 
         this.scenes = sceneFiles.map(fullPath => {

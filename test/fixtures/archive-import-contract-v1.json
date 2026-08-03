@@ -1,0 +1,1133 @@
+{
+  "schemaVersion": 2,
+  "contractVersion": 1,
+  "byteOrder": "little-endian",
+  "unicode": {
+    "version": "15.1.0",
+    "caseFoldingSource": "https://www.unicode.org/Public/15.1.0/ucd/CaseFolding.txt",
+    "caseFoldingBytes": 84870,
+    "caseFoldingSha256": "4e55acfdc32825a22e87670e9056a3bf94ad7c5400065778e9e10f8314372bcf",
+    "includedStatuses": [
+      "C",
+      "F"
+    ],
+    "excludedStatuses": [
+      "T"
+    ]
+  },
+  "schema": {
+    "requiredCaseFields": [
+      "id",
+      "phase",
+      "arrange",
+      "action",
+      "assert",
+      "archiveSha256"
+    ],
+    "allowedActions": [
+      "importArchive",
+      "recoverStaging"
+    ],
+    "allowedOperations": [
+      "zip.create",
+      "zip.addEntry",
+      "zip.setCentralNameScalars",
+      "zip.setLocalNameScalars",
+      "zip.setCentralFlags",
+      "zip.setLocalFlags",
+      "zip.setCentralMethod",
+      "zip.setLocalMethod",
+      "zip.setZip64Sizes",
+      "zip.setDescriptor",
+      "zip.aliasLocalOffset",
+      "zip.overlapDataRange",
+      "zip.setDosDirectory",
+      "zip.setUnixMode",
+      "zip.setDeclaredSizes",
+      "zip.setPayloadGenerator",
+      "platform.disableNativeHelper",
+      "platform.scheduleIdentitySwap",
+      "platform.scheduleDestinationCreate",
+      "cleanup.createCandidate",
+      "cleanup.mutateMac",
+      "cleanup.copyMarker",
+      "cleanup.setJournalState",
+      "cleanup.setLeaseState",
+      "clock.setSequence",
+      "observer.installSecuritySpies",
+      "observer.requireSuspensionToken"
+    ],
+    "requiredSpyCounters": [
+      "importerDispatch",
+      "packageHook",
+      "executionBroker",
+      "trustMutation"
+    ]
+  },
+  "defaults": {
+    "sourceGrant": "exact-read-handle",
+    "projectGrant": "fixture-project",
+    "destinationPath": "Assets/Imported",
+    "conflictPolicy": "reject",
+    "spyCounters": {
+      "stagingWrites": 0,
+      "publish": 0,
+      "overwrite": 0,
+      "importerDispatch": 0,
+      "packageHook": 0,
+      "executionBroker": 0,
+      "trustMutation": 0,
+      "notification": 0
+    }
+  },
+  "cases": [
+    {
+      "id": "zip.local-name-mismatch",
+      "phase": "preflight",
+      "arrange": {
+        "operations": [
+          {
+            "op": "zip.create"
+          },
+          {
+            "op": "zip.addEntry",
+            "args": {
+              "nameScalars": [
+                "U+0061"
+              ],
+              "payloadHex": "78"
+            }
+          },
+          {
+            "op": "zip.setLocalNameScalars",
+            "args": {
+              "entry": 0,
+              "scalars": [
+                "U+0062"
+              ]
+            }
+          }
+        ]
+      },
+      "action": {
+        "op": "importArchive"
+      },
+      "assert": {
+        "error": "UNSUPPORTED_ARCHIVE",
+        "terminalState": "failed",
+        "spyCounters": {
+          "stagingWrites": 0,
+          "publish": 0
+        }
+      },
+      "archiveSha256": "071e38517fa019ed338a0fa089a26767c9765c47499c579f0946e6131398c2a8"
+    },
+    {
+      "id": "zip.flags-method-mismatch",
+      "phase": "preflight",
+      "arrange": {
+        "operations": [
+          {
+            "op": "zip.create"
+          },
+          {
+            "op": "zip.addEntry",
+            "args": {
+              "nameScalars": [
+                "U+0061"
+              ],
+              "payloadHex": "78"
+            }
+          },
+          {
+            "op": "zip.setCentralFlags",
+            "args": {
+              "entry": 0,
+              "value": 2048
+            }
+          },
+          {
+            "op": "zip.setLocalFlags",
+            "args": {
+              "entry": 0,
+              "value": 0
+            }
+          },
+          {
+            "op": "zip.setCentralMethod",
+            "args": {
+              "entry": 0,
+              "value": 0
+            }
+          },
+          {
+            "op": "zip.setLocalMethod",
+            "args": {
+              "entry": 0,
+              "value": 8
+            }
+          }
+        ]
+      },
+      "action": {
+        "op": "importArchive"
+      },
+      "assert": {
+        "error": "UNSUPPORTED_ARCHIVE",
+        "terminalState": "failed",
+        "spyCounters": {
+          "stagingWrites": 0,
+          "publish": 0
+        }
+      },
+      "archiveSha256": "c1e35804e7a188517a9b59c15891fbdbc3011d2270b07a591efbeec8827e454e"
+    },
+    {
+      "id": "zip.zip64-size-mismatch",
+      "phase": "preflight",
+      "arrange": {
+        "operations": [
+          {
+            "op": "zip.create"
+          },
+          {
+            "op": "zip.addEntry",
+            "args": {
+              "nameScalars": [
+                "U+0061"
+              ],
+              "payloadHex": "78"
+            }
+          },
+          {
+            "op": "zip.setZip64Sizes",
+            "args": {
+              "entry": 0,
+              "central": {
+                "compressed": "1",
+                "uncompressed": "1"
+              },
+              "local": {
+                "compressed": "1",
+                "uncompressed": "2"
+              }
+            }
+          }
+        ]
+      },
+      "action": {
+        "op": "importArchive"
+      },
+      "assert": {
+        "error": "UNSUPPORTED_ARCHIVE",
+        "terminalState": "failed",
+        "spyCounters": {
+          "stagingWrites": 0,
+          "publish": 0
+        }
+      },
+      "archiveSha256": "8d32b3586375082d94cd5e306f8cdd183984d284f16189aad1aa59f2da492d6e"
+    },
+    {
+      "id": "zip.data-descriptor-mismatch",
+      "phase": "preflight",
+      "arrange": {
+        "operations": [
+          {
+            "op": "zip.create"
+          },
+          {
+            "op": "zip.addEntry",
+            "args": {
+              "nameScalars": [
+                "U+0061"
+              ],
+              "payloadHex": "78"
+            }
+          },
+          {
+            "op": "zip.setDescriptor",
+            "args": {
+              "entry": 0,
+              "signed": true,
+              "crc32Hex": "00000000",
+              "compressed": "1",
+              "uncompressed": "1"
+            }
+          }
+        ]
+      },
+      "action": {
+        "op": "importArchive"
+      },
+      "assert": {
+        "error": "UNSUPPORTED_ARCHIVE",
+        "terminalState": "failed",
+        "spyCounters": {
+          "stagingWrites": 0,
+          "publish": 0
+        }
+      },
+      "archiveSha256": "d4da44ef6c77bdafdaa9da1262e9c88c9673a325bb5ac62089369c1ce19fafd3"
+    },
+    {
+      "id": "zip.overlapping-ranges",
+      "phase": "preflight",
+      "arrange": {
+        "operations": [
+          {
+            "op": "zip.create"
+          },
+          {
+            "op": "zip.addEntry",
+            "args": {
+              "nameScalars": [
+                "U+0061"
+              ],
+              "payloadHex": "78"
+            }
+          },
+          {
+            "op": "zip.addEntry",
+            "args": {
+              "nameScalars": [
+                "U+0062"
+              ],
+              "payloadHex": "79"
+            }
+          },
+          {
+            "op": "zip.overlapDataRange",
+            "args": {
+              "entry": 1,
+              "withEntry": 0,
+              "overlapBytes": 1
+            }
+          }
+        ]
+      },
+      "action": {
+        "op": "importArchive"
+      },
+      "assert": {
+        "error": "UNSUPPORTED_ARCHIVE",
+        "terminalState": "failed",
+        "spyCounters": {
+          "stagingWrites": 0,
+          "publish": 0
+        }
+      },
+      "archiveSha256": "7222a348e32607c42ed4c1b5dca4e8ddce193a317bfd479363dd85b1ae7e661c"
+    },
+    {
+      "id": "type.slash-vs-dos-file",
+      "phase": "preflight",
+      "arrange": {
+        "operations": [
+          {
+            "op": "zip.create"
+          },
+          {
+            "op": "zip.addEntry",
+            "args": {
+              "nameScalars": [
+                "U+0064",
+                "U+002F"
+              ],
+              "payloadHex": ""
+            }
+          },
+          {
+            "op": "zip.setDosDirectory",
+            "args": {
+              "entry": 0,
+              "value": false
+            }
+          }
+        ]
+      },
+      "action": {
+        "op": "importArchive"
+      },
+      "assert": {
+        "error": "UNSUPPORTED_ENTRY_TYPE",
+        "terminalState": "failed",
+        "spyCounters": {
+          "stagingWrites": 0,
+          "publish": 0
+        }
+      },
+      "archiveSha256": "25111d8095a64c4ac98795eb11b2db646fb257d57893127c87b47545a06efcb8"
+    },
+    {
+      "id": "type.unix-symlink",
+      "phase": "preflight",
+      "arrange": {
+        "operations": [
+          {
+            "op": "zip.create"
+          },
+          {
+            "op": "zip.addEntry",
+            "args": {
+              "nameScalars": [
+                "U+006C"
+              ],
+              "payloadHex": "78"
+            }
+          },
+          {
+            "op": "zip.setUnixMode",
+            "args": {
+              "entry": 0,
+              "valueOctal": "0120777"
+            }
+          }
+        ]
+      },
+      "action": {
+        "op": "importArchive"
+      },
+      "assert": {
+        "error": "UNSUPPORTED_ENTRY_TYPE",
+        "terminalState": "failed",
+        "spyCounters": {
+          "stagingWrites": 0,
+          "publish": 0
+        }
+      },
+      "archiveSha256": "a1a409117255f0bea401424e94b8c733a5f56ebbc309520f1fd2303149f8a87a"
+    },
+    {
+      "id": "collision.ascii-case",
+      "phase": "preflight",
+      "arrange": {
+        "operations": [
+          {
+            "op": "zip.create"
+          },
+          {
+            "op": "zip.addEntry",
+            "args": {
+              "nameScalars": [
+                "U+0041"
+              ],
+              "payloadHex": "31"
+            }
+          },
+          {
+            "op": "zip.addEntry",
+            "args": {
+              "nameScalars": [
+                "U+0061"
+              ],
+              "payloadHex": "32"
+            }
+          }
+        ]
+      },
+      "action": {
+        "op": "importArchive"
+      },
+      "assert": {
+        "error": "ENTRY_COLLISION",
+        "terminalState": "failed",
+        "collisionKeyScalars": [
+          "U+0061"
+        ],
+        "spyCounters": {
+          "stagingWrites": 0,
+          "publish": 0
+        }
+      },
+      "archiveSha256": "59df9fabc713e365a693ef9504fb787bd3334978d2f2d62d1199dbe19e40b018"
+    },
+    {
+      "id": "collision.nfc-decomposed",
+      "phase": "preflight",
+      "arrange": {
+        "operations": [
+          {
+            "op": "zip.create"
+          },
+          {
+            "op": "zip.addEntry",
+            "args": {
+              "nameScalars": [
+                "U+00E9"
+              ],
+              "payloadHex": "31"
+            }
+          },
+          {
+            "op": "zip.addEntry",
+            "args": {
+              "nameScalars": [
+                "U+0065",
+                "U+0301"
+              ],
+              "payloadHex": "32"
+            }
+          }
+        ]
+      },
+      "action": {
+        "op": "importArchive"
+      },
+      "assert": {
+        "error": "ENTRY_COLLISION",
+        "terminalState": "failed",
+        "collisionKeyScalars": [
+          "U+00E9"
+        ],
+        "spyCounters": {
+          "stagingWrites": 0,
+          "publish": 0
+        }
+      },
+      "archiveSha256": "03e33dec6c6ce0a41c57eb8ac5e7aad48fabc18779f4568c8868a47003a107f6"
+    },
+    {
+      "id": "collision.unicode-full-fold",
+      "phase": "preflight",
+      "arrange": {
+        "operations": [
+          {
+            "op": "zip.create"
+          },
+          {
+            "op": "zip.addEntry",
+            "args": {
+              "nameScalars": [
+                "U+00DF"
+              ],
+              "payloadHex": "31"
+            }
+          },
+          {
+            "op": "zip.addEntry",
+            "args": {
+              "nameScalars": [
+                "U+0073",
+                "U+0073"
+              ],
+              "payloadHex": "32"
+            }
+          }
+        ]
+      },
+      "action": {
+        "op": "importArchive"
+      },
+      "assert": {
+        "error": "ENTRY_COLLISION",
+        "terminalState": "failed",
+        "collisionKeyScalars": [
+          "U+0073",
+          "U+0073"
+        ],
+        "spyCounters": {
+          "stagingWrites": 0,
+          "publish": 0
+        }
+      },
+      "archiveSha256": "6ace03febcd9ffe21c2fe807a944f5faaaff919f5201fc673eb43cc935749e15"
+    },
+    {
+      "id": "collision.file-ancestor",
+      "phase": "preflight",
+      "arrange": {
+        "operations": [
+          {
+            "op": "zip.create"
+          },
+          {
+            "op": "zip.addEntry",
+            "args": {
+              "nameScalars": [
+                "U+0061"
+              ],
+              "payloadHex": "31"
+            }
+          },
+          {
+            "op": "zip.addEntry",
+            "args": {
+              "nameScalars": [
+                "U+0061",
+                "U+002F",
+                "U+0062"
+              ],
+              "payloadHex": "32"
+            }
+          }
+        ]
+      },
+      "action": {
+        "op": "importArchive"
+      },
+      "assert": {
+        "error": "ENTRY_COLLISION",
+        "terminalState": "failed",
+        "spyCounters": {
+          "stagingWrites": 0,
+          "publish": 0
+        }
+      },
+      "archiveSha256": "72f3bd88e7a60e81783f40572b33f8bddf9b5f00678525fdddd7dbc6bd9e3fea"
+    },
+    {
+      "id": "limit.central-directory",
+      "phase": "preflight",
+      "arrange": {
+        "operations": [
+          {
+            "op": "zip.create"
+          },
+          {
+            "op": "zip.addEntry",
+            "args": {
+              "nameScalars": [
+                "U+0061"
+              ],
+              "payloadHex": "",
+              "centralCommentGenerator": {
+                "byteHex": "61",
+                "length": 67108865
+              }
+            }
+          }
+        ]
+      },
+      "action": {
+        "op": "importArchive"
+      },
+      "assert": {
+        "error": "UNSUPPORTED_ARCHIVE",
+        "terminalState": "failed",
+        "maxRetainedBytes": 67108864,
+        "spyCounters": {
+          "stagingWrites": 0,
+          "publish": 0
+        }
+      },
+      "archiveSha256": "dead28b2266a64e9e5cf123139e8df5f03a518e7229129575cd42efadc22f179"
+    },
+    {
+      "id": "limit.parser-metadata",
+      "phase": "preflight",
+      "arrange": {
+        "operations": [
+          {
+            "op": "zip.create"
+          },
+          {
+            "op": "zip.addEntry",
+            "args": {
+              "nameScalars": [
+                "U+0061"
+              ],
+              "payloadHex": "",
+              "repeat": 10000,
+              "uniqueSuffix": true
+            }
+          }
+        ]
+      },
+      "action": {
+        "op": "importArchive"
+      },
+      "assert": {
+        "error": "UNSUPPORTED_ARCHIVE",
+        "terminalState": "failed",
+        "maxRetainedBytes": 67108864,
+        "spyCounters": {
+          "stagingWrites": 0,
+          "publish": 0
+        }
+      },
+      "archiveSha256": "bab5a128410d1578f43f48435f7a38bccb0844598a95a87a98b89cb1e9acc81b"
+    },
+    {
+      "id": "limit.stream-expansion",
+      "phase": "extracting",
+      "arrange": {
+        "operations": [
+          {
+            "op": "zip.create"
+          },
+          {
+            "op": "zip.addEntry",
+            "args": {
+              "nameScalars": [
+                "U+0062"
+              ],
+              "payloadHex": ""
+            }
+          },
+          {
+            "op": "zip.setDeclaredSizes",
+            "args": {
+              "entry": 0,
+              "compressed": "42949672",
+              "uncompressed": "2147483648"
+            }
+          },
+          {
+            "op": "zip.setPayloadGenerator",
+            "args": {
+              "entry": 0,
+              "byteHex": "00",
+              "observedOutput": "2147483649"
+            }
+          }
+        ]
+      },
+      "action": {
+        "op": "importArchive"
+      },
+      "assert": {
+        "error": "LIMIT_TOTAL_BYTES",
+        "terminalState": "failed",
+        "maxWrittenRegularBytes": "2147483648",
+        "maxBufferBytes": 1048576,
+        "spyCounters": {
+          "publish": 0
+        }
+      },
+      "archiveSha256": "28b1c0caf0fc44274433c9b1f8e3d39d7290e57f19dbec338e6bb1570b727a73"
+    },
+    {
+      "id": "windows.helper-unavailable",
+      "phase": "queued",
+      "arrange": {
+        "operations": [
+          {
+            "op": "platform.disableNativeHelper"
+          }
+        ]
+      },
+      "action": {
+        "op": "importArchive"
+      },
+      "assert": {
+        "error": "ATOMIC_PUBLISH_UNAVAILABLE",
+        "terminalState": "failed",
+        "spyCounters": {
+          "stagingWrites": 0,
+          "publish": 0
+        }
+      },
+      "archiveSha256": null
+    },
+    {
+      "id": "windows.reparse-swap",
+      "phase": "extracting",
+      "arrange": {
+        "operations": [
+          {
+            "op": "zip.create"
+          },
+          {
+            "op": "zip.addEntry",
+            "args": {
+              "nameScalars": [
+                "U+0061"
+              ],
+              "payloadHex": "78"
+            }
+          },
+          {
+            "op": "platform.scheduleIdentitySwap",
+            "args": {
+              "target": "stagingParent",
+              "at": "before-entry-create",
+              "replacement": "junction"
+            }
+          }
+        ]
+      },
+      "action": {
+        "op": "importArchive"
+      },
+      "assert": {
+        "error": "PATH_OUTSIDE_GRANT",
+        "terminalState": "failed",
+        "spyCounters": {
+          "publish": 0
+        }
+      },
+      "archiveSha256": "b46721887d762453e6b4a8e8eec2287f45881713dd846b1a316fb0dd6e30ba89"
+    },
+    {
+      "id": "windows.destination-swap",
+      "phase": "publishing",
+      "arrange": {
+        "operations": [
+          {
+            "op": "zip.create"
+          },
+          {
+            "op": "zip.addEntry",
+            "args": {
+              "nameScalars": [
+                "U+0061"
+              ],
+              "payloadHex": "78"
+            }
+          },
+          {
+            "op": "platform.scheduleIdentitySwap",
+            "args": {
+              "target": "destinationParent",
+              "at": "before-publish-revalidation",
+              "replacement": "directory"
+            }
+          }
+        ]
+      },
+      "action": {
+        "op": "importArchive"
+      },
+      "assert": {
+        "error": "GRANT_REVOKED",
+        "terminalState": "failed",
+        "spyCounters": {
+          "publish": 0
+        }
+      },
+      "archiveSha256": "b46721887d762453e6b4a8e8eec2287f45881713dd846b1a316fb0dd6e30ba89"
+    },
+    {
+      "id": "windows.no-replace-race",
+      "phase": "publishing",
+      "arrange": {
+        "operations": [
+          {
+            "op": "zip.create"
+          },
+          {
+            "op": "zip.addEntry",
+            "args": {
+              "nameScalars": [
+                "U+0061"
+              ],
+              "payloadHex": "78"
+            }
+          },
+          {
+            "op": "platform.scheduleDestinationCreate",
+            "args": {
+              "at": "immediately-before-no-replace-rename",
+              "sentinelHex": "6b656570"
+            }
+          }
+        ]
+      },
+      "action": {
+        "op": "importArchive"
+      },
+      "assert": {
+        "error": "DESTINATION_CONFLICT",
+        "terminalState": "failed",
+        "destinationSentinelHex": "6b656570",
+        "spyCounters": {
+          "publish": 0,
+          "overwrite": 0
+        }
+      },
+      "archiveSha256": "b46721887d762453e6b4a8e8eec2287f45881713dd846b1a316fb0dd6e30ba89"
+    },
+    {
+      "id": "cleanup.forged-mac",
+      "phase": "startup-cleanup",
+      "arrange": {
+        "operations": [
+          {
+            "op": "cleanup.createCandidate",
+            "args": {
+              "expired": true,
+              "journal": "absent",
+              "lease": "absent"
+            }
+          },
+          {
+            "op": "cleanup.mutateMac",
+            "args": {
+              "xorByteIndex": 0,
+              "xorHex": "01"
+            }
+          }
+        ]
+      },
+      "action": {
+        "op": "recoverStaging"
+      },
+      "assert": {
+        "error": "IMPORT_CLEANUP_FAILED",
+        "terminalState": "preserved",
+        "candidateExists": true,
+        "deletedSiblingCount": 0
+      },
+      "archiveSha256": null
+    },
+    {
+      "id": "cleanup.copied-marker",
+      "phase": "startup-cleanup",
+      "arrange": {
+        "operations": [
+          {
+            "op": "cleanup.createCandidate",
+            "args": {
+              "expired": true,
+              "journal": "absent",
+              "lease": "absent"
+            }
+          },
+          {
+            "op": "cleanup.copyMarker",
+            "args": {
+              "toDifferentFileId": true
+            }
+          }
+        ]
+      },
+      "action": {
+        "op": "recoverStaging"
+      },
+      "assert": {
+        "error": "IMPORT_CLEANUP_FAILED",
+        "terminalState": "preserved",
+        "candidateExists": true,
+        "deletedSiblingCount": 0
+      },
+      "archiveSha256": null
+    },
+    {
+      "id": "cleanup.active-lease",
+      "phase": "startup-cleanup",
+      "arrange": {
+        "operations": [
+          {
+            "op": "cleanup.createCandidate",
+            "args": {
+              "expired": true,
+              "journal": "absent",
+              "lease": "present"
+            }
+          },
+          {
+            "op": "cleanup.setLeaseState",
+            "args": {
+              "state": "live",
+              "nonceMatches": true
+            }
+          }
+        ]
+      },
+      "action": {
+        "op": "recoverStaging"
+      },
+      "assert": {
+        "error": null,
+        "terminalState": "preserved",
+        "candidateExists": true,
+        "deletedSiblingCount": 0
+      },
+      "archiveSha256": null
+    },
+    {
+      "id": "cleanup.clock-rollback",
+      "phase": "startup-cleanup",
+      "arrange": {
+        "operations": [
+          {
+            "op": "cleanup.createCandidate",
+            "args": {
+              "expired": true,
+              "journal": "absent",
+              "lease": "absent"
+            }
+          },
+          {
+            "op": "clock.setSequence",
+            "args": {
+              "unixMs": [
+                2000,
+                1000
+              ]
+            }
+          }
+        ]
+      },
+      "action": {
+        "op": "recoverStaging"
+      },
+      "assert": {
+        "error": "IMPORT_CLEANUP_FAILED",
+        "terminalState": "preserved",
+        "candidateExists": true,
+        "deletedSiblingCount": 0
+      },
+      "archiveSha256": null
+    },
+    {
+      "id": "cleanup.key-journal-unavailable",
+      "phase": "startup-cleanup",
+      "arrange": {
+        "operations": [
+          {
+            "op": "cleanup.createCandidate",
+            "args": {
+              "expired": true,
+              "journal": "unavailable",
+              "lease": "absent"
+            }
+          },
+          {
+            "op": "cleanup.setJournalState",
+            "args": {
+              "state": "dpapi-unavailable"
+            }
+          }
+        ]
+      },
+      "action": {
+        "op": "recoverStaging"
+      },
+      "assert": {
+        "error": "IMPORT_CLEANUP_FAILED",
+        "terminalState": "preserved",
+        "candidateExists": true,
+        "deletedSiblingCount": 0
+      },
+      "archiveSha256": null
+    },
+    {
+      "id": "cleanup.expired-orphan",
+      "phase": "startup-cleanup",
+      "arrange": {
+        "operations": [
+          {
+            "op": "cleanup.createCandidate",
+            "args": {
+              "expired": true,
+              "journal": "absent",
+              "lease": "absent"
+            }
+          }
+        ]
+      },
+      "action": {
+        "op": "recoverStaging"
+      },
+      "assert": {
+        "error": null,
+        "terminalState": "deleted",
+        "candidateExists": false,
+        "deletedCandidateCount": 1,
+        "deletedSiblingCount": 0
+      },
+      "archiveSha256": null
+    },
+    {
+      "id": "trust.script-file-is-data",
+      "phase": "succeeded",
+      "arrange": {
+        "operations": [
+          {
+            "op": "zip.create"
+          },
+          {
+            "op": "zip.addEntry",
+            "args": {
+              "nameScalars": [
+                "U+0041",
+                "U+0073",
+                "U+0073",
+                "U+0065",
+                "U+0074",
+                "U+0073",
+                "U+002F",
+                "U+0065",
+                "U+0076",
+                "U+0069",
+                "U+006C",
+                "U+002E",
+                "U+006A",
+                "U+0073"
+              ],
+              "payloadHex": "676c6f62616c2e70776e65643d74727565"
+            }
+          },
+          {
+            "op": "observer.installSecuritySpies"
+          },
+          {
+            "op": "observer.requireSuspensionToken",
+            "args": {
+              "from": "before-atomic-publish",
+              "through": "data-only-commit"
+            }
+          }
+        ]
+      },
+      "action": {
+        "op": "importArchive"
+      },
+      "assert": {
+        "error": null,
+        "terminalState": "succeeded",
+        "publishedFile": {
+          "pathScalars": [
+            "U+0041",
+            "U+0073",
+            "U+0073",
+            "U+0065",
+            "U+0074",
+            "U+0073",
+            "U+002F",
+            "U+0065",
+            "U+0076",
+            "U+0069",
+            "U+006C",
+            "U+002E",
+            "U+006A",
+            "U+0073"
+          ],
+          "sha256": "7dc777f2edeb0145b8b3e31aa2129302f59d6c9e2d39983cc9544d777b1a521e"
+        },
+        "eventOrder": [
+          "suspension-acquired",
+          "atomic-publish",
+          "identity-verified",
+          "security-spies-zero",
+          "data-only-commit",
+          "suspension-released",
+          "archive-content-published"
+        ],
+        "notificationPayload": {
+          "kind": "archive-content-published",
+          "allows": [
+            "metadata-discovery"
+          ],
+          "forbids": [
+            "importer-dispatch",
+            "package-hook",
+            "execution-broker",
+            "trust-mutation"
+          ]
+        },
+        "spyCounters": {
+          "publish": 1,
+          "importerDispatch": 0,
+          "packageHook": 0,
+          "executionBroker": 0,
+          "trustMutation": 0,
+          "notification": 1
+        }
+      },
+      "archiveSha256": "f80ee22380087c9201c7628f406fbbcd08f9fd01ddf1e994484743b41b5a8306"
+    }
+  ]
+}

@@ -1,5 +1,6 @@
 import { GameObject } from './GameObject';
 import * as THREE from 'three';
+import { mergePreservingUnknown, SerializedComponentData } from './Serialization';
 
 
 
@@ -9,6 +10,7 @@ export class Component {
     public enabled: boolean = true;
     public overrides: Set<string> = new Set(); // Track property overrides from prefabs
     public static _serializableFields: string[] = [];
+    private serializedTemplate: SerializedComponentData | null = null;
 
     constructor(gameObject: GameObject) {
         this.gameObject = gameObject;
@@ -36,7 +38,7 @@ export class Component {
             data.data[field] = Component.serializeValue(val, new Set<unknown>());
         }
 
-        return data;
+        return mergePreservingUnknown(this.serializedTemplate, data);
     }
 
     public deserialize(data: any): void {
@@ -48,6 +50,67 @@ export class Component {
             }
             (this as any)[key] = decoded;
         }
+    }
+
+    public preserveSerializedData(template: SerializedComponentData): void {
+        this.serializedTemplate = template;
+    }
+
+    public captureSerializableState(): Record<string, unknown> {
+        const state: Record<string, unknown> = {};
+        const fields = (this.constructor as any)._serializableFields || [];
+        for (const field of fields) {
+            state[field] = Component.cloneRuntimeValue((this as any)[field], new Map());
+        }
+        return state;
+    }
+
+    public restoreSerializableState(state: Record<string, unknown>): void {
+        for (const [field, value] of Object.entries(state)) {
+            const restored = Component.cloneRuntimeValue(value, new Map());
+            if (!Component.tryAssignIntoExistingValue((this as any)[field], restored)) {
+                (this as any)[field] = restored;
+            }
+        }
+    }
+
+    private static cloneRuntimeValue(value: unknown, seen: Map<object, unknown>): unknown {
+        if (value === null || typeof value !== 'object') return value;
+        if (value instanceof GameObject || value instanceof Component) return value;
+        if (seen.has(value)) return seen.get(value);
+        if (value instanceof THREE.Vector2 || value instanceof THREE.Vector3
+            || value instanceof THREE.Vector4 || value instanceof THREE.Quaternion
+            || value instanceof THREE.Euler || value instanceof THREE.Color) {
+            return value.clone();
+        }
+        if (value instanceof Date) return new Date(value.getTime());
+        if (Array.isArray(value)) {
+            const clone: unknown[] = [];
+            seen.set(value, clone);
+            value.forEach((entry) => clone.push(Component.cloneRuntimeValue(entry, seen)));
+            return clone;
+        }
+        if (value instanceof Set) {
+            const clone = new Set<unknown>();
+            seen.set(value, clone);
+            value.forEach((entry) => clone.add(Component.cloneRuntimeValue(entry, seen)));
+            return clone;
+        }
+        if (value instanceof Map) {
+            const clone = new Map<unknown, unknown>();
+            seen.set(value, clone);
+            value.forEach((entry, key) => clone.set(
+                Component.cloneRuntimeValue(key, seen),
+                Component.cloneRuntimeValue(entry, seen)
+            ));
+            return clone;
+        }
+        const clone: Record<string, unknown> = {};
+        seen.set(value, clone);
+        Object.entries(value).forEach(([key, entry]) => {
+            clone[key] = Component.cloneRuntimeValue(entry, seen);
+        });
+        return clone;
     }
 
     private static serializeValue(value: unknown, seen: Set<unknown>): unknown {

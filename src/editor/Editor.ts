@@ -29,6 +29,7 @@ import { UISlider } from '../engine/components/UISlider';
 import { UIScrollbar } from '../engine/components/UIScrollbar';
 import { UIScrollRect } from '../engine/components/UIScrollRect';
 import { MeshRenderer } from '../engine/components/MeshRenderer';
+import { MeshFilter } from '../engine/components/MeshFilter';
 import { MaterialManager } from '../engine/Material';
 
 import { Input } from '../engine/Input';
@@ -52,6 +53,7 @@ import { AssetImporter } from '../engine/AssetImporter';
 import { SceneGizmo } from './SceneGizmo';
 import { RenderSettingsWindow } from './RenderSettingsWindow';
 import { DesktopBridge } from '../platform/DesktopBridge';
+import { DirtyState } from './DirtyState';
 import { DesktopFileSystem } from '../platform/DesktopFileSystem';
 import { PathUtils } from '../platform/PathUtils';
 import { ProjectSettings } from '../engine/ProjectSettings';
@@ -71,6 +73,7 @@ import {
     type EditorSideDockSlot,
     type EditorViewportTab
 } from './EditorSettings';
+import { calculateViewportSize, viewportSizeEquals, type ViewportSize } from './ViewportSizing';
 // // import { BuildSettingsWindow } from './BuildSettingsWindow';
 
 type FloatingDockTarget = {
@@ -103,6 +106,9 @@ export class Editor {
     private vignettePass!: ShaderPass;
     private filmGrainPass!: FilmPass;
     private chromaticAberrationPass!: ShaderPass;
+    private viewportResizeObserver: ResizeObserver | null = null;
+    private viewportResizeFrame: number | null = null;
+    private appliedViewportSize: ViewportSize | null = null;
 
     private gridHelper!: THREE.GridHelper;
     private statusBar: HTMLElement;
@@ -126,6 +132,8 @@ export class Editor {
     private multiSelectionPivotHandle: THREE.Object3D | null = null;
 
     private rootPath: string = "";
+    private readonly projectPath: string;
+    private readonly dirtyState = new DirtyState();
 
     // Gizmos
     private gizmos: Map<Component, THREE.Object3D> = new Map();
@@ -218,6 +226,7 @@ export class Editor {
     } | null = null;
 
     constructor(projectPath: string) {
+        this.projectPath = projectPath;
         // Initialize Core Systems first
         this.clock = new THREE.Clock();
         ProjectSettings.load();
@@ -245,6 +254,9 @@ export class Editor {
         this.renderSettingsWindow = new RenderSettingsWindow(document.getElementById('render-content')!, this.scene, () => this.updatePostProcessing());
 
         this.electronAPI = this.desktopBridge.getElectronAPI();
+        CommandHistory.addMutationListener((state) => this.dirtyState.setCommandRevision(state));
+        this.dirtyState.subscribe((dirty) => this.desktopBridge.setEditorDirty(dirty));
+        this.desktopBridge.onCloseSaveRequested( async() => await this.saveActiveScene());
 
         this.rootPath = PathUtils.join(projectPath, 'Assets');
 
@@ -262,9 +274,11 @@ export class Editor {
         this.renderer = new THREE.WebGLRenderer({ antialias: true });
         this.renderer.shadowMap.enabled = true;
         this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
-        this.renderer.setSize(this.sceneView.clientWidth, this.sceneView.clientHeight);
+        this.renderer.setPixelRatio(calculateViewportSize(1, 1, window.devicePixelRatio)?.pixelRatio ?? 1);
+        this.renderer.setSize(this.sceneView.clientWidth, this.sceneView.clientHeight, false);
         this.renderer.toneMapping = THREE.ReinhardToneMapping;
         this.sceneView.appendChild(this.renderer.domElement);
+        this.initializeViewportResizePolicy();
 
         // Setup Camera & Gizmos
         this.camera = new THREE.PerspectiveCamera(75, this.sceneView.clientWidth / this.sceneView.clientHeight, 0.1, 1000);
@@ -272,10 +286,19 @@ export class Editor {
         const cameraGO = new GameObject("Editor Camera");
         this.cameraGO = cameraGO;
         cameraGO.object3D = this.camera;
-        cameraGO.object3D.position.z = 5;
+        cameraGO.object3D.position.set(5, 5, 5);
+        this.camera.lookAt(0, 0, 0);
         this.cameraGO.addComponent(EditorCameraController);
+        const editorCameraController = this.cameraGO.getComponent(EditorCameraController);
+        if (editorCameraController) {
+            editorCameraController.pitch = -0.6154797086703873;
+            editorCameraController.yaw = 0.7853981633974483;
+            editorCameraController.orbitDistance = this.camera.position.length();
+            editorCameraController.orbitTarget.set(0, 0, 0);
+        }
         this.scene.addGameObject(this.cameraGO);
         this.sceneGizmo = new SceneGizmo(document.getElementById('scene-view')!, this.camera, (dir: THREE.Vector3) => this.setCameraOrientation(dir));
+        this.initializeSceneCameraPointerWorkflow(editorCameraController);
 
         // Setup Post-Processing
         this.composer = new EffectComposer(this.renderer);
@@ -360,12 +383,21 @@ export class Editor {
 
         // Misc
         window.addEventListener('resize', () => this.onWindowResize());
-        document.getElementById('save-btn')?.addEventListener('click', () => this.saveActiveScene());
-        document.getElementById('load-btn')?.addEventListener('click', () => this.showOpenSceneDialog());
+        document.getElementById('save-btn')?.addEventListener('click',  async() => await this.saveActiveScene());
+        document.getElementById('load-btn')?.addEventListener('click',  async() => await this.showOpenSceneDialog());
         document.getElementById('settings-btn')?.addEventListener('click', () => ProjectSettingsWindow.show());
-
+        window.setInterval( async() => {
+            if (!this.dirtyState.isDirty) return;
+            const scenePath = SceneManager.getInstance().getActiveScenePath();
+            void await this.desktopBridge.writeRecovery(this.projectPath, scenePath, this.scene.toJSON())
+                .catch((error) => console.warn('Autosave recovery failed:', error));
+        }, 30_000);
         // Default Scene
         this.createDemoScene();
+        window.setTimeout(async () => {
+            await this.restorePersistedSceneOnStartup();
+            await this.offerRecovery();
+        }, 0);
 
         // Finalize
         this.gridHelper = new THREE.GridHelper(EditorSettings.gridSize, EditorSettings.gridDivisions, EditorSettings.gridColor1, EditorSettings.gridColor2);
@@ -1735,16 +1767,72 @@ export class Editor {
         const splitter = document.getElementById(splitterId) as HTMLElement | null;
         if (!splitter) return;
 
+        const getTargetId = () => splitterId === 'left-splitter'
+            ? this.getDockedPanelIdForSideSlot('left')
+            : splitterId === 'right-splitter'
+                ? this.getDockedPanelIdForSideSlot('right')
+                : splitterId === 'center-secondary-splitter'
+                    ? 'center-secondary-panel' as const
+                : splitterId === 'center-tertiary-splitter'
+                    ? 'center-tertiary-panel' as const
+                : 'assets-panel' as const;
+        const getTargetSize = (targetId: Exclude<EditorPanelId, 'viewport-panel'> | 'center-secondary-panel' | 'center-tertiary-panel') => {
+            if (targetId === 'assets-panel') return EditorSettings.assetsHeight;
+            if (targetId === 'center-secondary-panel') return EditorSettings.centerSecondaryWidth;
+            if (targetId === 'center-tertiary-panel') return EditorSettings.centerTertiaryWidth;
+            return this.getSidePanelWidth(targetId);
+        };
+        const syncSeparatorValue = () => {
+            const targetId = getTargetId();
+            if (!targetId) return;
+            splitter.setAttribute('aria-valuenow', String(Math.round(getTargetSize(targetId))));
+            const minimum = targetId === 'assets-panel'
+                ? this.minAssetsHeight
+                : targetId === 'center-secondary-panel'
+                    ? this.minCenterSecondaryWidth
+                    : targetId === 'center-tertiary-panel'
+                        ? this.minCenterTertiaryWidth
+                        : this.getMinSidePanelWidth(targetId);
+            splitter.setAttribute('aria-valuemin', String(Math.round(minimum)));
+        };
+
+        splitter.setAttribute('role', 'separator');
+        splitter.setAttribute('aria-orientation', cursor === 'row-resize' ? 'horizontal' : 'vertical');
+        splitter.setAttribute('aria-label', cursor === 'row-resize' ? 'Resize bottom panel' : 'Resize editor panels');
+        splitter.tabIndex = 0;
+        syncSeparatorValue();
+        splitter.addEventListener('keydown', (event: KeyboardEvent) => {
+            const horizontal = cursor === 'row-resize';
+            const handledArrow = horizontal
+                ? event.key === 'ArrowUp' || event.key === 'ArrowDown'
+                : event.key === 'ArrowLeft' || event.key === 'ArrowRight';
+            if (!handledArrow && event.key !== 'Home' && event.key !== 'End') return;
+
+            const targetId = getTargetId();
+            if (!targetId) return;
+            const panel = document.getElementById(targetId) as HTMLElement | null;
+            if (!panel) return;
+
+            event.preventDefault();
+            const currentSize = getTargetSize(targetId);
+            const step = event.shiftKey ? 50 : 10;
+            let delta = 0;
+            const inverted = splitterId !== 'left-splitter';
+            if (event.key === 'Home') delta = inverted ? 100000 : -100000;
+            if (event.key === 'End') delta = inverted ? -100000 : 100000;
+            if (event.key === 'ArrowLeft' || event.key === 'ArrowUp') delta = -step;
+            if (event.key === 'ArrowRight' || event.key === 'ArrowDown') delta = step;
+
+            onMove(new PointerEvent('pointermove', {
+                clientX: horizontal ? 0 : delta,
+                clientY: horizontal ? delta : 0
+            }), { x: 0, y: 0, size: currentSize }, targetId);
+            syncSeparatorValue();
+            this.saveLayout();
+        });
+
         splitter.addEventListener('pointerdown', (event: PointerEvent) => {
-            const targetId = splitterId === 'left-splitter'
-                ? this.getDockedPanelIdForSideSlot('left')
-                : splitterId === 'right-splitter'
-                    ? this.getDockedPanelIdForSideSlot('right')
-                    : splitterId === 'center-secondary-splitter'
-                        ? 'center-secondary-panel'
-                    : splitterId === 'center-tertiary-splitter'
-                        ? 'center-tertiary-panel'
-                    : 'assets-panel';
+            const targetId = getTargetId();
             if (!targetId) return;
             const panel = document.getElementById(targetId) as HTMLElement | null;
             if (!panel) return;
@@ -1770,6 +1858,7 @@ export class Editor {
                 document.body.style.userSelect = previousUserSelect;
                 document.removeEventListener('pointermove', handleMove);
                 document.removeEventListener('pointerup', handleUp);
+                syncSeparatorValue();
                 this.saveLayout();
             };
 
@@ -3825,7 +3914,15 @@ export class Editor {
                     const labelSpan = document.createElement('span');
                     labelSpan.className = 'menu-label';
                     labelSpan.textContent = labelText;
-                    item.insertBefore(labelSpan, shortcut ?? check ?? item.firstChild);
+                    const preferredReference = shortcut ?? check ?? item.firstChild;
+                    const referenceNode = preferredReference?.parentNode === item
+                        ? preferredReference
+                        : null;
+                    if (referenceNode) {
+                        item.insertBefore(labelSpan, referenceNode);
+                    } else {
+                        item.appendChild(labelSpan);
+                    }
                 }
             }
 
@@ -3863,6 +3960,20 @@ export class Editor {
     }
 
     private initializeMenuEvents() {
+        const closeAllMenus = () => {
+            const openMenus = Array.from(document.querySelectorAll('.menu-item.menu-open')) as HTMLElement[];
+            openMenus.forEach((item) => {
+                item.classList.remove('menu-open');
+                item.setAttribute('aria-expanded', 'false');
+            });
+
+            const openSubmenus = Array.from(document.querySelectorAll('.dropdown-item.submenu.submenu-open')) as HTMLElement[];
+            openSubmenus.forEach((item) => {
+                item.classList.remove('submenu-open');
+                item.setAttribute('aria-expanded', 'false');
+            });
+        };
+
         const bindMenuAction = (id: string, handler: () => void) => {
             document.getElementById(id)?.addEventListener('click', (event) => {
                 const target = event.currentTarget as HTMLElement | null;
@@ -3872,26 +3983,138 @@ export class Editor {
                     return;
                 }
                 handler();
+                closeAllMenus();
             });
         };
 
         const menuItems = Array.from(document.querySelectorAll('.menu-item')) as HTMLElement[];
-        menuItems.forEach((item) => {
+        const getEnabledItems = (menu: HTMLElement) => Array.from(menu.querySelectorAll<HTMLElement>(':scope > .dropdown-item'))
+            .filter((entry) => entry.getAttribute('aria-disabled') !== 'true' && !entry.classList.contains('disabled'));
+        const focusMenuEntry = (menuItem: HTMLElement, position: 'first' | 'last' = 'first') => {
+            const dropdown = menuItem.querySelector<HTMLElement>(':scope > .dropdown-content');
+            if (!dropdown) return;
+            closeAllMenus();
+            menuItem.classList.add('menu-open');
+            menuItem.setAttribute('aria-expanded', 'true');
+            const entries = getEnabledItems(dropdown);
+            entries[position === 'first' ? 0 : entries.length - 1]?.focus();
+        };
+
+        menuItems.forEach((item, index) => {
+            item.tabIndex = index === 0 ? 0 : -1;
+            item.addEventListener('click', (event) => {
+                const clickTarget = event.target as HTMLElement | null;
+                if (clickTarget?.closest('.dropdown-content')) {
+                    return;
+                }
+
+                event.preventDefault();
+                event.stopPropagation();
+                const shouldOpen = !item.classList.contains('menu-open');
+                closeAllMenus();
+                if (shouldOpen) {
+                    item.classList.add('menu-open');
+                    item.setAttribute('aria-expanded', 'true');
+                }
+            });
             item.addEventListener('mouseenter', () => item.setAttribute('aria-expanded', 'true'));
-            item.addEventListener('mouseleave', () => item.setAttribute('aria-expanded', 'false'));
+            item.addEventListener('mouseleave', () => {
+                if (!item.classList.contains('menu-open')) {
+                    item.setAttribute('aria-expanded', 'false');
+                }
+            });
+            item.addEventListener('keydown', (event: KeyboardEvent) => {
+                if (event.key === 'ArrowDown' || event.key === 'ArrowUp' || event.key === 'Enter' || event.key === ' ') {
+                    event.preventDefault();
+                    focusMenuEntry(item, event.key === 'ArrowUp' ? 'last' : 'first');
+                    return;
+                }
+                if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return;
+                event.preventDefault();
+                const nextIndex = (index + (event.key === 'ArrowRight' ? 1 : -1) + menuItems.length) % menuItems.length;
+                menuItems.forEach((candidate, candidateIndex) => candidate.tabIndex = candidateIndex === nextIndex ? 0 : -1);
+                menuItems[nextIndex].focus();
+            });
         });
 
         const submenuItems = Array.from(document.querySelectorAll('.dropdown-item.submenu')) as HTMLElement[];
         submenuItems.forEach((item) => {
+            item.addEventListener('click', (event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                const shouldOpen = !item.classList.contains('submenu-open');
+                const siblingSubmenus = Array.from(item.parentElement?.querySelectorAll(':scope > .dropdown-item.submenu.submenu-open') ?? []) as HTMLElement[];
+                siblingSubmenus.forEach((entry) => {
+                    if (entry === item) return;
+                    entry.classList.remove('submenu-open');
+                    entry.setAttribute('aria-expanded', 'false');
+                });
+                item.classList.toggle('submenu-open', shouldOpen);
+                item.setAttribute('aria-expanded', shouldOpen ? 'true' : 'false');
+            });
             item.addEventListener('mouseenter', () => item.setAttribute('aria-expanded', 'true'));
-            item.addEventListener('mouseleave', () => item.setAttribute('aria-expanded', 'false'));
+            item.addEventListener('mouseleave', () => {
+                if (!item.classList.contains('submenu-open')) {
+                    item.setAttribute('aria-expanded', 'false');
+                }
+            });
         });
+
+        document.getElementById('menu-bar')?.addEventListener('keydown', (event: KeyboardEvent) => {
+            const current = document.activeElement as HTMLElement | null;
+            if (!current?.classList.contains('dropdown-item')) return;
+            const menu = current.parentElement;
+            if (!menu) return;
+            const entries = getEnabledItems(menu);
+            const currentIndex = entries.indexOf(current);
+
+            if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+                event.preventDefault();
+                const direction = event.key === 'ArrowDown' ? 1 : -1;
+                entries[(currentIndex + direction + entries.length) % entries.length]?.focus();
+            } else if ((event.key === 'Enter' || event.key === ' ') && !current.classList.contains('submenu')) {
+                event.preventDefault();
+                current.click();
+            } else if ((event.key === 'ArrowRight' || event.key === 'Enter' || event.key === ' ') && current.classList.contains('submenu')) {
+                event.preventDefault();
+                current.classList.add('submenu-open');
+                current.setAttribute('aria-expanded', 'true');
+                const submenu = current.querySelector<HTMLElement>(':scope > .sub-dropdown');
+                if (submenu) getEnabledItems(submenu)[0]?.focus();
+            } else if (event.key === 'ArrowLeft' && current.closest('.sub-dropdown')) {
+                event.preventDefault();
+                const parentItem = current.parentElement?.closest<HTMLElement>('.dropdown-item.submenu');
+                parentItem?.classList.remove('submenu-open');
+                parentItem?.setAttribute('aria-expanded', 'false');
+                parentItem?.focus();
+            } else if (event.key === 'Escape') {
+                event.preventDefault();
+                const topMenu = current.closest<HTMLElement>('.menu-item');
+                closeAllMenus();
+                topMenu?.focus();
+            } else if ((event.key === 'ArrowLeft' || event.key === 'ArrowRight') && !current.closest('.sub-dropdown')) {
+                event.preventDefault();
+                const topMenu = current.closest<HTMLElement>('.menu-item');
+                const topIndex = topMenu ? menuItems.indexOf(topMenu) : -1;
+                if (topIndex < 0) return;
+                const nextIndex = (topIndex + (event.key === 'ArrowRight' ? 1 : -1) + menuItems.length) % menuItems.length;
+                focusMenuEntry(menuItems[nextIndex]);
+            }
+        });
+
+        document.addEventListener('keydown', (event: KeyboardEvent) => {
+            if (event.key !== 'Alt' || event.ctrlKey || event.metaKey || event.shiftKey) return;
+            event.preventDefault();
+            closeAllMenus();
+            menuItems[0]?.focus();
+        });
+        document.addEventListener('click', () => closeAllMenus());
 
         // File Menu
         bindMenuAction('menu-new-scene', () => this.newScene());
-        bindMenuAction('menu-open-scene', () => this.showOpenSceneDialog());
-        bindMenuAction('menu-save-scene', () => this.saveActiveScene());
-        bindMenuAction('menu-save-scene-as', () => this.showSaveSceneAsDialog());
+        bindMenuAction('menu-open-scene',  async() => await this.showOpenSceneDialog());
+        bindMenuAction('menu-save-scene',  async() => await this.saveActiveScene());
+        bindMenuAction('menu-save-scene-as',  async() => await this.showSaveSceneAsDialog());
         bindMenuAction('menu-exit', () => this.electronAPI?.exitApp?.());
 
         // Edit Menu
@@ -4065,7 +4288,7 @@ export class Editor {
             e.dataTransfer!.dropEffect = 'copy';
         };
 
-        this.sceneView.ondrop = (e) => {
+        this.sceneView.ondrop =  async(e) => {
             e.preventDefault();
             const data = e.dataTransfer!.getData("text/plain");
             if (!data) return;
@@ -4106,8 +4329,8 @@ export class Editor {
                     }
 
                     const prefab = payload.fullPath
-                        ? PrefabManager.loadPrefabFromPath(payload.fullPath)
-                        : PrefabManager.loadPrefab(payload.name);
+                        ? await PrefabManager.loadPrefabFromPath(payload.fullPath)
+                        : await PrefabManager.loadPrefab(payload.name);
                     if (prefab) {
                         const go = prefab.instantiate();
                         go.transform.position.copy(targetPos);
@@ -4141,7 +4364,7 @@ export class Editor {
                         if (go) {
                             const renderer = go.getComponent(MeshRenderer);
                             if (renderer && renderer.material) {
-                                AssetImporter.importTexture(payload.fullPath, (tex) => {
+                                await AssetImporter.importTexture(payload.fullPath, (tex) => {
                                     tex.name = payload.name;
                                     renderer.material!.setMainTexture(tex);
                                     this.inspectorWindow.refresh();
@@ -4162,7 +4385,7 @@ export class Editor {
                         }
                     }
 
-                    AssetImporter.importModel(payload.fullPath, (rootGO) => {
+                    await AssetImporter.importModel(payload.fullPath, (rootGO) => {
                         rootGO.transform.position.copy(targetPos);
                         const cmd = new CreateGameObjectCommand(rootGO, this.scene);
                         CommandHistory.execute(cmd);
@@ -4181,7 +4404,7 @@ export class Editor {
                     const file = e.dataTransfer!.files[i];
                     const filePath = (file as any).path;
                     if (filePath && AssetImporter.isModelFile(file.name)) {
-                        AssetImporter.importModel(filePath, (rootGO) => {
+                        await AssetImporter.importModel(filePath, (rootGO) => {
                             const cmd = new CreateGameObjectCommand(rootGO, this.scene);
                             CommandHistory.execute(cmd);
                             this.selectGameObject(rootGO);
@@ -4835,10 +5058,64 @@ export class Editor {
         document.getElementById('tab-assets')?.addEventListener('click', () => this.activateDockableTab('project'));
         document.getElementById('tab-console')?.addEventListener('click', () => this.activateDockableTab('console'));
         document.getElementById('tab-render')?.addEventListener('click', () => this.activateDockableTab('render'));
+        this.initializeTabKeyboardNavigation();
         this.initializeDockableTabCloseButton('tab-close-assets', 'project');
         this.initializeDockableTabCloseButton('tab-close-console', 'console');
         this.initializeDockableTabCloseButton('tab-close-render', 'render');
         this.initializeTabReordering();
+    }
+
+    private initializeTabKeyboardNavigation() {
+        const syncTabs = () => {
+            document.querySelectorAll<HTMLElement>('.panel-tab-strip').forEach((tabList) => {
+                tabList.setAttribute('role', 'tablist');
+                const tabs = Array.from(tabList.querySelectorAll<HTMLElement>(':scope > .tab'))
+                    .filter((tab) => tab.offsetParent !== null);
+                tabs.forEach((tab) => {
+                    const selected = tab.classList.contains('active-tab');
+                    tab.setAttribute('role', 'tab');
+                    tab.setAttribute('aria-selected', selected ? 'true' : 'false');
+                    tab.tabIndex = selected ? 0 : -1;
+                });
+                if (tabs.length > 0 && !tabs.some((tab) => tab.tabIndex === 0)) {
+                    tabs[0].tabIndex = 0;
+                }
+            });
+        };
+
+        document.querySelectorAll<HTMLElement>('.tab').forEach((tab) => {
+            tab.addEventListener('keydown', (event: KeyboardEvent) => {
+                if (event.target !== tab) return;
+                if (event.key === 'Enter' || event.key === ' ') {
+                    event.preventDefault();
+                    tab.click();
+                    syncTabs();
+                    return;
+                }
+                if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+
+                const tabs = Array.from(tab.parentElement?.querySelectorAll<HTMLElement>(':scope > .tab') ?? [])
+                    .filter((candidate) => candidate.offsetParent !== null);
+                const index = tabs.indexOf(tab);
+                if (index < 0 || tabs.length < 2) return;
+                event.preventDefault();
+                const nextIndex = event.key === 'Home'
+                    ? 0
+                    : event.key === 'End'
+                        ? tabs.length - 1
+                        : (index + (event.key === 'ArrowRight' ? 1 : -1) + tabs.length) % tabs.length;
+                tabs[nextIndex].focus();
+            });
+        });
+
+        const observer = new MutationObserver(syncTabs);
+        document.querySelectorAll('.panel-tab-strip').forEach((tabList) => {
+            observer.observe(tabList, { childList: true, subtree: false });
+        });
+        document.querySelectorAll('.tab').forEach((tab) => {
+            observer.observe(tab, { attributes: true, attributeFilter: ['class', 'style'] });
+        });
+        syncTabs();
     }
 
     private initializeDockableTabCloseButton(buttonId: string, view: DockableEditorView) {
@@ -5271,6 +5548,21 @@ export class Editor {
         let initialWorldById = new Map<string, THREE.Matrix4>();
         let altDuplicateTriggeredThisDrag = false;
 
+        window.addEventListener('keydown', (event) => {
+            if (event.key !== 'Escape' || !this.transformControls.dragging || initialSnapshotsById.size === 0) return;
+            event.preventDefault();
+            event.stopImmediatePropagation();
+            this.transformControls.reset();
+            initialSnapshotsById.forEach(({ target, snapshot }) => applySnapshot(target, snapshot));
+            this.syncRigidBodiesForTargets(Array.from(initialSnapshotsById.values(), ({ target }) => target));
+            initialSnapshotsById = new Map();
+            initialPivotWorld = null;
+            initialWorldById = new Map();
+            altDuplicateTriggeredThisDrag = false;
+            this.updateTransformControlsAttachment();
+            this.inspectorWindow.refresh();
+        }, { capture: true });
+
         this.transformControls.addEventListener('mousedown', () => {
             if (!this.isPlaying && this.isAltModifierDown() && !altDuplicateTriggeredThisDrag && this.selectedGameObjects.length > 0) {
                 this.duplicateSelected();
@@ -5360,6 +5652,47 @@ export class Editor {
 
     private isAltModifierDown(): boolean {
         return Input.getKey('AltLeft') || Input.getKey('AltRight');
+    }
+
+    private initializeSceneCameraPointerWorkflow(controller: EditorCameraController | null | undefined): void {
+        if (!controller) return;
+        const canvas = this.renderer.domElement;
+        let activePointerId: number | null = null;
+
+        canvas.addEventListener('pointerdown', (event) => {
+            const isOrbit = event.button === 0 && event.altKey;
+            const isPanOrFly = event.button === 1 || event.button === 2;
+            if (!isOrbit && !isPanOrFly) return;
+            activePointerId = event.pointerId;
+            controller.beginInteraction();
+            canvas.setPointerCapture?.(event.pointerId);
+        });
+
+        canvas.addEventListener('pointerup', (event) => {
+            if (event.pointerId !== activePointerId) return;
+            controller.endInteraction();
+            if (canvas.hasPointerCapture?.(event.pointerId)) {
+                canvas.releasePointerCapture(event.pointerId);
+            }
+            activePointerId = null;
+        });
+
+        canvas.addEventListener('lostpointercapture', () => {
+            if (activePointerId === null) return;
+            controller.cancelInteraction();
+            activePointerId = null;
+        });
+
+        window.addEventListener('keydown', (event) => {
+            if (event.key !== 'Escape' || activePointerId === null) return;
+            event.preventDefault();
+            event.stopImmediatePropagation();
+            controller.cancelInteraction();
+            if (canvas.hasPointerCapture?.(activePointerId)) {
+                canvas.releasePointerCapture(activePointerId);
+            }
+            activePointerId = null;
+        }, { capture: true });
     }
 
     private getActiveTransformTargets(): GameObject[] {
@@ -5557,25 +5890,17 @@ export class Editor {
             };
         }
 
-        window.addEventListener('resize', () => {
-            if (this.isGameView) {
-                this.updateGameViewResolution();
-            } else {
-                const w = this.sceneView.clientWidth;
-                const h = this.sceneView.clientHeight;
-                this.renderer.setSize(w, h);
-                this.camera.aspect = w / h;
-                this.camera.updateProjectionMatrix();
-                if (this.composer) this.composer.setSize(w, h);
-            }
-        });
+        window.addEventListener('resize', () => this.scheduleViewportResize());
+        window.visualViewport?.addEventListener('resize', () => this.scheduleViewportResize());
     }
 
     private isWireframe: boolean = false;
 
     private initializeKeyBindings() {
-        window.addEventListener('keydown', (event) => {
-            if (document.activeElement?.tagName === 'INPUT') return;
+        window.addEventListener('keydown',  async(event) => {
+            const activeElement = document.activeElement as HTMLElement | null;
+            const isTextEditing = activeElement?.matches('input, textarea, select, [contenteditable="true"], [role="textbox"]') === true;
+            if (isTextEditing) return;
 
             if (event.key === 'Control' && !EditorSettings.snapEnabled) {
                 this.temporarySnapActive = true;
@@ -5630,7 +5955,7 @@ export class Editor {
                         this.inspectorWindow.refresh();
                     }
                     break;
-                case 's': if (commandKey) { event.preventDefault(); this.saveActiveScene(); } break;
+                case 's': if (commandKey) { event.preventDefault(); await this.saveActiveScene(); } break;
                 case 'f':
                     this.focusOnSelectionOrScene();
                     break;
@@ -5841,20 +6166,38 @@ export class Editor {
         this.renderer.toneMappingExposure = this.scene.toneMappingExposure;
 
         // Advanced Effects Sync
-        this.vignettePass.enabled = this.scene.enableVignette;
-        this.vignettePass.uniforms["darkness"].value = this.scene.vignetteIntensity;
-        this.vignettePass.uniforms["offset"].value = this.scene.vignetteOffset;
+        if (this.vignettePass) {
+            this.vignettePass.enabled = this.scene.enableVignette;
+            if (this.vignettePass.uniforms?.["darkness"]) {
+                this.vignettePass.uniforms["darkness"].value = this.scene.vignetteIntensity;
+            }
+            if (this.vignettePass.uniforms?.["offset"]) {
+                this.vignettePass.uniforms["offset"].value = this.scene.vignetteOffset;
+            }
+        }
 
-        this.chromaticAberrationPass.enabled = this.scene.enableChromaticAberration;
-        this.chromaticAberrationPass.uniforms["amount"].value = this.scene.chromaticIntensity * 0.005;
+        if (this.chromaticAberrationPass) {
+            this.chromaticAberrationPass.enabled = this.scene.enableChromaticAberration;
+            if (this.chromaticAberrationPass.uniforms?.["amount"]) {
+                this.chromaticAberrationPass.uniforms["amount"].value = this.scene.chromaticIntensity * 0.005;
+            }
+        }
 
-        this.filmGrainPass.enabled = this.scene.enableFilmGrain;
-        // @ts-ignore
-        this.filmGrainPass.uniforms["nIntensity"].value = this.scene.filmGrainIntensity;
+        if (this.filmGrainPass) {
+            this.filmGrainPass.enabled = this.scene.enableFilmGrain;
+            // @ts-ignore
+            if (this.filmGrainPass.uniforms?.["nIntensity"]) {
+                // @ts-ignore
+                this.filmGrainPass.uniforms["nIntensity"].value = this.scene.filmGrainIntensity;
+            }
+        }
 
         // Grid Update
-        this.gridHelper.visible = EditorSettings.gridEnabled;
-        if (this.gridHelper.geometry.attributes['position'].count !== (EditorSettings.gridDivisions + 1) * 4) {
+        if (this.gridHelper) {
+            this.gridHelper.visible = EditorSettings.gridEnabled;
+        }
+        if (this.gridHelper?.geometry?.attributes?.['position']?.count !== undefined
+            && this.gridHelper.geometry.attributes['position'].count !== (EditorSettings.gridDivisions + 1) * 4) {
             // Redraw grid if divisions changed (advanced logic skipped for now, just size)
         }
 
@@ -5873,13 +6216,13 @@ export class Editor {
         }
     }
 
-    private applySceneSnapshot(snapshot: string, scenePath: string | null): void {
+    private async applySceneSnapshot(snapshot: string, scenePath: string | null): Promise<void> {
         this.scene.loadFromJSON(snapshot);
         SceneManager.getInstance().setActiveScene(this.scene, scenePath);
         this.selectGameObject(null);
         this.hierarchyWindow.refresh();
         this.inspectorWindow.refresh();
-        this.projectWindow.refresh();
+        await this.projectWindow.refresh();
         this.syncWindowMenuState();
     }
 
@@ -5892,8 +6235,8 @@ export class Editor {
 
         CommandHistory.execute({
             name,
-            execute: () => this.applySceneSnapshot(nextSnapshot, nextPath),
-            undo: () => this.applySceneSnapshot(previousSnapshot, previousPath)
+            execute:  async() => await this.applySceneSnapshot(nextSnapshot, nextPath),
+            undo:  async() => await this.applySceneSnapshot(previousSnapshot, previousPath)
         });
     }
 
@@ -5928,7 +6271,7 @@ export class Editor {
         this.selectGameObjectRange(selected, false);
     }
 
-    private executeSceneMutationCommand(name: string, mutate: () => boolean): void {
+    private executeSceneMutationCommand(name: string, mutate: () => boolean | Promise<boolean>): void {
         const previousSnapshot = this.scene.toJSON();
         const previousPath = SceneManager.getInstance().getActiveScenePath();
         const previousSelection = this.captureSelectionSnapshot();
@@ -5943,48 +6286,48 @@ export class Editor {
 
         CommandHistory.execute({
             name,
-            execute: () => {
-                this.applySceneSnapshot(nextSnapshot, nextPath);
+            execute:  async() => {
+                await this.applySceneSnapshot(nextSnapshot, nextPath);
                 this.restoreSelectionSnapshot(nextSelection);
             },
-            undo: () => {
-                this.applySceneSnapshot(previousSnapshot, previousPath);
+            undo:  async() => {
+                await this.applySceneSnapshot(previousSnapshot, previousPath);
                 this.restoreSelectionSnapshot(previousSelection);
             }
         });
     }
 
-    private readTextFileIfExists(filePath: string): string | null {
+    private async readTextFileIfExists(filePath: string): Promise<string | null> {
         if (!filePath) return null;
         console.warn(`readTextFileIfExists fallback path hit for '${filePath}'. Prefer async bridge call in new code.`);
         try {
-            if (!this.fs?.existsSync(filePath)) return null;
-            return this.fs.readFileSync(filePath, 'utf8');
+            if (!await this.fs?.exists(filePath)) return null;
+            return await this.fs.readFile(filePath, 'utf8');
         } catch (error) {
             console.warn(`Failed to read file snapshot for '${filePath}'`, error);
             return null;
         }
     }
 
-    private restorePrefabSourceSnapshot(sourcePath: string, sourceJson: string | null): void {
+    private async restorePrefabSourceSnapshot(sourcePath: string, sourceJson: string | null): Promise<void> {
         if (sourceJson === null) return;
-        this.fs.writeFileSync(sourcePath, sourceJson, 'utf8');
-        PrefabManager.loadPrefabFromPath(sourcePath);
-        this.projectWindow.refreshAssetRuntime(sourcePath);
+        await this.fs.writeFile(sourcePath, sourceJson, 'utf8');
+        await PrefabManager.loadPrefabFromPath(sourcePath);
+        await this.projectWindow.refreshAssetRuntime(sourcePath);
     }
 
-    private executePrefabBackedSceneMutationCommand(name: string, sourcePath: string, mutate: () => boolean): void {
+    private async executePrefabBackedSceneMutationCommand(name: string, sourcePath: string, mutate: () => boolean | Promise<boolean>): Promise<void> {
         const previousSnapshot = this.scene.toJSON();
         const previousPath = SceneManager.getInstance().getActiveScenePath();
         const previousSelection = this.captureSelectionSnapshot();
-        const previousSourceJson = this.readTextFileIfExists(sourcePath);
+        const previousSourceJson = await this.readTextFileIfExists(sourcePath);
 
         const didMutate = mutate();
 
         const nextSnapshot = this.scene.toJSON();
         const nextPath = SceneManager.getInstance().getActiveScenePath();
         const nextSelection = this.captureSelectionSnapshot();
-        const nextSourceJson = this.readTextFileIfExists(sourcePath);
+        const nextSourceJson = await this.readTextFileIfExists(sourcePath);
 
         if (
             !didMutate
@@ -5999,14 +6342,14 @@ export class Editor {
 
         CommandHistory.execute({
             name,
-            execute: () => {
-                this.restorePrefabSourceSnapshot(sourcePath, nextSourceJson);
-                this.applySceneSnapshot(nextSnapshot, nextPath);
+            execute:  async() => {
+                await this.restorePrefabSourceSnapshot(sourcePath, nextSourceJson);
+                await this.applySceneSnapshot(nextSnapshot, nextPath);
                 this.restoreSelectionSnapshot(nextSelection);
             },
-            undo: () => {
-                this.restorePrefabSourceSnapshot(sourcePath, previousSourceJson);
-                this.applySceneSnapshot(previousSnapshot, previousPath);
+            undo:  async() => {
+                await this.restorePrefabSourceSnapshot(sourcePath, previousSourceJson);
+                await this.applySceneSnapshot(previousSnapshot, previousPath);
                 this.restoreSelectionSnapshot(previousSelection);
             }
         });
@@ -6016,7 +6359,8 @@ export class Editor {
         const tempScene = new Scene();
 
         const cube = new GameObject("Cube");
-        cube.addComponent(MeshRenderer);
+        const cubeRenderer = cube.addComponent(MeshRenderer);
+        cubeRenderer.mesh.geometry = new THREE.BoxGeometry(1, 1, 1);
         const autoRotate = ScriptRegistry.create("AutoRotate", cube);
         if (autoRotate) {
             cube.addComponent(autoRotate);
@@ -6035,10 +6379,41 @@ export class Editor {
         return tempScene.toJSON();
     }
 
-    public newScene() {
-        if (confirm("Create new scene? Unsaved changes will be lost.")) {
-            const nextSnapshot = this.buildDefaultSceneSnapshot();
-            this.executeSceneSnapshotCommand('New Scene', nextSnapshot, null);
+    private async confirmSceneReplacement(action: 'create a new scene' | 'open another scene'): Promise<boolean> {
+        if (!this.dirtyState.isDirty) return true;
+
+        if (confirm(`Save changes before you ${action}?`)) {
+            return await this.saveActiveScene();
+        }
+
+        if (!confirm(`Discard your unsaved changes and ${action}?`)) {
+            return false;
+        }
+
+        return true;
+    }
+
+    public async newScene(): Promise<void> {
+        if (!await this.confirmSceneReplacement('create a new scene')) return;
+
+        const nextSnapshot = this.buildDefaultSceneSnapshot();
+        this.executeSceneSnapshotCommand('New Scene', nextSnapshot, null);
+        await this.desktopBridge.discardRecovery(this.projectPath);
+    }
+
+    public async openScene(scenePath: string): Promise<boolean> {
+        try {
+            const sceneManager = SceneManager.getInstance();
+            const prepared = await sceneManager.prepareScene(scenePath);
+            if (!await this.confirmSceneReplacement('open another scene')) return false;
+
+            const scene = sceneManager.activatePreparedScene(prepared);
+            this.setScene(scene);
+            await this.desktopBridge.discardRecovery(this.projectPath);
+            return true;
+        } catch (error) {
+            console.error(`Invalid scene file '${scenePath}':`, error);
+            return false;
         }
     }
 
@@ -6052,37 +6427,45 @@ export class Editor {
 
         if (!result) return;
 
-        if (!result.canceled && result.filePath) {
-            const data = await this.desktopBridge.readTextFile(result.filePath);
-            if (data === null) return;
+        const selectedPath = typeof result.filePath === 'string' && result.filePath.length > 0
+            ? result.filePath
+            : (Array.isArray(result.filePaths) && result.filePaths.length > 0 ? result.filePaths[0] : null);
+
+        if (!result.canceled && selectedPath) {
             try {
-                JSON.parse(data);
+                const sceneManager = SceneManager.getInstance();
+                const prepared = await sceneManager.prepareScene(selectedPath);
+                if (!await this.confirmSceneReplacement('open another scene')) return;
+
+                const scene = sceneManager.activatePreparedScene(prepared);
+                this.setScene(scene);
+                await this.desktopBridge.discardRecovery(this.projectPath);
             } catch (error) {
-                console.error(`Invalid scene file '${result.filePath}':`, error);
+                console.error(`Invalid scene file '${selectedPath}':`, error);
                 return;
             }
-
-            const sceneName = await this.desktopBridge.pathBasename(result.filePath);
-            this.executeSceneSnapshotCommand(`Open Scene ${sceneName}`, data, result.filePath);
         }
     }
 
-    private async showSaveSceneAsDialog() {
-        const defaultScenePath = this.rootPath ? await this.desktopBridge.pathJoin(this.rootPath, 'scenes', 'NewScene.json') : 'NewScene.json';
+    private async showSaveSceneAsDialog(): Promise<boolean> {
+        const defaultScenePath = this.rootPath ? await this.desktopBridge.pathJoin(this.rootPath, 'Scenes', 'NewScene.json') : 'NewScene.json';
         const result = await this.electronAPI?.showSaveDialog?.({
             title: 'Save Scene As',
             defaultPath: defaultScenePath,
             filters: [{ name: 'Scene Files', extensions: ['json', 'scene'] }]
         });
 
-        if (!result) return;
+        if (!result) return false;
 
         if (!result.canceled && result.filePath) {
-            const json = this.scene.toJSON();
-            await this.desktopBridge.writeTextFile(result.filePath, json);
-            SceneManager.getInstance().setActiveScene(this.scene, result.filePath);
-            this.projectWindow.refresh();
+            SceneManager.getInstance().setActiveScene(this.scene);
+            await SceneManager.getInstance().saveSceneAs(result.filePath);
+            await this.projectWindow.refresh();
+            this.dirtyState.markPersisted();
+            await this.desktopBridge.discardRecovery(this.projectPath);
+            return true;
         }
+        return false;
     }
 
     private applySpawnPosition(go: GameObject, worldPosition?: THREE.Vector3, parent?: any) {
@@ -6109,21 +6492,34 @@ export class Editor {
     private createPrimitive(type: string, parent?: any, worldPosition?: THREE.Vector3) {
         const go = new GameObject(type);
         if (type === 'Cube') {
-            go.addComponent(MeshRenderer);
+            const meshFilter = go.addComponent(MeshFilter);
+            meshFilter.setPrimitiveType('Cube');
+            const mr = go.addComponent(MeshRenderer);
+            mr.mesh.geometry = new THREE.BoxGeometry(1, 1, 1);
         } else if (type === 'Sphere') {
+            const meshFilter = go.addComponent(MeshFilter);
+            meshFilter.setPrimitiveType('Sphere');
             const mr = go.addComponent(MeshRenderer);
             mr.mesh.geometry = new THREE.SphereGeometry(0.5, 32, 32);
         } else if (type === 'Capsule') {
+            const meshFilter = go.addComponent(MeshFilter);
+            meshFilter.setPrimitiveType('Capsule');
             const mr = go.addComponent(MeshRenderer);
             mr.mesh.geometry = new THREE.CapsuleGeometry(0.5, 1, 4, 16);
         } else if (type === 'Cylinder') {
+            const meshFilter = go.addComponent(MeshFilter);
+            meshFilter.setPrimitiveType('Cylinder');
             const mr = go.addComponent(MeshRenderer);
             mr.mesh.geometry = new THREE.CylinderGeometry(0.5, 0.5, 2, 32);
         } else if (type === 'Plane') {
+            const meshFilter = go.addComponent(MeshFilter);
+            meshFilter.setPrimitiveType('Plane');
             const mr = go.addComponent(MeshRenderer);
             mr.mesh.geometry = new THREE.PlaneGeometry(1, 1);
             mr.mesh.rotateX(-Math.PI / 2);
         } else if (type === 'Quad') {
+            const meshFilter = go.addComponent(MeshFilter);
+            meshFilter.setPrimitiveType('Quad');
             const mr = go.addComponent(MeshRenderer);
             mr.mesh.geometry = new THREE.PlaneGeometry(1, 1);
         } else if (type === 'Camera') {
@@ -7165,11 +7561,7 @@ export class Editor {
 
                 // Restore scene size
                 if (this.renderer) {
-                    const w = this.sceneView.clientWidth;
-                    const h = this.sceneView.clientHeight;
-                    this.renderer.setSize(w, h);
-                    this.camera.aspect = w / h;
-                    this.camera.updateProjectionMatrix();
+                    this.scheduleViewportResize();
                 }
             } else {
                 tabGame.classList.add('active-tab');
@@ -7208,10 +7600,7 @@ export class Editor {
         if (val === 'free') {
             const w = container.clientWidth;
             const h = container.clientHeight;
-            this.renderer.setSize(w, h);
-            this.camera.aspect = w / h;
-            this.camera.updateProjectionMatrix();
-            if (this.composer) this.composer.setSize(w, h);
+            this.applyViewportSize(w, h, w / h);
         } else {
             let ratio = 16 / 9;
             if (val === '16:10') ratio = 16 / 10;
@@ -7233,10 +7622,7 @@ export class Editor {
             gameContainer.style.width = targetWidth + 'px';
             gameContainer.style.height = targetHeight + 'px';
 
-            this.renderer.setSize(targetWidth, targetHeight);
-            this.camera.aspect = ratio;
-            this.camera.updateProjectionMatrix();
-            if (this.composer) this.composer.setSize(targetWidth, targetHeight);
+            this.applyViewportSize(targetWidth, targetHeight, ratio);
         }
     }
 
@@ -7360,7 +7746,10 @@ export class Editor {
 
     private createDemoScene() {
         const cube = new GameObject("Cube");
-        cube.addComponent(MeshRenderer);
+        const cubeFilter = cube.addComponent(MeshFilter);
+        cubeFilter.setPrimitiveType('Cube');
+        const cubeRenderer = cube.addComponent(MeshRenderer);
+        cubeRenderer.mesh.geometry = new THREE.BoxGeometry(1, 1, 1);
         const autoRotate = ScriptRegistry.create("AutoRotate", cube);
         if (autoRotate) {
             cube.addComponent(autoRotate);
@@ -7369,6 +7758,8 @@ export class Editor {
         this.scene.addGameObject(cube);
 
         const floor = new GameObject("Floor");
+        const floorFilter = floor.addComponent(MeshFilter);
+        floorFilter.setPrimitiveType('Plane');
         const renderer = floor.addComponent(MeshRenderer);
         renderer.mesh.geometry = new THREE.PlaneGeometry(10, 10);
         renderer.mesh.rotateX(-Math.PI / 2);
@@ -7381,22 +7772,50 @@ export class Editor {
         EditorSettings.floatingPanels = this.normalizeFloatingPanelMap(EditorSettings.floatingPanels);
         this.applyFloatingPanelStates();
         this.clampLayoutSizes();
-        this.resize();
+        this.scheduleViewportResize();
+    }
+
+    private initializeViewportResizePolicy() {
+        if (typeof ResizeObserver !== 'undefined') {
+            this.viewportResizeObserver = new ResizeObserver(() => this.scheduleViewportResize());
+            [
+                this.sceneView,
+                document.getElementById('game-view'),
+                document.getElementById('game-view-container'),
+                document.getElementById('viewport-content')
+            ].forEach((host) => {
+                if (host) this.viewportResizeObserver?.observe(host);
+            });
+        }
+    }
+
+    private scheduleViewportResize() {
+        if (this.viewportResizeFrame !== null) return;
+        this.viewportResizeFrame = requestAnimationFrame(() => {
+            this.viewportResizeFrame = null;
+            if (this.isGameView) this.updateGameViewResolution();
+            else this.resize();
+        });
+    }
+
+    private applyViewportSize(width: number, height: number, aspect = width / height) {
+        const nextSize = calculateViewportSize(width, height, window.devicePixelRatio);
+        if (!nextSize || viewportSizeEquals(this.appliedViewportSize, nextSize)) return;
+        this.appliedViewportSize = nextSize;
+        this.renderer.setPixelRatio(nextSize.pixelRatio);
+        this.renderer.setSize(nextSize.width, nextSize.height, false);
+        this.composer.setPixelRatio(nextSize.pixelRatio);
+        this.composer.setSize(nextSize.width, nextSize.height);
+        if (this.ssaoPass) this.ssaoPass.setSize(nextSize.width, nextSize.height);
+        this.camera.aspect = aspect;
+        this.camera.updateProjectionMatrix();
+        if (this.sceneGizmo) this.sceneGizmo.onResize();
     }
 
     private resize() {
         const container = this.renderer.domElement.parentElement;
         if (!container) return;
-        const width = container.clientWidth;
-        const height = container.clientHeight;
-        this.renderer.setSize(width, height);
-        this.composer.setSize(width, height);
-        if (this.ssaoPass) {
-            this.ssaoPass.setSize(width, height);
-        }
-        this.camera.aspect = width / height;
-        this.camera.updateProjectionMatrix();
-        if (this.sceneGizmo) this.sceneGizmo.onResize();
+        this.applyViewportSize(container.clientWidth, container.clientHeight);
     }
 
     private animate() {
@@ -7414,6 +7833,10 @@ export class Editor {
             this.scene.update(deltaTime);
             this.stepRequest = false;
         } else {
+            if (this.cameraGO?.enabled) {
+                this.cameraGO.update(deltaTime);
+                this.cameraGO.lateUpdate();
+            }
             this.gizmos.forEach((helper, comp) => {
                 if ((comp as any).updateGizmo) (comp as any).updateGizmo(helper);
                 //@ts-ignore
@@ -7875,12 +8298,12 @@ export class Editor {
         };
     }
 
-    public isPropertyOverridden(target: any, propertyKey: string): boolean {
+    public async isPropertyOverridden(target: any, propertyKey: string): Promise<boolean> {
         const gameObject = target instanceof GameObject ? target : target?.gameObject;
         const prefabRoot = gameObject ? this.getPrefabApplyTargetRoot(gameObject) : null;
         if (!gameObject || !prefabRoot) return false;
 
-        const prefabData = this.getPrefabSourceData(gameObject, prefabRoot);
+        const prefabData = await this.getPrefabSourceData(gameObject, prefabRoot);
         if (!prefabData) return false;
 
         if (target === gameObject) {
@@ -7902,28 +8325,28 @@ export class Editor {
             return false;
         }
 
-        const componentData = this.getPrefabComponentData(gameObject, target.constructor?.name, prefabRoot);
+        const componentData = await this.getPrefabComponentData(gameObject, target.constructor?.name, prefabRoot);
         if (!componentData) return true;
 
         const serializedTarget = target.serialize?.().data ?? {};
         return this.areOverrideValuesDifferent(serializedTarget[propertyKey], componentData.data?.[propertyKey]);
     }
 
-    public getPrefabComponentStatus(component: any): 'default' | 'overridden' | 'added' {
+    public async getPrefabComponentStatus(component: any): Promise<'default' | 'overridden' | 'added'> {
         const gameObject = component?.gameObject;
         const prefabRoot = gameObject ? this.getPrefabApplyTargetRoot(gameObject) : null;
         if (!gameObject || !prefabRoot) return 'default';
 
-        const prefabData = this.getPrefabSourceData(gameObject, prefabRoot);
+        const prefabData = await this.getPrefabSourceData(gameObject, prefabRoot);
         if (!prefabData) return 'default';
 
         if (component === gameObject.transform) {
-            return ['position', 'rotation', 'scale'].some((key) => this.isPropertyOverridden(component, key))
+            return ['position', 'rotation', 'scale'].some( async(key) => await this.isPropertyOverridden(component, key))
                 ? 'overridden'
                 : 'default';
         }
 
-        const componentData = this.getPrefabComponentData(gameObject, component.constructor?.name, prefabRoot);
+        const componentData = await this.getPrefabComponentData(gameObject, component.constructor?.name, prefabRoot);
         if (!componentData) return 'added';
 
         const serializedTarget = component.serialize?.().data ?? {};
@@ -7932,7 +8355,7 @@ export class Editor {
             : 'default';
     }
 
-    public getPrefabOverrideSummary(gameObject: GameObject): { total: number; addedComponents: number; removedComponents: number } {
+    public async getPrefabOverrideSummary(gameObject: GameObject): Promise<{ total: number; addedComponents: number; removedComponents: number }> {
         const prefabRoot = this.getPrefabApplyTargetRoot(gameObject);
         if (!prefabRoot) {
             return { total: 0, addedComponents: 0, removedComponents: 0 };
@@ -7942,23 +8365,23 @@ export class Editor {
         let addedComponents = 0;
         let removedComponents = 0;
 
-        ['name', 'tag', 'layer', 'isStatic', 'enabled'].forEach((key) => {
-            if (this.isPropertyOverridden(gameObject, key)) total += 1;
+        ['name', 'tag', 'layer', 'isStatic', 'enabled'].forEach( async(key) => {
+            if (await this.isPropertyOverridden(gameObject, key)) total += 1;
         });
 
-        ['position', 'rotation', 'scale'].forEach((key) => {
-            if (this.isPropertyOverridden(gameObject.transform, key)) total += 1;
+        ['position', 'rotation', 'scale'].forEach( async(key) => {
+            if (await this.isPropertyOverridden(gameObject.transform, key)) total += 1;
         });
 
-        gameObject.components.forEach((component) => {
+        gameObject.components.forEach( async(component) => {
             if (component === gameObject.transform) return;
-            const status = this.getPrefabComponentStatus(component);
+            const status = await this.getPrefabComponentStatus(component);
             if (status === 'default') return;
             total += 1;
             if (status === 'added') addedComponents += 1;
         });
 
-        const prefabData = this.getPrefabSourceData(gameObject, prefabRoot);
+        const prefabData = await this.getPrefabSourceData(gameObject, prefabRoot);
         if (prefabData?.components) {
             prefabData.components.forEach((componentData: any) => {
                 const exists = gameObject.components.some((component) => component.constructor.name === componentData.type);
@@ -7969,20 +8392,20 @@ export class Editor {
             });
         }
 
-        const childDiff = this.getPrefabChildPathDiff(gameObject, prefabRoot);
+        const childDiff = await this.getPrefabChildPathDiff(gameObject, prefabRoot);
         total += childDiff.added.length + childDiff.removed.length;
 
         return { total, addedComponents, removedComponents };
     }
 
-    public getPrefabOverrideEntries(gameObject: GameObject): Array<Record<string, any>> {
+    public async getPrefabOverrideEntries(gameObject: GameObject): Promise<Array<Record<string, any>>> {
         const prefabRoot = this.getPrefabApplyTargetRoot(gameObject);
         if (!prefabRoot) return [];
 
         const contextInfo = this.getPrefabContextInfo(gameObject);
         const entries: Array<Record<string, any>> = [];
-        ['name', 'tag', 'layer', 'isStatic', 'enabled'].forEach((key) => {
-            if (this.isPropertyOverridden(gameObject, key)) {
+        ['name', 'tag', 'layer', 'isStatic', 'enabled'].forEach( async(key) => {
+            if (await this.isPropertyOverridden(gameObject, key)) {
                 entries.push({
                     key: `go:${key}`,
                     label: `GameObject.${key}`,
@@ -7994,8 +8417,8 @@ export class Editor {
             }
         });
 
-        ['position', 'rotation', 'scale'].forEach((key) => {
-            if (this.isPropertyOverridden(gameObject.transform, key)) {
+        ['position', 'rotation', 'scale'].forEach( async(key) => {
+            if (await this.isPropertyOverridden(gameObject.transform, key)) {
                 entries.push({
                     key: `transform:${key}`,
                     label: `Transform.${key}`,
@@ -8007,9 +8430,9 @@ export class Editor {
             }
         });
 
-        gameObject.components.forEach((component) => {
+        gameObject.components.forEach( async(component) => {
             if (component === gameObject.transform) return;
-            const status = this.getPrefabComponentStatus(component);
+            const status = await this.getPrefabComponentStatus(component);
             if (status === 'default') return;
 
             entries.push({
@@ -8022,7 +8445,7 @@ export class Editor {
             });
         });
 
-        const prefabData = this.getPrefabSourceData(gameObject, prefabRoot);
+        const prefabData = await this.getPrefabSourceData(gameObject, prefabRoot);
         if (prefabData?.components) {
             prefabData.components.forEach((componentData: any) => {
                 const exists = gameObject.components.some((component) => component.constructor.name === componentData.type);
@@ -8039,7 +8462,7 @@ export class Editor {
             });
         }
 
-        const childDiff = this.getPrefabChildPathDiff(gameObject, prefabRoot);
+        const childDiff = await this.getPrefabChildPathDiff(gameObject, prefabRoot);
         childDiff.added.forEach((entry) => {
             entries.push({
                 key: `child-added:${entry.path}`,
@@ -8065,8 +8488,8 @@ export class Editor {
         return entries;
     }
 
-    public getBulkPrefabOverrideEntries(gameObject: GameObject, sourceEntries?: Array<Record<string, any>>): Array<Record<string, any>> {
-        const entries = sourceEntries ?? this.getPrefabOverrideEntries(gameObject);
+    public async getBulkPrefabOverrideEntries(gameObject: GameObject, sourceEntries?: Array<Record<string, any>>): Promise<Array<Record<string, any>>> {
+        const entries = sourceEntries ?? await this.getPrefabOverrideEntries(gameObject);
         const childAddedEntries = entries
             .filter((entry) => entry.kind === 'child-added' && typeof entry.childGameObject !== 'undefined')
             .sort((left, right) => this.getPrefabOverridePathDepth(left.childGameObject ? this.getPrefabChildPathForEntry(left) : left.childPath) - this.getPrefabOverridePathDepth(right.childGameObject ? this.getPrefabChildPathForEntry(right) : right.childPath));
@@ -8087,8 +8510,8 @@ export class Editor {
         });
     }
 
-    public getPrefabOverrideGroups(gameObject: GameObject): Array<{ id: string; label: string; entries: Array<Record<string, any>> }> {
-        const entries = this.getPrefabOverrideEntries(gameObject);
+    public async getPrefabOverrideGroups(gameObject: GameObject): Promise<Array<{ id: string; label: string; entries: Array<Record<string, any>> }>> {
+        const entries = await this.getPrefabOverrideEntries(gameObject);
         const groups = [
             {
                 id: 'properties',
@@ -8118,12 +8541,12 @@ export class Editor {
         return groups.filter((group) => group.entries.length > 0);
     }
 
-    public applyPrefabOverrideAction(gameObject: GameObject, entry: Record<string, any>, mode: 'revert' | 'apply' = 'revert'): void {
+    public async applyPrefabOverrideAction(gameObject: GameObject, entry: Record<string, any>, mode: 'revert' | 'apply' = 'revert'): Promise<void> {
         if (mode === 'revert') {
             const label = typeof entry.label === 'string' ? entry.label : entry.kind;
-            this.executeSceneMutationCommand(`Revert Prefab Override (${label})`, () => {
-                const didMutate = this.executePrefabOverrideAction(gameObject, entry, mode);
-                this.finalizePrefabOverrideMutation(gameObject, mode, didMutate);
+            this.executeSceneMutationCommand(`Revert Prefab Override (${label})`,  async() => {
+                const didMutate = await this.executePrefabOverrideAction(gameObject, entry, mode);
+                await this.finalizePrefabOverrideMutation(gameObject, mode, didMutate);
                 return didMutate;
             });
             return;
@@ -8132,33 +8555,33 @@ export class Editor {
         const prefabRoot = this.getPrefabApplyTargetRoot(gameObject);
         if (prefabRoot?.sourceAssetPath) {
             const label = typeof entry.label === 'string' ? entry.label : entry.kind;
-            this.executePrefabBackedSceneMutationCommand(`Apply Prefab Override (${label})`, prefabRoot.sourceAssetPath, () => {
-                const didMutate = this.executePrefabOverrideAction(gameObject, entry, mode);
-                this.finalizePrefabOverrideMutation(gameObject, mode, didMutate);
+            await this.executePrefabBackedSceneMutationCommand(`Apply Prefab Override (${label})`, prefabRoot.sourceAssetPath,  async() => {
+                const didMutate = await this.executePrefabOverrideAction(gameObject, entry, mode);
+                await this.finalizePrefabOverrideMutation(gameObject, mode, didMutate);
                 return didMutate;
             });
             return;
         }
 
-        const didMutate = this.executePrefabOverrideAction(gameObject, entry, mode);
-        this.finalizePrefabOverrideMutation(gameObject, mode, didMutate);
+        const didMutate = await this.executePrefabOverrideAction(gameObject, entry, mode);
+        await this.finalizePrefabOverrideMutation(gameObject, mode, didMutate);
     }
 
-    public applyAllPrefabOverrides(
+    public async applyAllPrefabOverrides(
         gameObject: GameObject,
         mode: 'revert' | 'apply' = 'revert',
         sourceEntries?: Array<Record<string, any>>
-    ): void {
+    ): Promise<void> {
         if (mode === 'revert') {
-            this.executeSceneMutationCommand('Revert Prefab Overrides', () => {
-                const entries = this.getBulkPrefabOverrideEntries(gameObject, sourceEntries);
+            this.executeSceneMutationCommand('Revert Prefab Overrides',  async() => {
+                const entries = await this.getBulkPrefabOverrideEntries(gameObject, sourceEntries);
                 let didMutate = false;
 
-                entries.forEach((entry) => {
-                    didMutate = this.executePrefabOverrideAction(gameObject, entry, mode) || didMutate;
+                entries.forEach( async(entry) => {
+                    didMutate = await this.executePrefabOverrideAction(gameObject, entry, mode) || didMutate;
                 });
 
-                this.finalizePrefabOverrideMutation(gameObject, mode, didMutate);
+                await this.finalizePrefabOverrideMutation(gameObject, mode, didMutate);
                 return didMutate;
             });
             return;
@@ -8166,65 +8589,65 @@ export class Editor {
 
         const prefabRoot = this.getPrefabApplyTargetRoot(gameObject);
         if (prefabRoot?.sourceAssetPath) {
-            this.executePrefabBackedSceneMutationCommand('Apply Prefab Overrides', prefabRoot.sourceAssetPath, () => {
-                const entries = this.getBulkPrefabOverrideEntries(gameObject, sourceEntries);
+            await this.executePrefabBackedSceneMutationCommand('Apply Prefab Overrides', prefabRoot.sourceAssetPath,  async() => {
+                const entries = await this.getBulkPrefabOverrideEntries(gameObject, sourceEntries);
                 let didMutate = false;
 
-                entries.forEach((entry) => {
-                    didMutate = this.executePrefabOverrideAction(gameObject, entry, mode) || didMutate;
+                entries.forEach( async(entry) => {
+                    didMutate = await this.executePrefabOverrideAction(gameObject, entry, mode) || didMutate;
                 });
 
-                this.finalizePrefabOverrideMutation(gameObject, mode, didMutate);
+                await this.finalizePrefabOverrideMutation(gameObject, mode, didMutate);
                 return didMutate;
             });
             return;
         }
 
-        const entries = this.getBulkPrefabOverrideEntries(gameObject, sourceEntries);
+        const entries = await this.getBulkPrefabOverrideEntries(gameObject, sourceEntries);
         let didMutate = false;
 
-        entries.forEach((entry) => {
-            didMutate = this.executePrefabOverrideAction(gameObject, entry, mode) || didMutate;
+        entries.forEach( async(entry) => {
+            didMutate = await this.executePrefabOverrideAction(gameObject, entry, mode) || didMutate;
         });
 
-        this.finalizePrefabOverrideMutation(gameObject, mode, didMutate);
+        await this.finalizePrefabOverrideMutation(gameObject, mode, didMutate);
     }
 
-    private executePrefabOverrideAction(gameObject: GameObject, entry: Record<string, any>, mode: 'revert' | 'apply'): boolean {
+    private async executePrefabOverrideAction(gameObject: GameObject, entry: Record<string, any>, mode: 'revert' | 'apply'): Promise<boolean> {
         const prefabRoot = this.getPrefabApplyTargetRoot(gameObject);
         if (!prefabRoot) return false;
 
         if (mode === 'apply') {
             switch (entry.kind) {
                 case 'gameObject-property':
-                    PrefabManager.applyGameObjectPropertyToPrefab(gameObject, entry.propertyKey, prefabRoot);
+                    await PrefabManager.applyGameObjectPropertyToPrefab(gameObject, entry.propertyKey, prefabRoot);
                     break;
                 case 'transform-property':
-                    PrefabManager.applyTransformPropertyToPrefab(gameObject, entry.propertyKey, prefabRoot);
+                    await PrefabManager.applyTransformPropertyToPrefab(gameObject, entry.propertyKey, prefabRoot);
                     break;
                 case 'component-overridden':
                     if (entry.component) {
-                        PrefabManager.applyComponentToPrefab(gameObject, entry.component, prefabRoot);
+                        await PrefabManager.applyComponentToPrefab(gameObject, entry.component, prefabRoot);
                     }
                     break;
                 case 'component-added':
                     if (entry.component) {
-                        PrefabManager.applyComponentToPrefab(gameObject, entry.component, prefabRoot);
+                        await PrefabManager.applyComponentToPrefab(gameObject, entry.component, prefabRoot);
                     }
                     break;
                 case 'component-removed':
                     if (entry.componentType) {
-                        PrefabManager.removeComponentFromPrefab(gameObject, entry.componentType, prefabRoot);
+                        await PrefabManager.removeComponentFromPrefab(gameObject, entry.componentType, prefabRoot);
                     }
                     break;
             case 'child-added':
                 if (entry.childGameObject) {
-                    PrefabManager.applyChildToPrefab(gameObject, entry.childGameObject, entry.parentPath ?? null, prefabRoot);
+                    await PrefabManager.applyChildToPrefab(gameObject, entry.childGameObject, entry.parentPath ?? null, prefabRoot);
                 }
                 break;
             case 'child-removed':
                 if (entry.childPath) {
-                    PrefabManager.removeChildFromPrefab(gameObject, entry.childPath, prefabRoot);
+                    await PrefabManager.removeChildFromPrefab(gameObject, entry.childPath, prefabRoot);
                 }
                 break;
                 default:
@@ -8235,14 +8658,14 @@ export class Editor {
 
         switch (entry.kind) {
             case 'gameObject-property':
-                PrefabManager.revertGameObjectPropertyToPrefab(gameObject, entry.propertyKey, prefabRoot);
+                await PrefabManager.revertGameObjectPropertyToPrefab(gameObject, entry.propertyKey, prefabRoot);
                 break;
             case 'transform-property':
-                PrefabManager.revertTransformPropertyToPrefab(gameObject, entry.propertyKey, prefabRoot);
+                await PrefabManager.revertTransformPropertyToPrefab(gameObject, entry.propertyKey, prefabRoot);
                 break;
             case 'component-overridden':
                 if (entry.component) {
-                    PrefabManager.revertComponentToPrefab(gameObject, entry.component, prefabRoot);
+                    await PrefabManager.revertComponentToPrefab(gameObject, entry.component, prefabRoot);
                 }
                 break;
             case 'component-added':
@@ -8252,7 +8675,7 @@ export class Editor {
                 break;
             case 'component-removed':
                 if (entry.componentType) {
-                    PrefabManager.restoreRemovedComponent(gameObject, entry.componentType, prefabRoot);
+                    await PrefabManager.restoreRemovedComponent(gameObject, entry.componentType, prefabRoot);
                 }
                 break;
             case 'child-added':
@@ -8266,7 +8689,7 @@ export class Editor {
                 break;
             case 'child-removed':
                 if (entry.childPath) {
-                    PrefabManager.restoreRemovedChild(gameObject, entry.childPath, prefabRoot);
+                    await PrefabManager.restoreRemovedChild(gameObject, entry.childPath, prefabRoot);
                 }
                 break;
             default:
@@ -8275,16 +8698,16 @@ export class Editor {
         return true;
     }
 
-    public applyPrefabInstanceToSource(gameObject: GameObject): void {
+    public async applyPrefabInstanceToSource(gameObject: GameObject): Promise<void> {
         const prefabRoot = this.getPrefabApplyTargetRoot(gameObject);
         if (!prefabRoot) return;
 
         if (prefabRoot.sourceAssetPath) {
-            this.executePrefabBackedSceneMutationCommand(`Apply Prefab ${prefabRoot.name}`, prefabRoot.sourceAssetPath, () => {
-                const targetPath = this.projectWindow.savePrefabInstanceToSource(prefabRoot);
+            await this.executePrefabBackedSceneMutationCommand(`Apply Prefab ${prefabRoot.name}`, prefabRoot.sourceAssetPath,  async() => {
+                const targetPath = await this.projectWindow.savePrefabInstanceToSource(prefabRoot);
                 if (!targetPath) return false;
                 this.syncPrefabInstancesFromSource(targetPath);
-                this.projectWindow.refreshAssetRuntime(targetPath);
+                await this.projectWindow.refreshAssetRuntime(targetPath);
                 this.hierarchyWindow.refresh();
                 this.inspectorWindow.refresh();
                 return true;
@@ -8292,31 +8715,31 @@ export class Editor {
             return;
         }
 
-        const targetPath = this.projectWindow.savePrefabInstanceToSource(prefabRoot);
+        const targetPath = await this.projectWindow.savePrefabInstanceToSource(prefabRoot);
         if (!targetPath) return;
         this.syncPrefabInstancesFromSource(targetPath);
-        this.projectWindow.refreshAssetRuntime(targetPath);
+        await this.projectWindow.refreshAssetRuntime(targetPath);
         this.hierarchyWindow.refresh();
         this.inspectorWindow.refresh();
     }
 
-    public applyPrefabSelectionToTarget(gameObject: GameObject): void {
+    public async applyPrefabSelectionToTarget(gameObject: GameObject): Promise<void> {
         const prefabRoot = this.getPrefabApplyTargetRoot(gameObject);
         if (!prefabRoot) return;
 
         if (prefabRoot === gameObject) {
-            this.applyPrefabInstanceToSource(gameObject);
+            await this.applyPrefabInstanceToSource(gameObject);
             return;
         }
 
-        this.applyAllPrefabOverrides(gameObject, 'apply');
+        await this.applyAllPrefabOverrides(gameObject, 'apply');
     }
 
     public revertPrefabSelectionToTarget(gameObject: GameObject): void {
         const prefabRoot = this.getPrefabApplyTargetRoot(gameObject);
         if (!prefabRoot) return;
-        this.executeSceneMutationCommand(`Revert Prefab ${prefabRoot.name}`, () => {
-            PrefabManager.revertToPrefab(gameObject, prefabRoot);
+        this.executeSceneMutationCommand(`Revert Prefab ${prefabRoot.name}`,  async() => {
+            await PrefabManager.revertToPrefab(gameObject, prefabRoot);
             this.hierarchyWindow.refresh();
             this.inspectorWindow.refresh();
             return true;
@@ -8330,12 +8753,101 @@ export class Editor {
         this.selectGameObject(null);
         this.hierarchyWindow.refresh();
         CommandHistory.clear();
+        this.dirtyState.reset();
     }
 
-    public saveActiveScene() {
+    public async saveActiveScene(): Promise<boolean> {
         const path = SceneManager.getInstance().getActiveScenePath();
-        if (path) SceneManager.getInstance().saveScene(path);
-        else this.showSaveSceneAsDialog();
+        try {
+            if (path) {
+                await SceneManager.getInstance().saveScene(path);
+                this.dirtyState.markPersisted();
+                await this.desktopBridge.discardRecovery(this.projectPath);
+                return true;
+            }
+            return await this.showSaveSceneAsDialog();
+        } catch (error) {
+            console.error('Scene save failed:', error);
+            if ((error as { code?: string })?.code === 'REVISION_CONFLICT') {
+                const saveCopy = confirm(
+                    'This scene changed on disk after you opened it. Your edits were not overwritten. Save your version as a new file?'
+                );
+                if (saveCopy) return await this.showSaveSceneAsDialog();
+            }
+            return false;
+        }
+    }
+
+    private async resolveStartupScenePath(): Promise<string | null> {
+        const projectFile = await this.desktopBridge.pathJoin(this.projectPath, 'project.json');
+        const projectText = await this.desktopBridge.readTextFile(projectFile);
+        if (projectText) {
+            try {
+                const project = JSON.parse(projectText) as {
+                    scenes?: Array<{ path?: unknown }>;
+                };
+                const configuredPath = project.scenes?.find(
+                    (entry) => typeof entry?.path === 'string' && entry.path.length > 0
+                )?.path;
+                if (typeof configuredPath === 'string') {
+                    const normalized = configuredPath.replace(/\\/g, '/');
+                    const segments = normalized.split('/');
+                    if (
+                        !normalized.startsWith('/')
+                        && !/^[A-Za-z]:/.test(normalized)
+                        && segments.every((segment) => segment !== '..' && segment !== '')
+                    ) {
+                        const candidate = await this.desktopBridge.pathJoin(this.projectPath, ...segments);
+                        if (await this.desktopBridge.fileExists(candidate)) return candidate;
+                    }
+                }
+            } catch (error) {
+                console.warn('Project scene configuration could not be read:', error);
+            }
+        }
+
+        const legacyPath = await this.desktopBridge.pathJoin(
+            this.projectPath,
+            'Assets',
+            'Scenes',
+            'SampleScene.json'
+        );
+        return await this.desktopBridge.fileExists(legacyPath) ? legacyPath : null;
+    }
+
+    private async restorePersistedSceneOnStartup(): Promise<void> {
+        const defaultPath = await this.resolveStartupScenePath();
+        if (!defaultPath) return;
+        try {
+            const scene = await SceneManager.getInstance().loadScene(defaultPath);
+            this.setScene(scene);
+        } catch (error) {
+            console.error('The last saved scene could not be reopened:', error);
+        }
+    }
+
+    private async offerRecovery(): Promise<void> {
+        const scenePath = SceneManager.getInstance().getActiveScenePath();
+        const recovery = await this.desktopBridge.readRecovery(this.projectPath, scenePath);
+        if (!recovery) return;
+        const harnessConfirm = (window as any).electronAPI?.launchArgs?.confirmResponse;
+        const shouldRestore = harnessConfirm === 'true'
+            ? true
+            : harnessConfirm === 'false'
+                ? false
+                : confirm('A newer autosave recovery snapshot is available. Restore it?');
+        if (shouldRestore) {
+            try {
+                this.scene.loadFromJSON(JSON.stringify(recovery.scene));
+                this.hierarchyWindow.refresh();
+                this.inspectorWindow.refresh();
+                this.dirtyState.markChanged();
+            } catch (error) {
+                console.warn('Recovery snapshot could not be restored:', error);
+            }
+        } else {
+            await this.desktopBridge.discardRecovery(this.projectPath);
+        }
     }
 
     public getActiveUIHostElement(): HTMLElement | null {
@@ -8836,12 +9348,12 @@ export class Editor {
         }
     }
 
-    private getPrefabSourceData(gameObject: GameObject, prefabRootOverride: GameObject | null = null): any | null {
-        return PrefabManager.getPrefabNodeDataForGameObject(gameObject, prefabRootOverride);
+    private async getPrefabSourceData(gameObject: GameObject, prefabRootOverride: GameObject | null = null): Promise<any | null> {
+        return await PrefabManager.getPrefabNodeDataForGameObject(gameObject, prefabRootOverride);
     }
 
-    private getPrefabComponentData(gameObject: GameObject, componentType: string, prefabRootOverride: GameObject | null = null): any | null {
-        const prefabData = this.getPrefabSourceData(gameObject, prefabRootOverride);
+    private async getPrefabComponentData(gameObject: GameObject, componentType: string, prefabRootOverride: GameObject | null = null): Promise<any | null> {
+        const prefabData = await this.getPrefabSourceData(gameObject, prefabRootOverride);
         if (!prefabData?.components) return null;
         return prefabData.components.find((component: any) => component.type === componentType) ?? null;
     }
@@ -8863,11 +9375,11 @@ export class Editor {
         return Object.fromEntries(normalizedEntries);
     }
 
-    private getPrefabChildPathDiff(gameObject: GameObject, prefabRootOverride: GameObject | null = null): {
+    private async getPrefabChildPathDiff(gameObject: GameObject, prefabRootOverride: GameObject | null = null): Promise<{
         added: Array<{ path: string; label: string; parentPath: string | null; childGameObject: GameObject }>;
         removed: Array<{ path: string; label: string }>;
-    } {
-        const prefabData = this.getPrefabSourceData(gameObject, prefabRootOverride);
+    }> {
+        const prefabData = await this.getPrefabSourceData(gameObject, prefabRootOverride);
         if (!prefabData) {
             return { added: [], removed: [] };
         }
@@ -8919,14 +9431,14 @@ export class Editor {
         return entries;
     }
 
-    private finalizePrefabOverrideMutation(gameObject: GameObject, mode: 'revert' | 'apply', didMutate: boolean): void {
+    private async finalizePrefabOverrideMutation(gameObject: GameObject, mode: 'revert' | 'apply', didMutate: boolean): Promise<void> {
         if (!didMutate) return;
 
         if (mode === 'apply') {
             const prefabRoot = this.getPrefabApplyTargetRoot(gameObject);
             if (prefabRoot?.sourceAssetPath) {
                 this.syncPrefabInstancesFromSource(prefabRoot.sourceAssetPath);
-                this.projectWindow.refreshAssetRuntime(prefabRoot.sourceAssetPath);
+                await this.projectWindow.refreshAssetRuntime(prefabRoot.sourceAssetPath);
             }
         }
 
@@ -9007,11 +9519,11 @@ export class Editor {
     }
 
     private syncPrefabInstancesFromSource(sourcePath: string) {
-        this.scene.gameObjects.forEach((candidate) => {
+        this.scene.gameObjects.forEach( async(candidate) => {
             if (candidate.sourceAssetType !== 'prefab') return;
             if (!candidate.sourceAssetPath) return;
             if (candidate.sourceAssetPath !== sourcePath) return;
-            PrefabManager.revertToPrefab(candidate);
+            await PrefabManager.revertToPrefab(candidate);
         });
     }
 

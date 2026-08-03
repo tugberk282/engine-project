@@ -4,6 +4,7 @@ import { AssetDatabase } from './AssetDatabase';
 import {
     normalizePrefabData,
     normalizeSerializedGameObject,
+    PREFAB_FORMAT_VERSION,
     PREFAB_SCHEMA_VERSION,
     resolveSerializedReferences,
     stableStringify,
@@ -21,10 +22,12 @@ export class Prefab {
     public name: string;
     public sourcePath: string | null = null;
     private data: any;
+    private prefabId: string;
     private schemaVersion: string = PREFAB_SCHEMA_VERSION;
 
     constructor(name: string, gameObject: GameObject) {
         this.name = name;
+        this.prefabId = crypto.randomUUID();
         this.data = normalizeSerializedGameObject(gameObject.serialize(), gameObject.name);
     }
 
@@ -50,7 +53,11 @@ export class Prefab {
 
     public static instantiateManyData(dataList: any[], options?: { externalIdMap?: Map<string, GameObject> }): GameObject[] {
         const idMap = options?.externalIdMap ?? new Map<string, GameObject>();
-        const pendingComponents: Array<{ component: any; data: Record<string, unknown> }> = [];
+        const pendingComponents: Array<{
+            component: any;
+            data: Record<string, unknown>;
+            template: SerializedComponentData;
+        }> = [];
         const instantiated: GameObject[] = [];
         const roots: GameObject[] = [];
 
@@ -70,6 +77,8 @@ export class Prefab {
      */
     public toJSON(): string {
         return stableStringify({
+            formatVersion: PREFAB_FORMAT_VERSION,
+            prefabId: this.prefabId,
             version: this.schemaVersion,
             name: this.name,
             data: this.data
@@ -83,19 +92,20 @@ export class Prefab {
         try {
             const parsed = JSON.parse(json);
             const normalized = normalizePrefabData(parsed);
-            return this.createFromData(normalized.name, normalized.data, normalized.version);
+            return this.createFromData(normalized.name, normalized.data, normalized.version, normalized.prefabId);
         } catch (error) {
             console.error('Failed to parse prefab JSON. Falling back to empty prefab root.', error);
             const fallback = normalizePrefabData(null);
-            return this.createFromData(fallback.name, fallback.data, fallback.version);
+            return this.createFromData(fallback.name, fallback.data, fallback.version, fallback.prefabId);
         }
     }
 
-    private static createFromData(name: string, data: SerializedGameObjectData, schemaVersion: string): Prefab {
+    private static createFromData(name: string, data: SerializedGameObjectData, schemaVersion: string, prefabId: string): Prefab {
         const prefab = Object.create(Prefab.prototype) as Prefab;
         prefab.name = name;
         prefab.sourcePath = null;
         prefab.data = data;
+        prefab.prefabId = prefabId;
         prefab.schemaVersion = schemaVersion;
         return prefab;
     }
@@ -104,7 +114,11 @@ export class Prefab {
         data: SerializedGameObjectData,
         parent: GameObject | null,
         idMap: Map<string, GameObject>,
-        pendingComponents: Array<{ component: any; data: Record<string, unknown> }>,
+        pendingComponents: Array<{
+            component: any;
+            data: Record<string, unknown>;
+            template: SerializedComponentData;
+        }>,
         instantiated: GameObject[]
     ): GameObject {
         const go = new GameObject(data.name);
@@ -131,15 +145,21 @@ export class Prefab {
         );
         go.transform.scale.fromArray(data.transform.scale);
 
+        const unknownComponents: SerializedComponentData[] = [];
         data.components.forEach((componentData: SerializedComponentData) => {
             const ComponentClass = ScriptRegistry.getComponentClass(componentData.type);
-            if (!ComponentClass) return;
+            if (!ComponentClass) {
+                unknownComponents.push(componentData);
+                return;
+            }
             const component = go.addComponent(ComponentClass, { invokeLifecycle: false });
             pendingComponents.push({
                 component,
-                data: componentData.data
+                data: componentData.data,
+                template: componentData
             });
         });
+        go.preserveSerializedData(data, unknownComponents);
 
         if (parent) {
             go.transform.setParent(parent.transform, false);
@@ -155,9 +175,14 @@ export class Prefab {
 
     private static resolvePendingComponentData(
         idMap: Map<string, GameObject>,
-        pendingComponents: Array<{ component: any; data: Record<string, unknown> }>
+        pendingComponents: Array<{
+            component: any;
+            data: Record<string, unknown>;
+            template: SerializedComponentData;
+        }>
     ): void {
         pendingComponents.forEach((entry) => {
+            entry.component.preserveSerializedData?.(entry.template);
             const resolvedData = resolveSerializedReferences(entry.data, idMap);
             const payload = (resolvedData && typeof resolvedData === 'object' && !Array.isArray(resolvedData))
                 ? resolvedData as Record<string, unknown>
@@ -192,18 +217,18 @@ export class PrefabManager {
         return PathUtils.join(this.desktopBridge.getCurrentWorkingDirectory(), 'Assets');
     }
 
-    public static savePrefab(name: string, gameObject: GameObject): void {
+    public static async savePrefab(name: string, gameObject: GameObject): Promise<void> {
         const prefab = new Prefab(name, gameObject);
         this.prefabs.set(name, prefab);
 
         // Save to Filesystem if available
         if (this.desktopFileSystem) {
             const assetsPath = this.getAssetsPath();
-            if (!this.desktopFileSystem.existsSync(assetsPath)) this.desktopFileSystem.mkdirSync(assetsPath);
+            if (!await this.desktopFileSystem.exists(assetsPath)) await this.desktopFileSystem.mkdir(assetsPath);
 
             const filePath = PathUtils.join(assetsPath, `${name}.prefab`);
             prefab.sourcePath = filePath;
-            this.desktopFileSystem.writeFileSync(filePath, prefab.toJSON());
+            await this.desktopFileSystem.writeFile(filePath, prefab.toJSON());
             console.log(`Saved prefab to ${filePath}`);
         } else {
             // Fallback to localStorage
@@ -211,18 +236,18 @@ export class PrefabManager {
         }
     }
 
-    public static savePrefabInstance(gameObject: GameObject): string | null {
+    public static async savePrefabInstance(gameObject: GameObject): Promise<string | null> {
         const targetPath = gameObject.sourceAssetPath
             ?? PathUtils.join(this.getAssetsPath(), `${gameObject.prefabSource || gameObject.name}.prefab`);
         const prefabName = PathUtils.basename(targetPath, '.prefab');
         const prefab = new Prefab(prefabName, gameObject);
         prefab.sourcePath = targetPath;
         this.prefabs.set(prefabName, prefab);
-        this.desktopFileSystem.writeFileSync(targetPath, prefab.toJSON(), 'utf8');
+        await this.desktopFileSystem.writeFile(targetPath, prefab.toJSON(), 'utf8');
         return targetPath;
     }
 
-    public static loadPrefab(name: string): Prefab | null {
+    public static async loadPrefab(name: string): Promise<Prefab | null> {
         // Try memory first
         if (this.prefabs.has(name)) {
             return this.prefabs.get(name)!;
@@ -233,9 +258,9 @@ export class PrefabManager {
             const assetsPath = this.getAssetsPath();
             const filePath = PathUtils.join(assetsPath, `${name}.prefab`);
 
-            if (this.desktopFileSystem.existsSync(filePath)) {
+            if (await this.desktopFileSystem.exists(filePath)) {
                 try {
-                    const json = this.desktopFileSystem.readFileSync(filePath, 'utf8');
+                    const json = await this.desktopFileSystem.readFile(filePath, 'utf8');
                     const prefab = Prefab.fromJSON(json);
                     prefab.sourcePath = filePath;
                     this.prefabs.set(name, prefab);
@@ -257,11 +282,11 @@ export class PrefabManager {
         return null;
     }
 
-    public static loadPrefabFromPath(filePath: string): Prefab | null {
-        if (!this.desktopFileSystem.existsSync(filePath)) return null;
+    public static async loadPrefabFromPath(filePath: string): Promise<Prefab | null> {
+        if (!await this.desktopFileSystem.exists(filePath)) return null;
 
         try {
-            const json = this.desktopFileSystem.readFileSync(filePath, 'utf8');
+            const json = await this.desktopFileSystem.readFile(filePath, 'utf8');
             const prefab = Prefab.fromJSON(json);
             prefab.sourcePath = filePath;
             this.prefabs.set(prefab.name, prefab);
@@ -412,14 +437,14 @@ export class PrefabManager {
         gameObject.overrides.clear();
     }
 
-    public static getAllPrefabNames(): string[] {
+    public static async getAllPrefabNames(): Promise<string[]> {
         const names: Set<string> = new Set();
 
         // Get from Filesystem
         if (this.desktopFileSystem) {
             const assetsPath = this.getAssetsPath();
-            if (this.desktopFileSystem.existsSync(assetsPath)) {
-                const files = this.desktopFileSystem.readdirSync(assetsPath);
+            if (await this.desktopFileSystem.exists(assetsPath)) {
+                const files = await this.desktopFileSystem.readdir(assetsPath);
                 files.forEach((file: string) => {
                     if (file.endsWith('.prefab')) {
                         names.add(file.replace('.prefab', ''));
@@ -439,36 +464,36 @@ export class PrefabManager {
         return Array.from(names);
     }
 
-    public static deletePrefab(name: string): void {
+    public static async deletePrefab(name: string): Promise<void> {
         this.prefabs.delete(name);
 
         if (this.desktopFileSystem) {
             const assetsPath = this.getAssetsPath();
             const filePath = PathUtils.join(assetsPath, `${name}.prefab`);
-            if (this.desktopFileSystem.existsSync(filePath)) {
-                this.desktopFileSystem.unlinkSync(filePath);
+            if (await this.desktopFileSystem.exists(filePath)) {
+                await this.desktopFileSystem.unlink(filePath);
 
                 // Also delete .meta if it exists
                 const metaPath = filePath + '.meta';
-                if (this.desktopFileSystem.existsSync(metaPath)) this.desktopFileSystem.unlinkSync(metaPath);
+                if (await this.desktopFileSystem.exists(metaPath)) await this.desktopFileSystem.unlink(metaPath);
             }
         }
 
         localStorage.removeItem(`prefab_${name}`);
     }
 
-    public static revertToPrefab(gameObject: GameObject, prefabRootOverride: GameObject | null = null): void {
-        const data = this.getPrefabNodeDataForGameObject(gameObject, prefabRootOverride);
+    public static async revertToPrefab(gameObject: GameObject, prefabRootOverride: GameObject | null = null): Promise<void> {
+        const data = await this.getPrefabNodeDataForGameObject(gameObject, prefabRootOverride);
         if (!data) return;
         this.applySerializedData(gameObject, data, { preserveSourceLink: true });
     }
 
-    public static revertGameObjectPropertyToPrefab(
+    public static async revertGameObjectPropertyToPrefab(
         gameObject: GameObject,
         propertyKey: 'name' | 'tag' | 'layer' | 'enabled',
         prefabRootOverride: GameObject | null = null
-    ): void {
-        const prefabData = this.getPrefabNodeDataForGameObject(gameObject, prefabRootOverride);
+    ): Promise<void> {
+        const prefabData = await this.getPrefabNodeDataForGameObject(gameObject, prefabRootOverride);
         if (!prefabData) return;
 
         (gameObject as any)[propertyKey] = prefabData[propertyKey];
@@ -478,12 +503,12 @@ export class PrefabManager {
         gameObject.overrides.delete(propertyKey);
     }
 
-    public static revertTransformPropertyToPrefab(
+    public static async revertTransformPropertyToPrefab(
         gameObject: GameObject,
         propertyKey: 'position' | 'rotation' | 'scale',
         prefabRootOverride: GameObject | null = null
-    ): void {
-        const prefabData = this.getPrefabNodeDataForGameObject(gameObject, prefabRootOverride);
+    ): Promise<void> {
+        const prefabData = await this.getPrefabNodeDataForGameObject(gameObject, prefabRootOverride);
         if (!prefabData?.transform) return;
 
         if (propertyKey === 'rotation') {
@@ -499,8 +524,8 @@ export class PrefabManager {
         gameObject.transform.overrides?.delete(propertyKey);
     }
 
-    public static revertComponentToPrefab(gameObject: GameObject, component: any, prefabRootOverride: GameObject | null = null): void {
-        const prefabData = this.getPrefabNodeDataForGameObject(gameObject, prefabRootOverride);
+    public static async revertComponentToPrefab(gameObject: GameObject, component: any, prefabRootOverride: GameObject | null = null): Promise<void> {
+        const prefabData = await this.getPrefabNodeDataForGameObject(gameObject, prefabRootOverride);
         if (!prefabData) return;
         const typeName = component.constructor.name;
 
@@ -518,14 +543,14 @@ export class PrefabManager {
 
         const compData = prefabData.components.find((c: any) => c.type === typeName);
         if (compData && component.deserialize) {
-            const payload = this.resolveComponentPayloadForInstance(gameObject, compData.data, prefabRootOverride);
+            const payload = await this.resolveComponentPayloadForInstance(gameObject, compData.data, prefabRootOverride);
             component.deserialize(payload);
             if (component.overrides) component.overrides.clear();
         }
     }
 
-    public static restoreRemovedComponent(gameObject: GameObject, componentType: string, prefabRootOverride: GameObject | null = null): void {
-        const prefabData = this.getPrefabNodeDataForGameObject(gameObject, prefabRootOverride);
+    public static async restoreRemovedComponent(gameObject: GameObject, componentType: string, prefabRootOverride: GameObject | null = null): Promise<void> {
+        const prefabData = await this.getPrefabNodeDataForGameObject(gameObject, prefabRootOverride);
         if (!prefabData?.components) return;
 
         const existing = gameObject.components.find((component) => component.constructor.name === componentType);
@@ -539,14 +564,14 @@ export class PrefabManager {
 
         const component = gameObject.addComponent(ComponentClass, { invokeLifecycle: false });
         if (component.deserialize) {
-            const payload = this.resolveComponentPayloadForInstance(gameObject, compData.data, prefabRootOverride);
+            const payload = await this.resolveComponentPayloadForInstance(gameObject, compData.data, prefabRootOverride);
             component.deserialize(payload);
         }
         gameObject.flushPendingLifecycle(false);
     }
 
-    public static restoreRemovedChild(gameObject: GameObject, childPath: string, prefabRootOverride: GameObject | null = null): void {
-        const prefabData = this.getPrefabNodeDataForGameObject(gameObject, prefabRootOverride);
+    public static async restoreRemovedChild(gameObject: GameObject, childPath: string, prefabRootOverride: GameObject | null = null): Promise<void> {
+        const prefabData = await this.getPrefabNodeDataForGameObject(gameObject, prefabRootOverride);
         if (!prefabData?.children) return;
 
         const childData = this.findPrefabChildDataByPath(prefabData, childPath);
@@ -560,7 +585,7 @@ export class PrefabManager {
         const existing = parentGameObject.transform.children.find((child) => this.getPathSegment(child.gameObject) === targetSegment);
         if (existing) return;
 
-        const externalIdMap = this.buildInstancePrefabReferenceMap(gameObject, prefabRootOverride);
+        const externalIdMap = await this.buildInstancePrefabReferenceMap(gameObject, prefabRootOverride);
         const child = Prefab.instantiateData(childData, { externalIdMap });
         if (gameObject.scene) {
             gameObject.scene.addGameObject(child);
@@ -568,23 +593,23 @@ export class PrefabManager {
         child.transform.setParent(parentGameObject.transform, false);
     }
 
-    public static applyGameObjectPropertyToPrefab(
+    public static async applyGameObjectPropertyToPrefab(
         gameObject: GameObject,
         propertyKey: 'name' | 'tag' | 'layer' | 'enabled',
         prefabRootOverride: GameObject | null = null
-    ): void {
-        this.updatePrefabNodeData(gameObject, (prefabData) => {
+    ): Promise<void> {
+        await this.updatePrefabNodeData(gameObject, (prefabData) => {
             if (!prefabData) return;
             prefabData[propertyKey] = (gameObject as any)[propertyKey];
         }, prefabRootOverride);
     }
 
-    public static applyTransformPropertyToPrefab(
+    public static async applyTransformPropertyToPrefab(
         gameObject: GameObject,
         propertyKey: 'position' | 'rotation' | 'scale',
         prefabRootOverride: GameObject | null = null
-    ): void {
-        this.updatePrefabNodeData(gameObject, (prefabData) => {
+    ): Promise<void> {
+        await this.updatePrefabNodeData(gameObject, (prefabData) => {
             if (!prefabData) return;
             prefabData.transform = prefabData.transform || {};
             if (propertyKey === 'rotation') {
@@ -599,8 +624,8 @@ export class PrefabManager {
         }, prefabRootOverride);
     }
 
-    public static applyComponentToPrefab(gameObject: GameObject, component: any, prefabRootOverride: GameObject | null = null): void {
-        this.updatePrefabNodeData(gameObject, (prefabData) => {
+    public static async applyComponentToPrefab(gameObject: GameObject, component: any, prefabRootOverride: GameObject | null = null): Promise<void> {
+        await this.updatePrefabNodeData(gameObject, (prefabData) => {
             if (!prefabData) return;
             prefabData.components = prefabData.components || [];
             const serialized = component.serialize();
@@ -613,20 +638,20 @@ export class PrefabManager {
         }, prefabRootOverride);
     }
 
-    public static removeComponentFromPrefab(gameObject: GameObject, componentType: string, prefabRootOverride: GameObject | null = null): void {
-        this.updatePrefabNodeData(gameObject, (prefabData) => {
+    public static async removeComponentFromPrefab(gameObject: GameObject, componentType: string, prefabRootOverride: GameObject | null = null): Promise<void> {
+        await this.updatePrefabNodeData(gameObject, (prefabData) => {
             if (!prefabData) return;
             prefabData.components = (prefabData.components || []).filter((entry: any) => entry.type !== componentType);
         }, prefabRootOverride);
     }
 
-    public static applyChildToPrefab(
+    public static async applyChildToPrefab(
         gameObject: GameObject,
         childGameObject: GameObject,
         parentPath: string | null = null,
         prefabRootOverride: GameObject | null = null
-    ): void {
-        this.updatePrefabNodeData(gameObject, (prefabData) => {
+    ): Promise<void> {
+        await this.updatePrefabNodeData(gameObject, (prefabData) => {
             if (!prefabData) return;
             const parentData = parentPath ? this.findPrefabChildDataByPath(prefabData, parentPath) : prefabData;
             if (!parentData) return;
@@ -644,8 +669,8 @@ export class PrefabManager {
         }, prefabRootOverride);
     }
 
-    public static removeChildFromPrefab(gameObject: GameObject, childPath: string, prefabRootOverride: GameObject | null = null): void {
-        this.updatePrefabNodeData(gameObject, (prefabData) => {
+    public static async removeChildFromPrefab(gameObject: GameObject, childPath: string, prefabRootOverride: GameObject | null = null): Promise<void> {
+        await this.updatePrefabNodeData(gameObject, (prefabData) => {
             if (!prefabData) return;
             const parentPath = this.getParentPath(childPath);
             const parentData = parentPath ? this.findPrefabChildDataByPath(prefabData, parentPath) : prefabData;
@@ -674,23 +699,23 @@ export class PrefabManager {
         return chain;
     }
 
-    public static getPrefabRootDataForGameObject(gameObject: GameObject, prefabRootOverride: GameObject | null = null): any | null {
+    public static async getPrefabRootDataForGameObject(gameObject: GameObject, prefabRootOverride: GameObject | null = null): Promise<any | null> {
         const prefabRoot = prefabRootOverride && this.getPrefabOwnershipChain(gameObject).includes(prefabRootOverride)
             ? prefabRootOverride
             : this.getPrefabOwningRoot(gameObject);
         if (!prefabRoot) return null;
         const prefab = prefabRoot.sourceAssetPath
-            ? this.loadPrefabFromPath(prefabRoot.sourceAssetPath)
-            : this.loadPrefab(prefabRoot.prefabSource!);
+            ? await this.loadPrefabFromPath(prefabRoot.sourceAssetPath)
+            : await this.loadPrefab(prefabRoot.prefabSource!);
         return prefab ? (prefab as any).data : null;
     }
 
-    public static getPrefabNodeDataForGameObject(gameObject: GameObject, prefabRootOverride: GameObject | null = null): any | null {
+    public static async getPrefabNodeDataForGameObject(gameObject: GameObject, prefabRootOverride: GameObject | null = null): Promise<any | null> {
         const prefabRoot = prefabRootOverride && this.getPrefabOwnershipChain(gameObject).includes(prefabRootOverride)
             ? prefabRootOverride
             : this.getPrefabOwningRoot(gameObject);
         if (!prefabRoot) return null;
-        const prefabData = this.getPrefabRootDataForGameObject(gameObject, prefabRoot);
+        const prefabData = await this.getPrefabRootDataForGameObject(gameObject, prefabRoot);
         if (!prefabData) return null;
         if (prefabRoot === gameObject) return prefabData;
 
@@ -713,15 +738,15 @@ export class PrefabManager {
         return this.findCurrentChildByPath(root, childPath);
     }
 
-    private static resolveComponentPayloadForInstance(
+    private static async resolveComponentPayloadForInstance(
         gameObject: GameObject,
         data: unknown,
         prefabRootOverride: GameObject | null = null
-    ): Record<string, unknown> {
+    ): Promise<Record<string, unknown>> {
         const payload = (data && typeof data === 'object' && !Array.isArray(data))
             ? data as Record<string, unknown>
             : {};
-        const idMap = this.buildInstancePrefabReferenceMap(gameObject, prefabRootOverride);
+        const idMap = await this.buildInstancePrefabReferenceMap(gameObject, prefabRootOverride);
         const resolved = resolveSerializedReferences(payload, idMap);
         if (resolved && typeof resolved === 'object' && !Array.isArray(resolved)) {
             return resolved as Record<string, unknown>;
@@ -729,15 +754,15 @@ export class PrefabManager {
         return {};
     }
 
-    private static buildInstancePrefabReferenceMap(
+    private static async buildInstancePrefabReferenceMap(
         gameObject: GameObject,
         prefabRootOverride: GameObject | null = null
-    ): Map<string, GameObject> {
+    ): Promise<Map<string, GameObject>> {
         const map = new Map<string, GameObject>();
         const prefabRoot = this.resolvePrefabRootForGameObject(gameObject, prefabRootOverride);
         if (!prefabRoot) return map;
 
-        const prefabRootData = this.getPrefabRootDataForGameObject(gameObject, prefabRoot);
+        const prefabRootData = await this.getPrefabRootDataForGameObject(gameObject, prefabRoot);
         if (!prefabRootData || typeof prefabRootData !== 'object') return map;
         if (typeof prefabRootData.id === 'string') {
             map.set(prefabRootData.id, prefabRoot);
@@ -771,19 +796,19 @@ export class PrefabManager {
             : this.getPrefabOwningRoot(gameObject);
     }
 
-    private static updatePrefabNodeData(
+    private static async updatePrefabNodeData(
         gameObject: GameObject,
         updater: (prefabData: any) => void,
         prefabRootOverride: GameObject | null = null
-    ): void {
+    ): Promise<void> {
         const prefabRoot = prefabRootOverride && this.getPrefabOwnershipChain(gameObject).includes(prefabRootOverride)
             ? prefabRootOverride
             : this.getPrefabOwningRoot(gameObject);
         if (!prefabRoot) return;
 
         const prefab = prefabRoot.sourceAssetPath
-            ? this.loadPrefabFromPath(prefabRoot.sourceAssetPath)
-            : this.loadPrefab(prefabRoot.prefabSource!);
+            ? await this.loadPrefabFromPath(prefabRoot.sourceAssetPath)
+            : await this.loadPrefab(prefabRoot.prefabSource!);
         if (!prefab) return;
 
         const rootData = (prefab as any).data;
@@ -791,13 +816,13 @@ export class PrefabManager {
             ? rootData
             : this.findPrefabChildDataByPath(rootData, this.getRelativePrefabPath(prefabRoot, gameObject) ?? '');
         updater(nodeData);
-        this.persistPrefab(prefab);
+        await this.persistPrefab(prefab);
     }
 
-    private static persistPrefab(prefab: Prefab): void {
+    private static async persistPrefab(prefab: Prefab): Promise<void> {
         this.prefabs.set(prefab.name, prefab);
         if (prefab.sourcePath) {
-            this.desktopFileSystem.writeFileSync(prefab.sourcePath, prefab.toJSON(), 'utf8');
+            await this.desktopFileSystem.writeFile(prefab.sourcePath, prefab.toJSON(), 'utf8');
             return;
         }
 

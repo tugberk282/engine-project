@@ -1,5 +1,7 @@
 export const SCENE_SCHEMA_VERSION = '1.4';
+export const SCENE_FORMAT_VERSION = 1;
 export const PREFAB_SCHEMA_VERSION = '1.2';
+export const PREFAB_FORMAT_VERSION = 1;
 
 export type SourceAssetType = 'prefab' | 'model' | null;
 
@@ -12,6 +14,7 @@ export interface SerializedReferenceData {
 export interface SerializedComponentData {
     type: string;
     data: Record<string, unknown>;
+    [key: string]: unknown;
 }
 
 export interface SerializedTransformData {
@@ -34,6 +37,7 @@ export interface SerializedGameObjectData {
     transform: SerializedTransformData;
     components: SerializedComponentData[];
     children: SerializedGameObjectData[];
+    [key: string]: unknown;
 }
 
 export interface SerializedSceneEnvironment {
@@ -84,12 +88,18 @@ export interface SerializedSceneEnvironment {
 }
 
 export interface SerializedSceneData {
+    formatVersion: number;
+    sceneId: string;
+    name: string;
     version: string;
     environment: SerializedSceneEnvironment;
     gameObjects: SerializedGameObjectData[];
+    [key: string]: unknown;
 }
 
 export interface SerializedPrefabData {
+    formatVersion: number;
+    prefabId: string;
     version: string;
     name: string;
     data: SerializedGameObjectData;
@@ -153,7 +163,7 @@ function normalizeReference(value: Record<string, unknown>): SerializedReference
     return normalized;
 }
 
-function normalizeArbitraryData(value: unknown): unknown {
+function normalizeArbitraryData(value: unknown, seen: Set<object> = new Set()): unknown {
     if (value === null) return null;
 
     const valueType = typeof value;
@@ -162,25 +172,44 @@ function normalizeArbitraryData(value: unknown): unknown {
     }
 
     if (Array.isArray(value)) {
-        return value.map((entry) => normalizeArbitraryData(entry));
+        if (seen.has(value)) return null;
+        seen.add(value);
+        const normalized = value.map((entry) => normalizeArbitraryData(entry, seen));
+        seen.delete(value);
+        return normalized;
     }
 
     const objectValue = asObject(value);
     if (!objectValue) return null;
+    if (seen.has(objectValue)) return null;
 
     const reference = normalizeReference(objectValue);
     if (reference) {
         return reference;
     }
 
+    seen.add(objectValue);
     const normalized: Record<string, unknown> = {};
     for (const [key, entry] of Object.entries(objectValue)) {
-        const normalizedEntry = normalizeArbitraryData(entry);
+        const normalizedEntry = normalizeArbitraryData(entry, seen);
         if (normalizedEntry !== undefined) {
             normalized[key] = normalizedEntry;
         }
     }
+    seen.delete(objectValue);
     return normalized;
+}
+
+export function mergePreservingUnknown(template: unknown, current: unknown): unknown {
+    const templateObject = asObject(template);
+    const currentObject = asObject(current);
+    if (!templateObject || !currentObject) return current;
+
+    const merged: Record<string, unknown> = { ...templateObject };
+    for (const [key, value] of Object.entries(currentObject)) {
+        merged[key] = mergePreservingUnknown(templateObject[key], value);
+    }
+    return merged;
 }
 
 function normalizeComponent(componentValue: unknown): SerializedComponentData | null {
@@ -193,7 +222,9 @@ function normalizeComponent(componentValue: unknown): SerializedComponentData | 
     const rawData = asObject(componentObject.data) ?? {};
     const normalizedData = normalizeArbitraryData(rawData);
     const normalizedObject = asObject(normalizedData) ?? {};
+    const preserved = asObject(normalizeArbitraryData(componentObject)) ?? {};
     return {
+        ...preserved,
         type,
         data: normalizedObject
     };
@@ -207,12 +238,15 @@ export function normalizeSerializedGameObject(data: unknown, fallbackName: strin
 
     const components = componentsData
         .map((entry) => normalizeComponent(entry))
-        .filter((entry): entry is SerializedComponentData => entry !== null);
+        .filter((entry): entry is SerializedComponentData => entry !== null && entry.type !== 'Transform');
 
     const children = childrenData.map((entry) => normalizeSerializedGameObject(entry));
     const id = asString(objectData.id, crypto.randomUUID());
 
+    const preserved = asObject(normalizeArbitraryData(objectData)) ?? {};
+    const preservedTransform = asObject(preserved.transform) ?? {};
     return {
+        ...preserved,
         id,
         name: asString(objectData.name, fallbackName),
         tag: asString(objectData.tag, 'Untagged'),
@@ -224,6 +258,7 @@ export function normalizeSerializedGameObject(data: unknown, fallbackName: strin
         sourceAssetGuid: asNullableString(objectData.sourceAssetGuid),
         sourceAssetType: normalizeSourceAssetType(objectData.sourceAssetType),
         transform: {
+            ...preservedTransform,
             position: asVector3(transformData.position, [0, 0, 0]),
             rotation: asVector3(transformData.rotation, [0, 0, 0]),
             scale: asVector3(transformData.scale, [1, 1, 1])
@@ -235,6 +270,10 @@ export function normalizeSerializedGameObject(data: unknown, fallbackName: strin
 
 export function normalizeSceneData(data: unknown): SerializedSceneData {
     const sceneObject = asObject(data) ?? {};
+    const formatVersion = asInteger(sceneObject.formatVersion, 0);
+    if (formatVersion > SCENE_FORMAT_VERSION) {
+        throw new Error(`SCENE_VERSION_UNSUPPORTED: ${formatVersion}`);
+    }
     const environmentObject = asObject(sceneObject.environment) ?? {};
 
     const bloomObject = asObject(environmentObject.bloom) ?? {};
@@ -248,7 +287,13 @@ export function normalizeSceneData(data: unknown): SerializedSceneData {
 
     const roots = Array.isArray(sceneObject.gameObjects) ? sceneObject.gameObjects : [];
 
-    return {
+    const preserved = asObject(normalizeArbitraryData(sceneObject)) ?? {};
+    const normalizedRoots = roots.map((root) => normalizeSerializedGameObject(root, 'GameObject'));
+    assertUniqueSerializedGameObjectIds(normalizedRoots);
+    const normalizedKnown = {
+        formatVersion: SCENE_FORMAT_VERSION,
+        sceneId: asString(sceneObject.sceneId, ''),
+        name: asString(sceneObject.name, 'Untitled'),
         version: asString(sceneObject.version, SCENE_SCHEMA_VERSION),
         environment: {
             ambientColor: asString(environmentObject.ambientColor, '#ffffff'),
@@ -296,8 +341,21 @@ export function normalizeSceneData(data: unknown): SerializedSceneData {
                 }
             }
         },
-        gameObjects: roots.map((root) => normalizeSerializedGameObject(root, 'GameObject'))
+        gameObjects: normalizedRoots
     };
+    return mergePreservingUnknown(preserved, normalizedKnown) as SerializedSceneData;
+}
+
+function assertUniqueSerializedGameObjectIds(roots: SerializedGameObjectData[]): void {
+    const seen = new Set<string>();
+    const visit = (node: SerializedGameObjectData): void => {
+        if (seen.has(node.id)) {
+            throw new Error(`SCENE_DUPLICATE_GAMEOBJECT_ID: ${node.id}`);
+        }
+        seen.add(node.id);
+        node.children.forEach(visit);
+    };
+    roots.forEach(visit);
 }
 
 export function normalizePrefabData(data: unknown): SerializedPrefabData {
@@ -306,14 +364,25 @@ export function normalizePrefabData(data: unknown): SerializedPrefabData {
     if (!objectData) {
         const fallbackRoot = normalizeSerializedGameObject({}, 'PrefabRoot');
         return {
+            formatVersion: PREFAB_FORMAT_VERSION,
+            prefabId: crypto.randomUUID(),
             version: PREFAB_SCHEMA_VERSION,
             name: 'Prefab',
             data: fallbackRoot
         };
     }
 
+    const formatVersion = asInteger(objectData.formatVersion, 0);
+    if (formatVersion > PREFAB_FORMAT_VERSION) {
+        throw new Error(`PREFAB_VERSION_UNSUPPORTED: ${formatVersion}`);
+    }
+
     if (objectData.data) {
+        const preserved = asObject(normalizeArbitraryData(objectData)) ?? {};
         return {
+            ...preserved,
+            formatVersion: PREFAB_FORMAT_VERSION,
+            prefabId: asString(objectData.prefabId, crypto.randomUUID()),
             version: asString(objectData.version, PREFAB_SCHEMA_VERSION),
             name: asString(objectData.name, 'Prefab'),
             data: normalizeSerializedGameObject(objectData.data, 'PrefabRoot')
@@ -322,6 +391,8 @@ export function normalizePrefabData(data: unknown): SerializedPrefabData {
 
     const singleRoot = normalizeSerializedGameObject(objectData, 'PrefabRoot');
     return {
+        formatVersion: PREFAB_FORMAT_VERSION,
+        prefabId: asString(objectData.prefabId, crypto.randomUUID()),
         version: PREFAB_SCHEMA_VERSION,
         name: asString(objectData.name, singleRoot.name || 'Prefab'),
         data: singleRoot
@@ -381,5 +452,5 @@ function sortKeysRecursively(value: unknown): unknown {
 }
 
 export function stableStringify(value: unknown, indent: number = 2): string {
-    return JSON.stringify(sortKeysRecursively(value), null, indent);
+    return `${JSON.stringify(sortKeysRecursively(value), null, indent)}\n`;
 }

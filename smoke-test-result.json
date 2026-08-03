@@ -1,0 +1,106 @@
+{
+  "ok": true,
+  "failures": [],
+  "checks": [
+    {
+      "name": "editor booted",
+      "pass": true,
+      "details": "window.Editor.instance exists"
+    },
+    {
+      "name": "scene view exists",
+      "pass": true,
+      "details": "#scene-view present"
+    },
+    {
+      "name": "hierarchy content exists",
+      "pass": true,
+      "details": "#hierarchy-content present"
+    },
+    {
+      "name": "inspector content exists",
+      "pass": true,
+      "details": "#inspector-content present"
+    },
+    {
+      "name": "default scene objects visible to runtime",
+      "pass": true,
+      "details": "scene.gameObjects should contain demo scene + editor camera"
+    },
+    {
+      "name": "hierarchy create menu opens",
+      "pass": true,
+      "details": "Cube item visible after pressing +"
+    },
+    {
+      "name": "cube creation changes scene object count",
+      "pass": true,
+      "details": "scene object count should increase"
+    },
+    {
+      "name": "cube becomes active selection",
+      "pass": true,
+      "details": "Cube selected"
+    },
+    {
+      "name": "hierarchy renders created cube row",
+      "pass": true,
+      "details": "Cube label should appear in hierarchy"
+    },
+    {
+      "name": "created cube has renderable geometry",
+      "pass": true,
+      "details": "geometry position attribute populated"
+    },
+    {
+      "name": "scene canvas attached",
+      "pass": true,
+      "details": "renderer canvas should be mounted in scene view"
+    },
+    {
+      "name": "scene canvas has size",
+      "pass": true,
+      "details": "681x347"
+    },
+    {
+      "name": "inspector add component button visible",
+      "pass": true,
+      "details": "Add Component button should exist for selection"
+    },
+    {
+      "name": "add component menu opens",
+      "pass": true,
+      "details": "#add-component-menu should appear"
+    },
+    {
+      "name": "light component option present",
+      "pass": true,
+      "details": "Light option should exist in add component menu"
+    },
+    {
+      "name": "light component added to cube",
+      "pass": true,
+      "details": "Light component present"
+    },
+    {
+      "name": "file menu opens on click",
+      "pass": true,
+      "details": "menu-open class should be applied"
+    }
+  ],
+  "snapshot": {
+    "launchError": null,
+    "bootstrapError": null,
+    "initialObjects": 3,
+    "afterCreateObjects": 4,
+    "selectedName": "Cube",
+    "hierarchyLabels": [
+      "[Mesh]",
+      "Cube",
+      "[Mesh]",
+      "Floor",
+      "[Mesh]",
+      "Cube"
+    ]
+  }
+}

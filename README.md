@@ -1,6 +1,6 @@
 ﻿# Engine Project
 
-Engine Project, Unity benzeri editor deneyimini Electron tabanli bir desktop uygulama olarak kurmayi hedefleyen bir oyun editoru ve runtime projesidir.
+Engine Project is a full-scale game engine and runtime built as an Electron-based desktop application, designed to reproduce Unity's editor workflows and core engine capabilities with one-to-one behavioral parity. It is not a demo, prototype, or interface mockup; its goal is to become a complete, production-ready engine for creating, editing, running, and building real games.
 
 ## Durum
 
@@ -78,6 +78,15 @@ Electron build:
 ```bash
 npm run electron:build
 ```
+
+Ilk buildable vertical slice:
+
+```bash
+npm run verify:vertical-slice
+```
+
+Kanonik ornek proje, paketli smoke adimlari ve bilinen parity bosluklari
+`docs/vertical-slice-build.md` dosyasinda belgelenmistir.
 
 ## Not
 

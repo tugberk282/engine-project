@@ -1,5 +1,6 @@
 import { EditorWindow } from './EditorWindow';
 import { GameObject } from '../engine/GameObject';
+import { escapeHtml } from './Security';
 import { Scene } from '../engine/Scene';
 import { Camera } from '../engine/components/Camera';
 import { Light, LightType } from '../engine/components/Light';
@@ -29,6 +30,8 @@ export class HierarchyWindow extends EditorWindow {
     private collapsedNodes: Set<string> = new Set(); // IDs of collapsed GOs
     private lastClickedNodeId: string | null = null;
     private keyboardRangeAnchorId: string | null = null;
+    private chromeBound: boolean = false;
+    private contextMenuReturnFocus: HTMLElement | null = null;
 
     constructor(parent: HTMLElement, scene: Scene, onSelect: (go: GameObject) => void) {
         super(parent, "Hierarchy");
@@ -38,31 +41,20 @@ export class HierarchyWindow extends EditorWindow {
     }
 
     public onGUI(): void {
-        const content = this.getContentArea();
-        content.innerHTML = `
-            <div class="hierarchy-toolbar">
-                <input type="text" id="hierarchy-search" placeholder="Search..." class="unity-input">
-                <button id="hierarchy-add-btn" class="unity-button" title="Create GameObject">+</button>
-            </div>
-            <div id="hierarchy-content" class="hierarchy-list"></div>
-        `;
+        this.bindPanelChrome();
 
-        const searchInput = content.querySelector('#hierarchy-search') as HTMLInputElement;
-        searchInput.oninput = () => this.refreshList();
-
-        const addBtn = content.querySelector('#hierarchy-add-btn') as HTMLElement;
-        addBtn.onclick = (e) => {
-            e.stopPropagation();
-            this.showCreateMenu(e.clientX, e.clientY, null);
-        };
+        const listEl = this.getHierarchyListElement();
+        if (!listEl) return;
 
         // Right-click on empty space = create at root
-        const listEl = content.querySelector('#hierarchy-content') as HTMLElement;
         listEl.tabIndex = 0;
+        listEl.setAttribute('role', 'tree');
+        listEl.setAttribute('aria-label', 'Scene Hierarchy');
         listEl.onkeydown = (e) => this.handleListKeyDown(e);
         listEl.oncontextmenu = (e) => {
             if (e.target === listEl) {
                 e.preventDefault();
+                this.contextMenuReturnFocus = listEl;
                 this.showCreateMenu(e.clientX, e.clientY, null);
             }
         };
@@ -123,6 +115,31 @@ export class HierarchyWindow extends EditorWindow {
         this.refreshList();
     }
 
+    private bindPanelChrome(): void {
+        if (this.chromeBound) return;
+        this.chromeBound = true;
+
+        const searchInput = this.container.querySelector('#hierarchy-search') as HTMLInputElement | null;
+        if (searchInput) {
+            searchInput.oninput = () => this.refreshList();
+        }
+
+        const addBtn = this.container.querySelector('#hierarchy-add-btn') as HTMLElement | null;
+        if (addBtn) {
+            addBtn.onclick = (e) => {
+                e.stopPropagation();
+                const rect = addBtn.getBoundingClientRect();
+                this.showCreateMenu(rect.left, rect.bottom + 2, null);
+            };
+        }
+    }
+
+    private getHierarchyListElement(): HTMLElement | null {
+        return this.getContentArea().id === 'hierarchy-content'
+            ? this.getContentArea()
+            : this.container.querySelector('#hierarchy-content') as HTMLElement | null;
+    }
+
     public setScene(scene: any): void {
         this.scene = scene;
         this.collapsedNodes.clear();
@@ -168,7 +185,7 @@ export class HierarchyWindow extends EditorWindow {
             empty.style.minHeight = '100px';
             empty.innerHTML = searchQuery
                 ? `
-                    <div class="editor-empty-state-title">No GameObjects matched "${searchQuery}"</div>
+                    <div class="editor-empty-state-title">No GameObjects matched "${escapeHtml(searchQuery)}"</div>
                     <div class="editor-empty-state-hint">Clear the search or create a new object from the + button or GameObject menu.</div>
                 `
                 : `
@@ -207,6 +224,11 @@ export class HierarchyWindow extends EditorWindow {
 
         container.classList.add('hierarchy-item');
         container.dataset.id = go.id;
+        container.id = `hierarchy-item-${go.id}`;
+        container.setAttribute('role', 'treeitem');
+        container.setAttribute('aria-level', String(depth + 1));
+        container.setAttribute('aria-selected', isActuallySelected ? 'true' : 'false');
+        if (hasChildren) container.setAttribute('aria-expanded', isCollapsed ? 'false' : 'true');
         if (isActuallySelected) container.classList.add('selected');
         container.style.paddingLeft = `${depth * 14 + 4}px`;
         container.style.display = 'flex';
@@ -421,6 +443,7 @@ export class HierarchyWindow extends EditorWindow {
         container.oncontextmenu = (e) => {
             e.preventDefault();
             e.stopPropagation();
+            this.contextMenuReturnFocus = this.getHierarchyListElement();
             this.showItemContextMenu(e.clientX, e.clientY, go);
         };
 
@@ -667,6 +690,9 @@ export class HierarchyWindow extends EditorWindow {
                     consume();
                     editor.setSelectionSiblingPosition?.('first');
                     this.refreshList();
+                } else {
+                    consume();
+                    selectNode(orderedNodes[0], event.shiftKey);
                 }
                 break;
             }
@@ -675,9 +701,28 @@ export class HierarchyWindow extends EditorWindow {
                     consume();
                     editor.setSelectionSiblingPosition?.('last');
                     this.refreshList();
+                } else {
+                    consume();
+                    selectNode(orderedNodes[orderedNodes.length - 1], event.shiftKey);
                 }
                 break;
             }
+            case ' ':
+                consume();
+                editor.selectGameObject?.(activeNode, commandKey);
+                this.lastClickedNodeId = activeNode.id;
+                this.keyboardRangeAnchorId = activeNode.id;
+                this.refreshList();
+                break;
+            case 'ContextMenu':
+                consume();
+                this.contextMenuReturnFocus = this.getHierarchyListElement();
+                {
+                    const row = this.container.querySelector(`[data-id="${activeNode.id}"]`) as HTMLElement | null;
+                    const rect = row?.getBoundingClientRect();
+                    this.showItemContextMenu(rect?.left ?? 0, rect?.bottom ?? 0, activeNode);
+                }
+                break;
             case 'F2': {
                 consume();
                 this.beginRenameForSelection();
@@ -764,7 +809,10 @@ export class HierarchyWindow extends EditorWindow {
         input.focus();
         input.select();
 
-        const commit = () => {
+        let finished = false;
+        const commit = (restoreTreeFocus = false) => {
+            if (finished) return;
+            finished = true;
             const newName = input.value.trim();
             if (newName && newName !== go.name) {
                 CommandHistory.execute(new RenameGameObjectCommand(go, newName));
@@ -772,11 +820,13 @@ export class HierarchyWindow extends EditorWindow {
             nameSpan.innerText = go.name;
             input.replaceWith(nameSpan);
             this.refreshList();
+            if (restoreTreeFocus) this.getHierarchyListElement()?.focus();
         };
-        input.onblur = commit;
+        input.onblur = () => commit(false);
         input.onkeydown = (e) => {
-            if (e.key === 'Enter') commit();
-            if (e.key === 'Escape') { input.value = go.name; commit(); }
+            e.stopPropagation();
+            if (e.key === 'Enter') commit(true);
+            if (e.key === 'Escape') { input.value = go.name; commit(true); }
         };
     }
 
@@ -1014,8 +1064,19 @@ export class HierarchyWindow extends EditorWindow {
     public showCreateMenu(x: number, y: number, parentGO: GameObject | null): void {
         this.removeExistingMenus();
         const menu = this.createMenu(x, y);
+        const editor = (window as any).Editor?.instance as any;
+        const parentTransform = parentGO?.transform ?? null;
+        const runEditorCreate = (cb: (editorInstance: any) => void): boolean => {
+            if (!editor) return false;
+            cb(editor);
+            this.refreshList();
+            return true;
+        };
 
         this.addMenuItem(menu, 'Create Empty', () => {
+            if (runEditorCreate((editorInstance) => editorInstance.createEmptyGameObject?.(parentTransform))) {
+                return;
+            }
             const go = new GameObject('GameObject');
             CommandHistory.execute(new CreateGameObjectCommand(go, this.scene, parentGO?.transform));
             this.onSelect(go);
@@ -1036,6 +1097,9 @@ export class HierarchyWindow extends EditorWindow {
 
         primitives.forEach(([label, type]) => {
             this.addMenuItem(menu, label, () => {
+                if (runEditorCreate((editorInstance) => editorInstance.createPrimitive?.(type, parentTransform))) {
+                    return;
+                }
                 const go = this.createPrimitive(type);
                 CommandHistory.execute(new CreateGameObjectCommand(go, this.scene, parentGO?.transform));
                 this.onSelect(go);
@@ -1046,6 +1110,9 @@ export class HierarchyWindow extends EditorWindow {
         this.addMenuSeparator(menu);
 
         this.addMenuItem(menu, 'Camera', () => {
+            if (runEditorCreate((editorInstance) => editorInstance.createPrimitive?.('Camera', parentTransform))) {
+                return;
+            }
             const go = new GameObject('Camera');
             go.addComponent(Camera);
             CommandHistory.execute(new CreateGameObjectCommand(go, this.scene, parentGO?.transform));
@@ -1054,6 +1121,9 @@ export class HierarchyWindow extends EditorWindow {
         });
 
         this.addMenuItem(menu, 'Directional Light', () => {
+            if (runEditorCreate((editorInstance) => editorInstance.createDirectionalLight?.(parentTransform))) {
+                return;
+            }
             const go = new GameObject('Directional Light');
             const light = go.addComponent(Light);
             light.setLightType(LightType.Directional);
@@ -1063,6 +1133,9 @@ export class HierarchyWindow extends EditorWindow {
         });
 
         this.addMenuItem(menu, 'Point Light', () => {
+            if (runEditorCreate((editorInstance) => editorInstance.createPointLight?.(parentTransform))) {
+                return;
+            }
             const go = new GameObject('Point Light');
             const light = go.addComponent(Light);
             light.setLightType(LightType.Point);
@@ -1072,6 +1145,9 @@ export class HierarchyWindow extends EditorWindow {
         });
 
         this.addMenuItem(menu, 'Spot Light', () => {
+            if (runEditorCreate((editorInstance) => editorInstance.createSpotLight?.(parentTransform))) {
+                return;
+            }
             const go = new GameObject('Spot Light');
             const light = go.addComponent(Light);
             light.setLightType(LightType.Spot);
@@ -1082,6 +1158,9 @@ export class HierarchyWindow extends EditorWindow {
         });
 
         this.addMenuItem(menu, 'Audio Source', () => {
+            if (runEditorCreate((editorInstance) => editorInstance.createAudioSourceObject?.(parentTransform))) {
+                return;
+            }
             const go = new GameObject('Audio Source');
             go.addComponent(AudioSource);
             CommandHistory.execute(new CreateGameObjectCommand(go, this.scene, parentGO?.transform));
@@ -1296,6 +1375,8 @@ export class HierarchyWindow extends EditorWindow {
     private createMenu(x: number, y: number): HTMLElement {
         const menu = document.createElement('div');
         menu.id = 'hierarchy-context-menu';
+        menu.setAttribute('role', 'menu');
+        menu.setAttribute('aria-label', 'Hierarchy actions');
         menu.style.cssText = `
             position: fixed; left: ${x}px; top: ${y}px;
             background: #2d2d2d; border: 1px solid #555;
@@ -1304,12 +1385,35 @@ export class HierarchyWindow extends EditorWindow {
             min-width: 180px; border-radius: 3px;
             font-family: 'Segoe UI', sans-serif;
         `;
+        menu.addEventListener('keydown', (event) => {
+            const items = Array.from(menu.querySelectorAll<HTMLElement>('[role="menuitem"]:not([aria-disabled="true"])'));
+            const index = items.indexOf(document.activeElement as HTMLElement);
+            if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+                event.preventDefault();
+                const direction = event.key === 'ArrowDown' ? 1 : -1;
+                items[(index + direction + items.length) % items.length]?.focus();
+            } else if (event.key === 'Home' || event.key === 'End') {
+                event.preventDefault();
+                items[event.key === 'Home' ? 0 : items.length - 1]?.focus();
+            } else if (event.key === 'Enter' || event.key === ' ') {
+                event.preventDefault();
+                (document.activeElement as HTMLElement | null)?.click();
+            } else if (event.key === 'Escape') {
+                event.preventDefault();
+                menu.remove();
+                this.contextMenuReturnFocus?.focus();
+            }
+        });
+        queueMicrotask(() => menu.querySelector<HTMLElement>('[role="menuitem"]:not([aria-disabled="true"])')?.focus());
         return menu;
     }
 
     private addMenuItem(menu: HTMLElement, label: string, cb: () => void, color?: string, disabled: boolean = false): void {
         const item = document.createElement('div');
         item.innerText = label;
+        item.setAttribute('role', 'menuitem');
+        item.setAttribute('aria-disabled', disabled ? 'true' : 'false');
+        item.tabIndex = disabled ? -1 : 0;
         item.style.cssText = `
             padding: 5px 14px; font-size: 12px; cursor: pointer;
             color: ${color || '#eee'}; white-space: nowrap;
@@ -1322,6 +1426,7 @@ export class HierarchyWindow extends EditorWindow {
             if (disabled) return;
             cb();
             menu.remove();
+            this.contextMenuReturnFocus?.focus();
         };
         menu.appendChild(item);
     }

@@ -47,6 +47,9 @@ export class Transform extends Component {
 
     public setParent(parent: Transform | null, worldPositionStays: boolean = true) {
         if (this._parent === parent) return;
+        if (parent === this || (parent && parent.isChildOf(this))) {
+            throw new Error('TRANSFORM_PARENT_CYCLE: A Transform cannot be parented to itself or its descendants.');
+        }
 
         // Remove from old parent
         if (this._parent) {

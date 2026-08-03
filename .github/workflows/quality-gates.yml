@@ -1,0 +1,106 @@
+name: Quality gates
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: quality-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  contracts:
+    name: Architecture, persistence, editor, runtime, and security
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22.12.0
+          cache: npm
+      - run: npm ci
+      - run: npm run test:release-integrity
+      - run: node --test test/ci-provenance.test.cjs
+      - run: npm run audit:release
+      - run: node --test test/architecture-contract.test.cjs test/persistence.test.cjs test/asset-database-contract.test.cjs test/editor-workflow-contract.test.cjs test/runtime-bridge.test.cjs test/diagnostics-lifecycle.test.cjs test/vertical-slice.test.cjs test/project-capabilities.test.cjs test/editor-html-injection.test.cjs
+
+  build:
+    name: Production renderer build
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22.12.0
+          cache: npm
+      - run: npm ci
+      - run: npm run test:source-built-smoke-contract
+      - name: Build source and run the bounded rendered editor smoke twice
+        run: npm run test:source-built-smoke
+        env:
+          ENGINE_SOURCE_SMOKE_RESULT: ${{ runner.temp }}/baseline-evidence/source-built-editor-smoke.json
+      - name: Enforce initial renderer bundle budget
+        shell: pwsh
+        run: |
+          $bytes = (Get-ChildItem dist/assets -File -Recurse | Measure-Object Length -Sum).Sum
+          if ($bytes -gt 6291456) { throw "Renderer assets are $bytes bytes; budget is 6291456 bytes." }
+          "Renderer assets: $bytes bytes"
+      - name: Record source-build provenance
+        run: node scripts/write-ci-provenance.cjs "${{ runner.temp }}/baseline-evidence/provenance.json" "${{ runner.temp }}/baseline-evidence/source-built-editor-smoke.json" dist
+      - name: Retain qualified source-build evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: source-build-baseline-${{ github.sha }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/baseline-evidence/
+            dist/
+          if-no-files-found: error
+          retention-days: 30
+
+  packaged-smoke:
+    name: Packaged launch and installer smoke
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22.12.0
+          cache: npm
+      - run: npm ci
+      - name: Assemble unpacked Windows application
+        run: npm run electron:build -- --win --dir --publish never
+      - name: Launch packaged application and run editor smoke
+        shell: pwsh
+        run: |
+          npm run test:packaged-smoke 2>&1 | Tee-Object -FilePath "${{ runner.temp }}/packaged-smoke.log"
+          if ($LASTEXITCODE -ne 0) { throw "Packaged smoke failed with exit code $LASTEXITCODE." }
+      - name: Build Windows installer
+        run: npm run electron:build -- --win nsis --publish never
+      - name: Verify install, installed launch, and uninstall
+        shell: pwsh
+        run: |
+          npm run test:installer 2>&1 | Tee-Object -FilePath "${{ runner.temp }}/installer-smoke.log"
+          if ($LASTEXITCODE -ne 0) { throw "Installer smoke failed with exit code $LASTEXITCODE." }
+      - name: Record package provenance
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force "${{ runner.temp }}/baseline-evidence" | Out-Null
+          Copy-Item "${{ runner.temp }}/packaged-smoke.log","${{ runner.temp }}/installer-smoke.log" "${{ runner.temp }}/baseline-evidence/"
+          node scripts/write-ci-provenance.cjs "${{ runner.temp }}/baseline-evidence/provenance.json" "${{ runner.temp }}/baseline-evidence/packaged-smoke.log" "${{ runner.temp }}/baseline-evidence/installer-smoke.log" "release/Tugberk Engine-Setup-0.1.0.exe" "release/win-unpacked/resources/app.asar"
+      - name: Retain qualified package and installer evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: windows-package-baseline-${{ github.sha }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/baseline-evidence/
+            release/Tugberk Engine-Setup-0.1.0.exe
+            release/win-unpacked/resources/app.asar
+          if-no-files-found: error
+          retention-days: 30

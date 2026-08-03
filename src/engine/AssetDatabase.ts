@@ -67,7 +67,16 @@ interface MetaReadResult {
     malformed: boolean;
 }
 
+interface AssetScanContext {
+    scannedCount: number;
+    readonly maxDepth: number;
+    readonly maxEntries: number;
+}
+
 export class AssetDatabase {
+    private static readonly MAX_SCAN_DEPTH = 64;
+    private static readonly MAX_SCAN_ENTRIES = 50_000;
+    private static readonly MAX_META_BYTES = 1024 * 1024;
     private static instance: AssetDatabase;
     private guidToPath: Map<string, string> = new Map();
     private pathToGuid: Map<string, string> = new Map();
@@ -90,7 +99,7 @@ export class AssetDatabase {
         return AssetDatabase.instance;
     }
 
-    public refresh(rootPath: string): AssetRefreshResult {
+    public async refresh(rootPath: string): Promise<AssetRefreshResult> {
         const emptyResult: AssetRefreshResult = {
             added: [],
             removed: [],
@@ -102,7 +111,7 @@ export class AssetDatabase {
             moved: [],
             scannedCount: 0
         };
-        if (!this.fs || !this.fs.existsSync(rootPath)) return emptyResult;
+        if (!this.fs || !await this.fs.exists(rootPath)) return emptyResult;
 
         const previousGuidToPath = new Map(this.guidToPath);
         const previousPathToFingerprint = new Map(this.pathToFingerprint);
@@ -115,7 +124,11 @@ export class AssetDatabase {
         this.repairedMalformedMetaPaths.clear();
         this.repairedDuplicateGuidPaths.clear();
         this.orphanMetaFilePaths.clear();
-        this.scanPath(rootPath, new Set<string>());
+        await this.scanPath(rootPath, new Set<string>(), 0, {
+            scannedCount: 0,
+            maxDepth: AssetDatabase.MAX_SCAN_DEPTH,
+            maxEntries: AssetDatabase.MAX_SCAN_ENTRIES
+        });
         this.rebuildDependencyGraph();
 
         const added: string[] = [];
@@ -208,12 +221,12 @@ export class AssetDatabase {
         };
     }
 
-    public updateMeta(assetPath: string, updater: (meta: AssetMeta) => AssetMeta | void): AssetMeta | null {
-        if (!this.fs || !this.fs.existsSync(assetPath)) return null;
+    public async updateMeta(assetPath: string, updater: (meta: AssetMeta) => AssetMeta | void): Promise<AssetMeta | null> {
+        if (!this.fs || !await this.fs.exists(assetPath)) return null;
 
         const currentMeta = this.pathToMeta.get(assetPath)
-            ?? this.readMeta(`${assetPath}.meta`).meta
-            ?? this.ensureMetaForPath(assetPath, this.fs.statSync(assetPath).isDirectory(), new Set(this.guidToPath.keys()));
+            ?? (await this.readMeta(`${assetPath}.meta`)).meta
+            ?? await this.ensureMetaForPath(assetPath, (await this.fs.stat(assetPath)).isDirectory(), new Set(this.guidToPath.keys()));
 
         const workingCopy: AssetMeta = JSON.parse(JSON.stringify(currentMeta));
         const result = updater(workingCopy);
@@ -232,7 +245,7 @@ export class AssetDatabase {
             importer: this.normalizeImporter(currentMeta.assetType, nextMeta.importer)
         };
 
-        this.writeMeta(assetPath, normalizedMeta);
+        await this.writeMeta(assetPath, normalizedMeta);
         this.pathToMeta.set(assetPath, normalizedMeta);
         this.guidToPath.set(normalizedMeta.guid, assetPath);
         this.pathToGuid.set(assetPath, normalizedMeta.guid);
@@ -304,33 +317,44 @@ export class AssetDatabase {
         this.pathToGuid = new Map(data.map(([guid, path]) => [path, guid]));
     }
 
-    private scanPath(assetPath: string, usedGuids: Set<string>) {
-        if (!this.fs.existsSync(assetPath)) return;
+    private async scanPath(assetPath: string, usedGuids: Set<string>, depth: number, context: AssetScanContext) {
+        if (!await this.fs.exists(assetPath)) return;
+        if (depth > context.maxDepth) {
+            throw new Error(`Asset scan depth exceeds ${context.maxDepth} at ${assetPath}`);
+        }
+        context.scannedCount += 1;
+        if (context.scannedCount > context.maxEntries) {
+            throw new Error(`Asset scan exceeds ${context.maxEntries} entries at ${assetPath}`);
+        }
 
-        const stat = this.fs.statSync(assetPath);
-        const meta = this.ensureMetaForPath(assetPath, stat.isDirectory(), usedGuids);
+        const stat = await this.fs.stat(assetPath);
+        if (!stat) {
+            throw new Error(`Asset path could not be inspected: ${assetPath}`);
+        }
+        const meta = await this.ensureMetaForPath(assetPath, stat.isDirectory(), usedGuids);
 
         this.guidToPath.set(meta.guid, assetPath);
         this.pathToGuid.set(assetPath, meta.guid);
         this.pathToMeta.set(assetPath, meta);
-        this.pathToFingerprint.set(assetPath, this.buildFingerprint(assetPath, stat, meta));
+        this.pathToFingerprint.set(assetPath, await this.buildFingerprint(assetPath, stat, meta));
 
         if (!stat.isDirectory()) return;
 
-        const entries = this.fs.readdirSync(assetPath, { withFileTypes: true })
+        const entries = (await this.fs.readdir(assetPath, { withFileTypes: true }))
             .filter((entry: { name: string }) => !entry.name.endsWith('.meta'))
             .sort((a: { name: string }, b: { name: string }) => a.name.localeCompare(b.name));
 
-        this.collectOrphanMetaFiles(assetPath, entries.map((entry: { name: string }) => entry.name));
+        const safeEntries = entries.filter((entry: { isSymbolicLink?: () => boolean }) => entry.isSymbolicLink?.() !== true);
+        await this.collectOrphanMetaFiles(assetPath, safeEntries.map((entry: { name: string }) => entry.name));
 
-        for (const entry of entries) {
-            this.scanPath(PathUtils.join(assetPath, entry.name), usedGuids);
+        for (const entry of safeEntries) {
+            await this.scanPath(PathUtils.join(assetPath, entry.name), usedGuids, depth + 1, context);
         }
     }
 
-    private ensureMetaForPath(assetPath: string, isDirectory: boolean, usedGuids: Set<string>): AssetMeta {
+    private async ensureMetaForPath(assetPath: string, isDirectory: boolean, usedGuids: Set<string>): Promise<AssetMeta> {
         const metaPath = `${assetPath}.meta`;
-        const metaReadResult = this.readMeta(metaPath);
+        const metaReadResult = await this.readMeta(metaPath);
         const existingMeta = metaReadResult.meta;
         const assetType = this.inferAssetType(assetPath, isDirectory);
         const hadDuplicateGuid = typeof existingMeta?.guid === 'string' && existingMeta.guid.trim().length > 0 && usedGuids.has(existingMeta.guid.trim());
@@ -352,7 +376,7 @@ export class AssetDatabase {
         const nextJson = JSON.stringify(normalizedMeta, null, 2);
         const currentJson = existingMeta ? JSON.stringify(existingMeta, null, 2) : null;
         if (currentJson !== nextJson) {
-            this.writeMeta(assetPath, normalizedMeta);
+            await this.writeMeta(assetPath, normalizedMeta);
             if (metaReadResult.malformed) {
                 this.repairedMalformedMetaPaths.add(assetPath);
             }
@@ -364,9 +388,9 @@ export class AssetDatabase {
         return normalizedMeta;
     }
 
-    private collectOrphanMetaFiles(directoryPath: string, assetEntryNames: string[]) {
+    private async collectOrphanMetaFiles(directoryPath: string, assetEntryNames: string[]) {
         const assetNames = new Set(assetEntryNames);
-        const metaEntries = this.fs.readdirSync(directoryPath, { withFileTypes: true })
+        const metaEntries = (await this.fs.readdir(directoryPath, { withFileTypes: true }))
             .filter((entry: { name: string; isFile?: () => boolean }) => entry.name.endsWith('.meta') && (entry.isFile?.() ?? true));
 
         metaEntries.forEach((entry: { name: string }) => {
@@ -377,9 +401,9 @@ export class AssetDatabase {
         });
     }
 
-    private buildFingerprint(assetPath: string, stat: any, meta: AssetMeta): AssetFileFingerprint {
+    private async buildFingerprint(assetPath: string, stat: any, meta: AssetMeta): Promise<AssetFileFingerprint> {
         const metaPath = `${assetPath}.meta`;
-        const metaStat = this.fs.existsSync(metaPath) ? this.fs.statSync(metaPath) : null;
+        const metaStat = await this.fs.exists(metaPath) ? await this.fs.stat(metaPath) : null;
 
         return {
             guid: meta.guid,
@@ -391,16 +415,29 @@ export class AssetDatabase {
         };
     }
 
-    private writeMeta(assetPath: string, meta: AssetMeta) {
-        this.fs.writeFileSync(`${assetPath}.meta`, `${JSON.stringify(meta, null, 2)}\n`, 'utf8');
+    private async writeMeta(assetPath: string, meta: AssetMeta) {
+        const metaPath = `${assetPath}.meta`;
+        const temporaryPath = `${metaPath}.${crypto.randomUUID()}.tmp`;
+        try {
+            await this.fs.writeFile(temporaryPath, `${JSON.stringify(meta, null, 2)}\n`, 'utf8');
+            await this.fs.rename(temporaryPath, metaPath);
+        } finally {
+            if (await this.fs.exists(temporaryPath)) {
+                await this.fs.unlink(temporaryPath);
+            }
+        }
     }
 
-    private readMeta(metaPath: string): MetaReadResult {
-        if (!this.fs.existsSync(metaPath)) return { meta: null, malformed: false };
+    private async readMeta(metaPath: string): Promise<MetaReadResult> {
+        if (!await this.fs.exists(metaPath)) return { meta: null, malformed: false };
 
         try {
+            const stat = await this.fs.stat(metaPath);
+            if (!stat || stat.size > AssetDatabase.MAX_META_BYTES) {
+                throw new Error(`Asset metadata exceeds ${AssetDatabase.MAX_META_BYTES} bytes: ${metaPath}`);
+            }
             return {
-                meta: JSON.parse(this.fs.readFileSync(metaPath, 'utf8')) as AssetMeta,
+                meta: JSON.parse(await this.fs.readFile(metaPath, 'utf8')) as AssetMeta,
                 malformed: false
             };
         } catch {
@@ -584,11 +621,11 @@ export class AssetDatabase {
         this.dependencyGuidsBySourceGuid.clear();
         this.referencerGuidsByTargetGuid.clear();
 
-        this.pathToGuid.forEach((sourceGuid, sourcePath) => {
+        this.pathToGuid.forEach( async(sourceGuid, sourcePath) => {
             const meta = this.pathToMeta.get(sourcePath);
             if (!meta) return;
 
-            const referencedGuids = this.collectReferencedGuids(sourcePath, meta.assetType);
+            const referencedGuids = await this.collectReferencedGuids(sourcePath, meta.assetType);
             referencedGuids.delete(sourceGuid);
             if (referencedGuids.size === 0) return;
 
@@ -602,13 +639,13 @@ export class AssetDatabase {
         });
     }
 
-    private collectReferencedGuids(assetPath: string, assetType: AssetType): Set<string> {
+    private async collectReferencedGuids(assetPath: string, assetType: AssetType): Promise<Set<string>> {
         const supportedTypes: AssetType[] = ['scene', 'prefab', 'material', 'scriptableObject'];
         if (!supportedTypes.includes(assetType)) return new Set<string>();
-        if (!this.fs || !this.fs.existsSync(assetPath)) return new Set<string>();
+        if (!this.fs || !await this.fs.exists(assetPath)) return new Set<string>();
 
         try {
-            const raw = this.fs.readFileSync(assetPath, 'utf8');
+            const raw = await this.fs.readFile(assetPath, 'utf8');
             const json = JSON.parse(raw);
             const collected = new Set<string>();
             this.collectReferencedGuidsRecursive(json, collected);

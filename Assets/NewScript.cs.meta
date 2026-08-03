@@ -1,4 +1,17 @@
 {
+  "formatVersion": 1,
   "guid": "26b41a38-d275-4726-ad02-83f259b2578d",
-  "timestamp": 1771396939826
+  "assetType": "script",
+  "fileExtension": "cs",
+  "timeCreated": 1781850610407,
+  "labels": [],
+  "userData": {},
+  "importer": {
+    "name": "script",
+    "version": 1,
+    "settings": {
+      "autoReferenced": true,
+      "executionOrder": 0
+    }
+  }
 }

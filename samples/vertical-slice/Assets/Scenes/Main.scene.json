@@ -1,0 +1,41 @@
+{
+  "environment": {
+    "ambientColor": "#20283a"
+  },
+  "formatVersion": 1,
+  "gameObjects": [
+    {
+      "children": [],
+      "components": [
+        {
+          "type": "MeshRenderer",
+          "geometry": "cube",
+          "material": "Assets/Materials/Player.material.json"
+        },
+        {
+          "type": "PlayerController",
+          "inputAxis": "Horizontal",
+          "speed": 4
+        }
+      ],
+      "enabled": true,
+      "id": "object-player",
+      "name": "Player"
+    },
+    {
+      "children": [],
+      "components": [
+        {
+          "type": "Camera",
+          "isMain": true
+        }
+      ],
+      "enabled": true,
+      "id": "object-main-camera",
+      "name": "Main Camera"
+    }
+  ],
+  "name": "Main",
+  "sceneId": "scene-vertical-slice-main",
+  "version": "1.4"
+}

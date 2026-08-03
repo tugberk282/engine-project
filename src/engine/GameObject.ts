@@ -2,6 +2,7 @@ import { Component } from './Component';
 import { Transform } from './components/Transform'; // We will create this next
 import { ScriptRegistry } from './ScriptRegistry';
 import * as THREE from 'three';
+import { mergePreservingUnknown, SerializedComponentData, SerializedGameObjectData } from './Serialization';
 
 type AddComponentOptions = {
     invokeLifecycle?: boolean;
@@ -31,6 +32,8 @@ export class GameObject {
     private orderedComponentCacheVersion: number = -1;
     private orderedComponentCacheSize: number = -1;
     private pendingLifecycleComponents: Component[] = [];
+    private serializedTemplate: SerializedGameObjectData | null = null;
+    private unknownSerializedComponents: SerializedComponentData[] = [];
 
     constructor(name: string = "New GameObject") {
         this.name = name;
@@ -45,24 +48,39 @@ export class GameObject {
     }
 
     public setActive(value: boolean): void {
-        const changed = this.enabled !== value;
+        if (this.enabled === value) return;
+        const hierarchy = this.collectSelfAndDescendants();
+        const previousStates = new Map(hierarchy.map((node) => [node, node.isActiveInHierarchy()]));
         this.enabled = value;
         this.object3D.visible = value;
-        if (!changed) return;
 
-        // Call OnEnable/OnDisable on all components
-        for (const component of this.getComponentsInExecutionOrder()) {
-            if (value) {
-                component.onEnable();
-            } else {
-                component.onDisable();
+        for (const node of hierarchy) {
+            const wasActive = previousStates.get(node) ?? false;
+            const isActive = node.isActiveInHierarchy();
+            if (wasActive === isActive) continue;
+            for (const component of node.getComponentsInExecutionOrder()) {
+                if (!component.enabled) continue;
+                if (isActive) component.onEnable();
+                else component.onDisable();
             }
         }
     }
 
+    public isActiveInHierarchy(): boolean {
+        if (!this.enabled) return false;
+        // The mandatory Transform is itself added during construction, before
+        // this.transform has been assigned.
+        let parent = this.transform?.parent ?? null;
+        while (parent) {
+            if (!parent.gameObject.enabled) return false;
+            parent = parent.parent;
+        }
+        return true;
+    }
+
     public addComponent<T extends Component>(componentOrType: T | (new (go: GameObject) => T), options?: AddComponentOptions): T {
         let component: T;
-        if (componentOrType instanceof Component) {
+        if (this.isComponentInstance(componentOrType)) {
             component = componentOrType;
             if (component.gameObject !== this) {
                 // Warn or handle reparenting if needed, for now assume fresh instance
@@ -87,28 +105,30 @@ export class GameObject {
         }
 
         component.awake();
-        if (this.enabled && component.enabled) {
+        if (this.isActiveInHierarchy() && component.enabled) {
             component.onEnable();
         }
         return component;
     }
 
-    public getComponent<T extends Component>(componentType: new (go: GameObject) => T): T | undefined {
-        return this.components.find(c => c instanceof componentType) as T;
+    public getComponent<T extends Component>(componentType: (new (go: GameObject) => T) | string): T | undefined {
+        return this.components.find((component) => this.matchesComponentType(component, componentType)) as T | undefined;
     }
 
-    public getComponents<T extends Component>(componentType: new (go: GameObject) => T): T[] {
-        return this.components.filter(c => c instanceof componentType) as T[];
+    public getComponents<T extends Component>(componentType: (new (go: GameObject) => T) | string): T[] {
+        return this.components.filter((component) => this.matchesComponentType(component, componentType)) as T[];
     }
 
-    public removeComponent(component: Component): void {
+    public removeComponent(component: Component, options?: { destroy?: boolean }): void {
         const index = this.components.indexOf(component);
         if (index > -1) {
             const pendingIndex = this.pendingLifecycleComponents.indexOf(component);
             if (pendingIndex >= 0) {
                 this.pendingLifecycleComponents.splice(pendingIndex, 1);
             }
-            component.onDestroy();
+            if (options?.destroy ?? true) {
+                component.onDestroy();
+            }
             this.components.splice(index, 1);
             this.invalidateOrderedComponentCache();
         }
@@ -132,7 +152,7 @@ export class GameObject {
 
         for (const component of pending) {
             component.awake();
-            if (this.enabled && component.enabled) {
+            if (this.isActiveInHierarchy() && component.enabled) {
                 component.onEnable();
             }
             if (startPending) {
@@ -148,7 +168,7 @@ export class GameObject {
     }
 
     public update(deltaTime: number): void {
-        if (!this.enabled) return;
+        if (!this.isActiveInHierarchy()) return;
 
         for (const component of this.getComponentsInExecutionOrder()) {
             if (component.enabled) {
@@ -158,7 +178,7 @@ export class GameObject {
     }
 
     public fixedUpdate(fixedDeltaTime: number): void {
-        if (!this.enabled) return;
+        if (!this.isActiveInHierarchy()) return;
 
         for (const component of this.getComponentsInExecutionOrder()) {
             if (component.enabled && (component as any).fixedUpdate) {
@@ -168,7 +188,7 @@ export class GameObject {
     }
 
     public lateUpdate(): void {
-        if (!this.enabled) return;
+        if (!this.isActiveInHierarchy()) return;
 
         for (const component of this.getComponentsInExecutionOrder()) {
             if (component.enabled) {
@@ -189,7 +209,7 @@ export class GameObject {
     }
 
     public serialize(): any {
-        return {
+        const current = {
             id: this.id,
             name: this.name,
             tag: this.tag,
@@ -206,16 +226,49 @@ export class GameObject {
                 scale: this.transform.scale.toArray()
             },
             components: this.components
-                .filter(c => c.constructor.name !== 'Transform') // Preserve RectTransform-like subclasses
-                .map(c => c.serialize()),
+                .filter(c => c !== this.transform) // Constructor names are minified in packaged builds.
+                .map(c => c.serialize())
+                .concat(this.unknownSerializedComponents),
             children: this.transform.children.map(c => c.gameObject.serialize())
         };
+        return mergePreservingUnknown(this.serializedTemplate, current);
+    }
+
+    public preserveSerializedData(
+        template: SerializedGameObjectData,
+        unknownComponents: SerializedComponentData[] = []
+    ): void {
+        this.serializedTemplate = template;
+        this.unknownSerializedComponents = unknownComponents;
+    }
+
+    public getUnknownSerializedComponents(): readonly SerializedComponentData[] {
+        return this.unknownSerializedComponents;
+    }
+
+    private collectSelfAndDescendants(): GameObject[] {
+        const hierarchy: GameObject[] = [this];
+        for (const child of this.transform.children) {
+            hierarchy.push(...child.gameObject.collectSelfAndDescendants());
+        }
+        return hierarchy;
     }
 
     private invalidateOrderedComponentCache(): void {
         this.orderedComponentCache = null;
         this.orderedComponentCacheVersion = -1;
         this.orderedComponentCacheSize = -1;
+    }
+
+    private isComponentInstance<T extends Component>(value: T | (new (go: GameObject) => T)): value is T {
+        return typeof value === 'object' && value !== null && 'gameObject' in value;
+    }
+
+    private matchesComponentType<T extends Component>(component: Component, componentType: (new (go: GameObject) => T) | string): boolean {
+        if (typeof componentType === 'string') {
+            return component.constructor.name === componentType;
+        }
+        return component instanceof componentType;
     }
 
     private getComponentsInExecutionOrder(): Component[] {

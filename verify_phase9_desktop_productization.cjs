@@ -74,6 +74,7 @@ log('cyan', '╚═════════════════════�
 
 const mainSource = read('electron/main.js');
 const preloadSource = read('electron/preload.js');
+const recentProjectServiceSource = read('electron/platform/recent-project-service.js');
 const bridgeSource = read('src/platform/DesktopBridge.ts');
 const fileSystemSource = read('src/platform/DesktopFileSystem.ts');
 const pathUtilsSource = read('src/platform/PathUtils.ts');
@@ -100,8 +101,7 @@ test(
     hasAll(mainSource, [
         "ipcMain.handle('show-save-dialog'",
         "ipcMain.handle('show-open-dialog'",
-        "ipcMain.handle('load-recent-projects'",
-        "ipcMain.handle('save-recent-projects'",
+        "ipcMain.handle('tugberk:v1:request'",
         "ipcMain.handle('initialize-project-structure'",
         "ipcMain.handle('read-text-file'",
         "ipcMain.handle('write-text-file'",
@@ -109,27 +109,44 @@ test(
         "ipcMain.handle('path-join'",
         "ipcMain.handle('path-basename'",
         "ipcMain.handle('reveal-in-folder'",
-        "ipcMain.on('fs-exists-sync'",
-        "ipcMain.on('fs-mkdir-sync'",
-        "ipcMain.on('fs-readdir-sync'",
-        "ipcMain.on('fs-stat-sync'",
-        "ipcMain.on('fs-read-file-sync'",
-        "ipcMain.on('fs-write-file-sync'",
-        "ipcMain.on('fs-copy-file-sync'",
-        "ipcMain.on('fs-rename-sync'",
-        "ipcMain.on('fs-rm-sync'",
-        "ipcMain.on('fs-unlink-sync'",
+        "ipcMain.handle('fs-exists'",
+        "ipcMain.handle('fs-mkdir'",
+        "ipcMain.handle('fs-readdir'",
+        "ipcMain.handle('fs-stat'",
+        "ipcMain.handle('fs-read-file'",
+        "ipcMain.handle('fs-write-file'",
+        "ipcMain.handle('fs-copy-file'",
+        "ipcMain.handle('fs-rename'",
+        "ipcMain.handle('fs-rm'",
+        "ipcMain.handle('fs-unlink'",
         "ipcMain.on('exit-app'"
-    ]),
+    ]) && !mainSource.includes("ipcMain.on('fs-"),
     'Electron main process exposes native desktop workspace and file IPC handlers'
 );
 
 test(
+    mainSource.includes("path.join(app.getPath('userData'), 'recent-projects.json')")
+        && hasAll(recentProjectServiceSource, [
+            'isRecentProjectsPayload({ projects })',
+            'await fs.promises.writeFile',
+            'await fs.promises.rename'
+        ]),
+    'Recent projects persistence uses a bounded asynchronous native userData store'
+);
+
+test(
     hasAll(mainSource, [
-        "return path.join(app.getPath('userData'), 'recent-projects.json');",
-        'fs.writeFileSync(storePath, JSON.stringify(projects, null, 2), \'utf8\');'
-    ]),
-    'Recent projects persistence uses a native userData store instead of browser-only storage'
+        'nodeIntegration: false,',
+        'contextIsolation: true,',
+        'sandbox: true,',
+        'webSecurity: true',
+        "mainWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));",
+        "mainWindow.webContents.on('will-navigate'"
+    ]) &&
+        !mainSource.includes('nodeIntegration: true') &&
+        !mainSource.includes('contextIsolation: false') &&
+        !mainSource.includes('webSecurity: false'),
+    'BrowserWindow runs with secure renderer isolation and blocks untrusted navigation'
 );
 
 suite('Preload Bridge');
@@ -141,37 +158,36 @@ test(
         'currentWorkingDirectory: process.cwd(),',
         'showOpenDialog: (options) => ipcRenderer.invoke(\'show-open-dialog\', options),',
         'showSaveDialog: (options) => ipcRenderer.invoke(\'show-save-dialog\', options),',
-        'loadRecentProjects: () => ipcRenderer.invoke(\'load-recent-projects\'),',
-        'saveRecentProjects: (projects) => ipcRenderer.invoke(\'save-recent-projects\', projects),',
+        'loadRecentProjects: () => tugberkV1.request(\'recentProjects.load\', {}),',
+        'saveRecentProjects: (projects) => tugberkV1.request(\'recentProjects.save\', { projects }),',
         'initializeProjectStructure: (projectPath) => ipcRenderer.invoke(\'initialize-project-structure\', projectPath),',
         'readTextFile: (filePath) => ipcRenderer.invoke(\'read-text-file\', filePath),',
         'writeTextFile: (filePath, content) => ipcRenderer.invoke(\'write-text-file\', filePath, content),',
         'fileExists: (filePath) => ipcRenderer.invoke(\'file-exists\', filePath),',
-        'fsExistsSync: (targetPath) => ipcRenderer.sendSync(\'fs-exists-sync\', targetPath),',
-        'fsMkdirSync: (targetPath, options) => ipcRenderer.sendSync(\'fs-mkdir-sync\', targetPath, options),',
-        'fsReaddirSync: (targetPath, options) => ipcRenderer.sendSync(\'fs-readdir-sync\', targetPath, options),',
-        'fsStatSync: (targetPath) => ipcRenderer.sendSync(\'fs-stat-sync\', targetPath),',
-        'fsReadFileSync: (targetPath, encoding) => ipcRenderer.sendSync(\'fs-read-file-sync\', targetPath, encoding),',
-        'fsWriteFileSync: (targetPath, data, encoding) => ipcRenderer.sendSync(\'fs-write-file-sync\', targetPath, data, encoding),',
-        'fsCopyFileSync: (sourcePath, targetPath) => ipcRenderer.sendSync(\'fs-copy-file-sync\', sourcePath, targetPath),',
-        'fsRenameSync: (sourcePath, targetPath) => ipcRenderer.sendSync(\'fs-rename-sync\', sourcePath, targetPath),',
-        'fsRmSync: (targetPath, options) => ipcRenderer.sendSync(\'fs-rm-sync\', targetPath, options),',
-        'fsUnlinkSync: (targetPath) => ipcRenderer.sendSync(\'fs-unlink-sync\', targetPath),',
+        'fsExists: (targetPath) => ipcRenderer.invoke(\'fs-exists\', targetPath),',
+        'fsMkdir: (targetPath, options) => ipcRenderer.invoke(\'fs-mkdir\', targetPath, options),',
+        'fsReaddir: (targetPath, options) => ipcRenderer.invoke(\'fs-readdir\', targetPath, options),',
+        'fsStat: (targetPath) => ipcRenderer.invoke(\'fs-stat\', targetPath),',
+        'fsReadFile: (targetPath, encoding) => ipcRenderer.invoke(\'fs-read-file\', targetPath, encoding),',
+        'fsWriteFile: (targetPath, data, encoding) => ipcRenderer.invoke(\'fs-write-file\', targetPath, data, encoding),',
+        'fsCopyFile: (sourcePath, targetPath) => ipcRenderer.invoke(\'fs-copy-file\', sourcePath, targetPath),',
+        'fsRename: (sourcePath, targetPath) => ipcRenderer.invoke(\'fs-rename\', sourcePath, targetPath),',
+        'fsRm: (targetPath, options) => ipcRenderer.invoke(\'fs-rm\', targetPath, options),',
+        'fsUnlink: (targetPath) => ipcRenderer.invoke(\'fs-unlink\', targetPath),',
         'pathJoin: (...segments) => ipcRenderer.invoke(\'path-join\', ...segments),',
         'pathBasename: (targetPath) => ipcRenderer.invoke(\'path-basename\', targetPath),',
         'revealInFolder: (targetPath) => ipcRenderer.invoke(\'reveal-in-folder\', targetPath),',
         'exitApp: () => ipcRenderer.send(\'exit-app\')'
-    ]),
+    ]) && !preloadSource.includes('sendSync'),
     'Preload defines a canonical electronAPI bridge for native desktop actions'
 );
 
 test(
     hasAll(preloadSource, [
-        'if (process.contextIsolated) {',
-        'contextBridge.exposeInMainWorld(\'electronAPI\', electronAPI);',
-        'window.electronAPI = electronAPI;'
-    ]),
-    'Preload supports both contextBridge exposure and fallback window injection during transition'
+        'contextBridge.exposeInMainWorld(\'electronAPI\', electronAPI);'
+    ]) &&
+        !preloadSource.includes('window.electronAPI = electronAPI'),
+    'Preload exposes the desktop API only through the isolated context bridge'
 );
 
 suite('Renderer Migration');
@@ -197,22 +213,17 @@ test(
         'this.electronAPI = (window as any).electronAPI ?? null;',
         'private deserializeStat(stat: SerializedStat | null): any {',
         'private deserializeDirEntries(entries: SerializedDirEntry[]): any[] {',
-        'return this.electronAPI?.fsExistsSync?.(targetPath) === true;',
-        'const entries = this.electronAPI?.fsReaddirSync?.(targetPath, options) ?? [];',
-        'return this.deserializeStat(this.electronAPI?.fsStatSync?.(targetPath) ?? null);',
-        'const result = this.electronAPI?.fsReadFileSync?.(targetPath, encoding) ?? null;',
-        'this.electronAPI?.fsWriteFileSync?.(targetPath, normalizedData, encoding);',
-        'public existsSync(targetPath: string): boolean {',
-        'public mkdirSync(targetPath: string, options?: any): void {',
-        'public readdirSync(targetPath: string, options?: any): any[] {',
-        'public statSync(targetPath: string): any {',
-        'public readFileSync(targetPath: string, encoding?: BufferEncoding | string): any {',
-        'public writeFileSync(targetPath: string, data: any, encoding?: BufferEncoding | string): void {',
-        'public copyFileSync(sourcePath: string, targetPath: string): void {',
-        'public renameSync(sourcePath: string, targetPath: string): void {',
-        'public rmSync(targetPath: string, options?: any): void {',
-        'public unlinkSync(targetPath: string): void {'
-    ]),
+        'public async exists(targetPath: string): Promise<boolean> {',
+        'public async mkdir(targetPath: string, options?: any): Promise<void> {',
+        'public async readdir(targetPath: string, options?: any): Promise<any[]> {',
+        'public async stat(targetPath: string): Promise<any> {',
+        'public async readFile(targetPath: string, encoding?: BufferEncoding | string): Promise<any> {',
+        'public async writeFile(targetPath: string, data: any, encoding?: BufferEncoding | string): Promise<void> {',
+        'public async copyFile(sourcePath: string, targetPath: string): Promise<void> {',
+        'public async rename(sourcePath: string, targetPath: string): Promise<void> {',
+        'public async rm(targetPath: string, options?: any): Promise<void> {',
+        'public async unlink(targetPath: string): Promise<void> {'
+    ]) && !fileSystemSource.includes('Sync('),
     'DesktopFileSystem provides a centralized renderer-side filesystem adapter during migration'
 );
 
@@ -238,9 +249,9 @@ test(
         'this.desktopBridge = new DesktopBridge();',
         'this.fs = new DesktopFileSystem();',
         'this.electronAPI = this.desktopBridge.getElectronAPI();',
-        'const data = await this.desktopBridge.readTextFile(result.filePath);',
-        'const sceneName = await this.desktopBridge.pathBasename(result.filePath);',
-        'const defaultScenePath = this.rootPath ? await this.desktopBridge.pathJoin(this.rootPath, \'scenes\', \'NewScene.json\') : \'NewScene.json\';',
+        'const data = await this.desktopBridge.readTextFile(selectedPath);',
+        'const sceneName = await this.desktopBridge.pathBasename(selectedPath);',
+        'const defaultScenePath = this.rootPath ? await this.desktopBridge.pathJoin(this.rootPath, \'Scenes\', \'NewScene.json\') : \'NewScene.json\';',
         'await this.desktopBridge.writeTextFile(result.filePath, json);'
     ]),
     'Editor scene open/save flow has started migrating onto DesktopBridge'
@@ -248,11 +259,11 @@ test(
 
 test(
     hasAll(sceneManagerSource, [
-        'import { DesktopBridge } from \'../platform/DesktopBridge\';',
+        'import { DesktopBridge, ProjectResource } from \'../platform/DesktopBridge\';',
         'private desktopBridge: DesktopBridge;',
         'this.desktopBridge = new DesktopBridge();',
         'const data = await this.desktopBridge.readTextFile(filePath);',
-        'void this.desktopBridge.writeTextFile(filePath, json).then(() => {'
+        'const saved = await this.desktopBridge.writeTextFile(filePath, json);'
     ]),
     'SceneManager uses DesktopBridge for scene file load/save instead of direct renderer file access'
 );
@@ -303,7 +314,7 @@ test(
         'import { PathUtils } from \'../platform/PathUtils\';',
         'private fs: DesktopFileSystem;',
         'this.fs = new DesktopFileSystem();',
-        'this.scanPath(PathUtils.join(assetPath, entry.name), usedGuids);',
+        'await this.scanPath(PathUtils.join(assetPath, entry.name), usedGuids, depth + 1, context);',
         'fileExtension: isDirectory ? \'\' : (PathUtils.extname(assetPath).toLowerCase().replace(\'.\', \'\')),',
         'const ext = PathUtils.extname(assetPath).toLowerCase();'
     ]),

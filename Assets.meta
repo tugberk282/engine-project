@@ -1,0 +1,16 @@
+{
+  "formatVersion": 1,
+  "guid": "500b9913-3e71-4577-93b4-122c5a1297ab",
+  "assetType": "folder",
+  "fileExtension": "",
+  "timeCreated": 1781850610397,
+  "labels": [],
+  "userData": {},
+  "importer": {
+    "name": "folder",
+    "version": 1,
+    "settings": {
+      "defaultLabel": "Folder"
+    }
+  }
+}

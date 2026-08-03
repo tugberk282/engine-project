@@ -11,46 +11,59 @@ export interface Command {
 
 // ─── Command History Manager ──────────────────────────────────────────
 export class CommandHistory {
-    private static undoStack: Command[] = [];
-    private static redoStack: Command[] = [];
+    private static undoStack: Array<{ command: Command; beforeState: number; afterState: number }> = [];
+    private static redoStack: Array<{ command: Command; beforeState: number; afterState: number }> = [];
     private static maxHistory: number = 100;
     private static listeners: Array<() => void> = [];
+    private static mutationListeners: Array<(state: number) => void> = [];
+    private static currentState: number = 0;
+    private static nextState: number = 1;
 
     public static execute(command: Command): void {
         console.log(`Executing Command: ${command.name}`);
+        const beforeState = this.currentState;
         command.execute();
-        this.undoStack.push(command);
+        const afterState = this.nextState++;
+        this.currentState = afterState;
+        this.undoStack.push({ command, beforeState, afterState });
         this.redoStack = []; // Clear redo on new action
 
         if (this.undoStack.length > this.maxHistory) {
             this.undoStack.shift();
         }
         this.notifyListeners();
+        this.notifyMutationListeners();
     }
 
     public static undo(): void {
-        const command = this.undoStack.pop();
-        if (command) {
-            console.log(`Undoing Command: ${command.name}`);
-            command.undo();
-            this.redoStack.push(command);
+        const entry = this.undoStack.pop();
+        if (entry) {
+            console.log(`Undoing Command: ${entry.command.name}`);
+            entry.command.undo();
+            this.currentState = entry.beforeState;
+            this.redoStack.push(entry);
             this.notifyListeners();
+            this.notifyMutationListeners();
         }
     }
 
     public static redo(): void {
-        const command = this.redoStack.pop();
-        if (command) {
-            console.log(`Redoing Command: ${command.name}`);
-            command.execute();
-            this.undoStack.push(command);
+        const entry = this.redoStack.pop();
+        if (entry) {
+            console.log(`Redoing Command: ${entry.command.name}`);
+            entry.command.execute();
+            this.currentState = entry.afterState;
+            this.undoStack.push(entry);
             this.notifyListeners();
+            this.notifyMutationListeners();
         }
     }
 
     public static clear(): void {
         this.undoStack = [];
         this.redoStack = [];
+        this.currentState = 0;
+        this.nextState = 1;
         this.notifyListeners();
     }
 
@@ -63,11 +76,11 @@ export class CommandHistory {
     }
 
     public static getUndoName(): string | null {
-        return this.undoStack.length > 0 ? this.undoStack[this.undoStack.length - 1].name : null;
+        return this.undoStack.length > 0 ? this.undoStack[this.undoStack.length - 1].command.name : null;
     }
 
     public static getRedoName(): string | null {
-        return this.redoStack.length > 0 ? this.redoStack[this.redoStack.length - 1].name : null;
+        return this.redoStack.length > 0 ? this.redoStack[this.redoStack.length - 1].command.name : null;
     }
 
     public static addListener(callback: () => void): void {
@@ -78,8 +91,16 @@ export class CommandHistory {
         this.listeners = this.listeners.filter(l => l !== callback);
     }
 
+    public static addMutationListener(callback: (state: number) => void): void {
+        this.mutationListeners.push(callback);
+    }
+
     private static notifyListeners(): void {
         this.listeners.forEach(l => l());
+    }
+
+    private static notifyMutationListeners(): void {
+        this.mutationListeners.forEach((listener) => listener(this.currentState));
     }
 }
 

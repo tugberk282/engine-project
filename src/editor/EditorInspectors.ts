@@ -2772,7 +2772,7 @@ export class EditorInspectors {
         // Drag & Drop for textures
         slot.ondragover = (e) => { e.preventDefault(); slot.style.borderColor = 'var(--unity-accent)'; };
         slot.ondragleave = () => { slot.style.borderColor = '#555'; };
-        slot.ondrop = (e) => {
+        slot.ondrop =  async(e) => {
             e.preventDefault();
             slot.style.borderColor = '#555';
             const data = e.dataTransfer?.getData('text/plain');
@@ -2780,7 +2780,7 @@ export class EditorInspectors {
                 try {
                     const payload = JSON.parse(data);
                     if (payload.type === 'texture') {
-                        AssetImporter.importTexture(payload.fullPath, (t) => {
+                        await AssetImporter.importTexture(payload.fullPath, (t) => {
                             t.name = payload.name;
                             onChange(t);
                             value = t;
@@ -2963,8 +2963,8 @@ export class EditorInspectors {
         exportBtn.innerText = '📋 Copy JSON';
         this.styleUnityButton(exportBtn);
         exportBtn.style.flex = '0';
-        exportBtn.onclick = () => {
-            navigator.clipboard.writeText(so.toAssetJSON()).then(() => {
+        exportBtn.onclick =  async() => {
+            await navigator.clipboard.writeText(so.toAssetJSON()).then(() => {
                 const oldTxt = exportBtn.innerText;
                 exportBtn.innerText = '✓';
                 setTimeout(() => exportBtn.innerText = oldTxt, 1500);

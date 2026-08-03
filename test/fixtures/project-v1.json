@@ -1,0 +1,11 @@
+{
+  "formatVersion": 1,
+  "name": "Fixture Project",
+  "projectId": "project-fixture",
+  "scenes": [
+    {
+      "path": "Assets/Scenes/Main.json",
+      "sceneId": "scene-main"
+    }
+  ]
+}

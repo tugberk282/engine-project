@@ -1,0 +1,10 @@
+{
+  "formatVersion": 1,
+  "name": "Player Blue",
+  "shader": "Standard",
+  "properties": {
+    "color": "#3b82f6",
+    "metalness": 0.1,
+    "roughness": 0.65
+  }
+}

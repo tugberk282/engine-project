@@ -8,6 +8,7 @@ export class CreateGameObjectCommand implements Command {
     private go: GameObject;
     private scene: Scene;
     private parent: any;
+    private hasExecuted: boolean = false;
 
     constructor(go: GameObject, scene: Scene, parent?: any) {
         this.go = go;
@@ -22,7 +23,8 @@ export class CreateGameObjectCommand implements Command {
         } else if (this.go.transform.parent) {
             this.go.transform.setParent(null, false);
         }
-        this.scene.addGameObject(this.go);
+        this.scene.addGameObject(this.go, { start: !this.hasExecuted });
+        this.hasExecuted = true;
     }
 
     undo(): void {
@@ -221,7 +223,8 @@ export class AddComponentCommand implements Command {
         if (this.componentInstance) {
             const component = this.componentInstance;
             this.go.addComponent(component, {
-                index: this.componentIndex >= 0 ? this.componentIndex : undefined
+                index: this.componentIndex >= 0 ? this.componentIndex : undefined,
+                invokeLifecycle: false
             });
         } else {
             this.componentInstance = this.go.addComponent(this.componentClass);
@@ -232,7 +235,7 @@ export class AddComponentCommand implements Command {
     undo(): void {
         if (this.componentInstance) {
             this.componentIndex = this.go.components.indexOf(this.componentInstance);
-            this.go.removeComponent(this.componentInstance);
+            this.go.removeComponent(this.componentInstance, { destroy: false });
         }
     }
 }
@@ -275,12 +278,12 @@ export class RemoveComponentCommand implements Command {
     execute(): void {
         this.index = this.go.components.indexOf(this.component);
         if (this.index < 0) return;
-        this.go.removeComponent(this.component);
+        this.go.removeComponent(this.component, { destroy: false });
     }
 
     undo(): void {
         if (this.go.components.includes(this.component)) return;
-        this.go.addComponent(this.component, { index: this.index });
+        this.go.addComponent(this.component, { index: this.index, invokeLifecycle: false });
     }
 }
 
@@ -303,6 +306,70 @@ export class ReorderComponentCommand implements Command {
 
     undo(): void {
         this.go.moveComponent(this.toIndex, this.fromIndex);
+    }
+}
+
+export class ResetComponentCommand implements Command {
+    public name: string;
+    private component: Component;
+    private beforeData: Record<string, unknown>;
+    private afterData: Record<string, unknown> | null = null;
+    private hasExecuted: boolean = false;
+    private onUpdate?: () => void;
+
+    constructor(component: Component, onUpdate?: () => void) {
+        this.component = component;
+        this.beforeData = component.captureSerializableState();
+        this.name = `Reset Component ${component.constructor.name}`;
+        this.onUpdate = onUpdate;
+    }
+
+    execute(): void {
+        if (this.hasExecuted) {
+            this.component.restoreSerializableState(this.afterData!);
+        } else {
+            this.component.reset();
+            this.afterData = this.component.captureSerializableState();
+            this.hasExecuted = true;
+        }
+        this.onUpdate?.();
+    }
+
+    undo(): void {
+        this.component.restoreSerializableState(this.beforeData);
+        this.onUpdate?.();
+    }
+}
+
+export class DeserializeComponentCommand implements Command {
+    public name: string;
+    private component: Component;
+    private beforeData: Record<string, unknown>;
+    private afterData: unknown;
+    private appliedData: Record<string, unknown> | null = null;
+    private onUpdate?: () => void;
+
+    constructor(component: Component, data: unknown, name?: string, onUpdate?: () => void) {
+        this.component = component;
+        this.beforeData = component.captureSerializableState();
+        this.afterData = structuredClone(data);
+        this.name = name ?? `Set Serialized Fields ${component.constructor.name}`;
+        this.onUpdate = onUpdate;
+    }
+
+    execute(): void {
+        if (this.appliedData) {
+            this.component.restoreSerializableState(this.appliedData);
+        } else {
+            this.component.deserialize(structuredClone(this.afterData));
+            this.appliedData = this.component.captureSerializableState();
+        }
+        this.onUpdate?.();
+    }
+
+    undo(): void {
+        this.component.restoreSerializableState(this.beforeData);
+        this.onUpdate?.();
     }
 }
 
