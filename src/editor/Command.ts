@@ -4,8 +4,8 @@ import { Prefab } from '../engine/Prefab';
 
 // ─── Command Interface ────────────────────────────────────────────────
 export interface Command {
-    execute(): void;
-    undo(): void;
+    execute(): void | Promise<void>;
+    undo(): void | Promise<void>;
     name: string;
 }
 
@@ -18,48 +18,85 @@ export class CommandHistory {
     private static mutationListeners: Array<(state: number) => void> = [];
     private static currentState: number = 0;
     private static nextState: number = 1;
+    private static pending: boolean = false;
 
-    public static execute(command: Command): void {
+    public static execute(command: Command): void | Promise<void> {
+        if (this.pending) throw new Error('A global command transaction is already in progress');
         console.log(`Executing Command: ${command.name}`);
         const beforeState = this.currentState;
-        command.execute();
-        const afterState = this.nextState++;
-        this.currentState = afterState;
-        this.undoStack.push({ command, beforeState, afterState });
-        this.redoStack = []; // Clear redo on new action
-
-        if (this.undoStack.length > this.maxHistory) {
-            this.undoStack.shift();
+        const complete = () => {
+            const afterState = this.nextState++;
+            this.currentState = afterState;
+            this.undoStack.push({ command, beforeState, afterState });
+            this.redoStack = [];
+            if (this.undoStack.length > this.maxHistory) this.undoStack.shift();
+            this.notifyListeners();
+            this.notifyMutationListeners();
+        };
+        const result = command.execute();
+        if (result instanceof Promise) {
+            this.pending = true;
+            this.notifyListeners();
+            return result.then(complete).finally(() => {
+                this.pending = false;
+                this.notifyListeners();
+            });
         }
-        this.notifyListeners();
-        this.notifyMutationListeners();
+        complete();
     }
 
-    public static undo(): void {
-        const entry = this.undoStack.pop();
+    public static undo(): void | Promise<void> {
+        if (this.pending) throw new Error('A global command transaction is already in progress');
+        const entry = this.undoStack[this.undoStack.length - 1];
         if (entry) {
             console.log(`Undoing Command: ${entry.command.name}`);
-            entry.command.undo();
-            this.currentState = entry.beforeState;
-            this.redoStack.push(entry);
-            this.notifyListeners();
-            this.notifyMutationListeners();
+            const complete = () => {
+                this.undoStack.pop();
+                this.currentState = entry.beforeState;
+                this.redoStack.push(entry);
+                this.notifyListeners();
+                this.notifyMutationListeners();
+            };
+            const result = entry.command.undo();
+            if (result instanceof Promise) {
+                this.pending = true;
+                this.notifyListeners();
+                return result.then(complete).finally(() => {
+                    this.pending = false;
+                    this.notifyListeners();
+                });
+            }
+            complete();
         }
     }
 
-    public static redo(): void {
-        const entry = this.redoStack.pop();
+    public static redo(): void | Promise<void> {
+        if (this.pending) throw new Error('A global command transaction is already in progress');
+        const entry = this.redoStack[this.redoStack.length - 1];
         if (entry) {
             console.log(`Redoing Command: ${entry.command.name}`);
-            entry.command.execute();
-            this.currentState = entry.afterState;
-            this.undoStack.push(entry);
-            this.notifyListeners();
-            this.notifyMutationListeners();
+            const complete = () => {
+                this.redoStack.pop();
+                this.currentState = entry.afterState;
+                this.undoStack.push(entry);
+                this.notifyListeners();
+                this.notifyMutationListeners();
+            };
+            const result = entry.command.execute();
+            if (result instanceof Promise) {
+                this.pending = true;
+                this.notifyListeners();
+                return result.then(complete).finally(() => {
+                    this.pending = false;
+                    this.notifyListeners();
+                });
+            }
+            complete();
         }
     }
 
     public static clear(): void {
+        if (this.pending) throw new Error('Cannot clear global history while a command transaction is in progress');
         this.undoStack = [];
         this.redoStack = [];
         this.currentState = 0;
@@ -68,11 +105,11 @@ export class CommandHistory {
     }
 
     public static canUndo(): boolean {
-        return this.undoStack.length > 0;
+        return !this.pending && this.undoStack.length > 0;
     }
 
     public static canRedo(): boolean {
-        return this.redoStack.length > 0;
+        return !this.pending && this.redoStack.length > 0;
     }
 
     public static getUndoName(): string | null {
@@ -115,15 +152,58 @@ export class GroupCommand implements Command {
     }
 
     execute(): void {
-        for (const cmd of this.commands) {
-            cmd.execute();
+        const completed: Command[] = [];
+        try {
+            for (const cmd of this.commands) {
+                cmd.execute();
+                completed.push(cmd);
+            }
+        } catch (executionError) {
+            const rollbackErrors: unknown[] = [];
+            for (let i = completed.length - 1; i >= 0; i--) {
+                try {
+                    completed[i].undo();
+                } catch (rollbackError) {
+                    rollbackErrors.push(rollbackError);
+                }
+            }
+            if (rollbackErrors.length > 0) {
+                const rollbackFailure = new Error(
+                    `Command group '${this.name}' failed and ${rollbackErrors.length} rollback operation(s) also failed.`
+                );
+                (rollbackFailure as Error & { executionError?: unknown; rollbackErrors?: unknown[] }).executionError = executionError;
+                (rollbackFailure as Error & { executionError?: unknown; rollbackErrors?: unknown[] }).rollbackErrors = rollbackErrors;
+                throw rollbackFailure;
+            }
+            throw executionError;
         }
     }
 
     undo(): void {
-        // Undo in reverse order
-        for (let i = this.commands.length - 1; i >= 0; i--) {
-            this.commands[i].undo();
+        const undone: Command[] = [];
+        try {
+            for (let i = this.commands.length - 1; i >= 0; i--) {
+                this.commands[i].undo();
+                undone.push(this.commands[i]);
+            }
+        } catch (undoError) {
+            const restoreErrors: unknown[] = [];
+            for (let i = undone.length - 1; i >= 0; i--) {
+                try {
+                    undone[i].execute();
+                } catch (restoreError) {
+                    restoreErrors.push(restoreError);
+                }
+            }
+            if (restoreErrors.length > 0) {
+                const restoreFailure = new Error(
+                    `Undoing command group '${this.name}' failed and ${restoreErrors.length} restore operation(s) also failed.`
+                );
+                (restoreFailure as Error & { undoError?: unknown; restoreErrors?: unknown[] }).undoError = undoError;
+                (restoreFailure as Error & { undoError?: unknown; restoreErrors?: unknown[] }).restoreErrors = restoreErrors;
+                throw restoreFailure;
+            }
+            throw undoError;
         }
     }
 }

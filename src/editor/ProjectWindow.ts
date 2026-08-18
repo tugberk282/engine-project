@@ -11,6 +11,9 @@ import { AudioSource } from '../engine/components/AudioSource';
 import { DesktopFileSystem } from '../platform/DesktopFileSystem';
 import { PathUtils } from '../platform/PathUtils';
 import { escapeHtml } from './Security';
+import { CommandHistory } from './Command';
+import { ProjectAssetCommand } from './ProjectAssetCommand';
+import type { ProjectAssetReferencePatch } from '../platform/DesktopBridge';
 
 export interface ProjectAssetSelection {
     kind: 'asset';
@@ -154,6 +157,7 @@ export class ProjectWindow {
     private focusedAssetPath: string | null = null;
     private focusedFolderPath: string | null = null;
     private recentRepairHistory: AssetRepairHistoryEntry[] = [];
+    private assetMutationBusy = false;
 
     constructor(editor: any) {
         this.editor = editor;
@@ -532,18 +536,22 @@ export class ProjectWindow {
                     else if (e.key === 'End') nextIndex = items.length - 1;
                     else if (e.key === 'Enter') {
                         e.preventDefault();
+                        e.stopPropagation();
                         onDblClick();
                         return;
                     } else if (e.key === 'F2') {
                         e.preventDefault();
+                        e.stopPropagation();
                         this.startInlineRename(label, fullPath);
                         return;
                     } else if (e.key === 'Delete') {
                         e.preventDefault();
+                        e.stopPropagation();
                         await this.deleteAssetFromKeyboard(name, fullPath, isFolder);
                         return;
                     } else if (e.key === 'ContextMenu' || (e.shiftKey && e.key === 'F10')) {
                         e.preventDefault();
+                        e.stopPropagation();
                         const rect = item.getBoundingClientRect();
                         await this.showItemContextMenu(rect.left + 12, rect.top + 12, name, fullPath, label);
                         return;
@@ -552,6 +560,7 @@ export class ProjectWindow {
                     }
 
                     e.preventDefault();
+                    e.stopPropagation();
                     if (nextIndex !== currentIndex) items[nextIndex].click();
                 };
 
@@ -568,12 +577,45 @@ export class ProjectWindow {
 
                     e.dataTransfer!.setData("text/plain", JSON.stringify({
                         type: type,
+                        source: 'project',
                         name: name.split('.')[0],
                         filename: name,
                         fullPath: fullPath
                     }));
-                    e.dataTransfer!.effectAllowed = 'copy';
+                    e.dataTransfer!.effectAllowed = 'copyMove';
                 };
+
+                if (isFolder) {
+                    item.ondragover = (e) => {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        e.dataTransfer!.dropEffect = 'move';
+                    };
+                    item.ondrop = async (e) => {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        try {
+                            const payload = JSON.parse(e.dataTransfer!.getData('text/plain'));
+                            if (payload?.source !== 'project' || typeof payload.fullPath !== 'string' || typeof payload.filename !== 'string') return;
+                            const sourcePath = payload.fullPath;
+                            const targetPath = PathUtils.join(fullPath, payload.filename);
+                            if (this.pathsEqual(sourcePath, targetPath) || this.pathsEqual(sourcePath, fullPath)
+                                || this.isPathInsideScope(fullPath, sourcePath)) {
+                                this.announceAssetMutation('Asset cannot be moved to that folder');
+                                return;
+                            }
+                            const stat = await this.fs.stat(sourcePath);
+                            await this.executeAssetMutation('Move Asset', {
+                                operation: 'move', sourcePath, targetPath,
+                                assetKind: stat.isDirectory() ? 'directory' : 'file',
+                                contentBase64: null, metadataBase64: null,
+                                referencePatches: await this.buildMoveReferencePatches(sourcePath, targetPath)
+                            });
+                        } catch (error) {
+                            this.announceAssetMutation(`Move Asset failed: ${error instanceof Error ? error.message : String(error)}`);
+                        }
+                    };
+                }
 
                 return item;
             };
@@ -839,7 +881,7 @@ export class ProjectWindow {
     }
 
     private async getRuntimeReimportPathsForAsset(assetPath: string, includeDependents: boolean): Promise<string[]> {
-        if (!assetPath || !(await this.fs.exists(assetPath) || await this.fs.stat(assetPath)).isDirectory()) return [];
+        if (!assetPath || !await this.fs.exists(assetPath) || (await this.fs.stat(assetPath)).isDirectory()) return [];
 
         const runtimePaths = new Set<string>();
         if (await this.isRuntimeRefreshCandidate(assetPath)) {
@@ -1931,35 +1973,178 @@ export class ProjectWindow {
         }
     }
 
-    private async copyDirectoryWithoutMeta(sourcePath: string, targetPath: string) {
-        await this.fs.mkdir(targetPath, { recursive: true });
-        const entries = await this.fs.readdir(sourcePath, { withFileTypes: true });
+    private async createAsset(targetPath: string, assetKind: 'file' | 'directory', content: Uint8Array): Promise<void> {
+        await this.executeAssetMutation(`Create ${assetKind === 'directory' ? 'Folder' : 'Asset'}`, {
+            operation: 'create', sourcePath: null, targetPath, assetKind,
+            contentBase64: this.bytesToBase64(content),
+            metadataBase64: this.bytesToBase64(new TextEncoder().encode(`${JSON.stringify(
+                this.createAssetMetadata(targetPath, assetKind === 'directory'), null, 2
+            )}\n`)),
+            referencePatches: []
+        });
+    }
 
-        for (const entry of entries) {
-            if (entry.name.endsWith('.meta')) continue;
+    private createAssetMetadata(assetPath: string, isDirectory: boolean): AssetMeta {
+        const extension = isDirectory ? '' : PathUtils.extname(assetPath).toLowerCase().replace('.', '');
+        const assetType = isDirectory ? 'folder'
+            : extension === 'ts' || extension === 'js' ? 'script'
+                : extension === 'scene' || extension === 'json' ? 'scene'
+                    : extension === 'prefab' ? 'prefab'
+                        : extension === 'mat' ? 'material'
+                            : extension === 'asset' ? 'scriptableObject'
+                                : 'unknown';
+        return {
+            formatVersion: 1, guid: crypto.randomUUID(), assetType, fileExtension: extension,
+            timeCreated: Date.now(), labels: [], userData: {},
+            importer: { name: 'DefaultImporter', version: 1, settings: {} }
+        };
+    }
 
-            const sourceEntryPath = PathUtils.join(sourcePath, entry.name);
-            const targetEntryPath = PathUtils.join(targetPath, entry.name);
-
-            if (entry.isDirectory()) {
-                await this.copyDirectoryWithoutMeta(sourceEntryPath, targetEntryPath);
-            } else {
-                await this.fs.copyFile(sourceEntryPath, targetEntryPath);
-            }
+    private async executeAssetMutation(
+        name: string,
+        intent: {
+            operation: 'create' | 'move' | 'duplicate' | 'delete';
+            sourcePath: string | null;
+            targetPath: string | null;
+            assetKind: 'file' | 'directory';
+            contentBase64: string | null;
+            metadataBase64: string | null;
+            referencePatches: ProjectAssetReferencePatch[];
         }
+    ): Promise<void> {
+        if (this.assetMutationBusy) throw new Error('Another Project asset mutation is still in progress');
+        const project = (window as any).__projectSecurity as { grantId?: string; root?: string } | undefined;
+        if (!project?.grantId || !project.root) throw new Error('Project asset transactions require an active project grant');
+        this.setAssetMutationBusy(true, `${name} in progress`);
+        const selectedBefore = this.selectedAssetPath;
+        const command = new ProjectAssetCommand(name, {
+            contractVersion: 1,
+            grantId: project.grantId,
+            transactionId: crypto.randomUUID(),
+            action: 'apply',
+            ...intent,
+            sourcePath: intent.sourcePath ? this.toProjectRelativePath(intent.sourcePath, project.root) : null,
+            targetPath: intent.targetPath ? this.toProjectRelativePath(intent.targetPath, project.root) : null
+        }, async (state) => {
+            try {
+                const focusPath = state === 'applied'
+                    ? (intent.operation === 'delete' ? null : intent.targetPath)
+                    : (intent.operation === 'create' || intent.operation === 'duplicate' ? selectedBefore : intent.sourcePath);
+                this.selectedAssetPath = focusPath;
+                this.focusedAssetPath = focusPath;
+                await this.refreshAssetDatabaseAndView({ focusAssetPath: focusPath, preserveSelection: true });
+                this.announceAssetMutation(`${name} ${state === 'applied' ? 'complete' : 'undone'}`);
+            } catch (error) {
+                console.error('Project asset view refresh failed after a committed transaction', error instanceof Error ? error.stack : error);
+                this.announceAssetMutation(`${name} committed; Project view refresh failed`);
+            }
+        });
+        try {
+            await Promise.resolve(CommandHistory.execute(command));
+        } catch (error) {
+            this.announceAssetMutation(`${name} failed: ${error instanceof Error ? error.message : String(error)}`);
+            throw error;
+        } finally {
+            this.setAssetMutationBusy(false);
+        }
+    }
+
+    private async buildMoveReferencePatches(sourcePath: string, targetPath: string): Promise<ProjectAssetReferencePatch[]> {
+        const project = (window as any).__projectSecurity as { root?: string } | undefined;
+        if (!project?.root) return [];
+        const patches: ProjectAssetReferencePatch[] = [];
+        const candidates = AssetDatabase.getInstance().getAllEntries()
+            .filter((entry) => this.isReferenceAuditAssetType(entry.meta.assetType))
+            .map((entry) => entry.path)
+            .sort((left, right) => left.localeCompare(right));
+        for (const candidate of candidates) {
+            if (this.pathsEqual(candidate, sourcePath) || this.isPathInsideScope(candidate, sourcePath)) continue;
+            try {
+                const beforeText = await this.fs.readFile(candidate, 'utf8');
+                const documentValue = JSON.parse(beforeText);
+                if (!this.patchMovedReferencePaths(documentValue, sourcePath, targetPath)) continue;
+                patches.push({
+                    path: this.toProjectRelativePath(candidate, project.root),
+                    beforeBase64: this.bytesToBase64(new TextEncoder().encode(beforeText)),
+                    afterBase64: this.bytesToBase64(new TextEncoder().encode(`${JSON.stringify(documentValue, null, 2)}\n`))
+                });
+            } catch { /* Unsupported reference document. */ }
+        }
+        return patches;
+    }
+
+    private patchMovedReferencePaths(node: unknown, sourcePath: string, targetPath: string): boolean {
+        if (!node || typeof node !== 'object') return false;
+        let changed = false;
+        if (Array.isArray(node)) {
+            node.forEach((value) => { changed = this.patchMovedReferencePaths(value, sourcePath, targetPath) || changed; });
+            return changed;
+        }
+        Object.entries(node as Record<string, unknown>).forEach(([key, value]) => {
+            if (key.endsWith('Path') && typeof value === 'string') {
+                if (this.pathsEqual(value, sourcePath)) {
+                    (node as Record<string, unknown>)[key] = targetPath;
+                    changed = true;
+                } else if (this.isPathInsideScope(value, sourcePath)) {
+                    const suffix = this.normalizeAssetPath(value).slice(this.normalizeAssetPath(sourcePath).length);
+                    (node as Record<string, unknown>)[key] = `${targetPath}${suffix}`;
+                    changed = true;
+                }
+            }
+            changed = this.patchMovedReferencePaths(value, sourcePath, targetPath) || changed;
+        });
+        return changed;
+    }
+
+    private toProjectRelativePath(absolutePath: string, projectRoot: string): string {
+        const relative = PathUtils.relative(projectRoot, absolutePath).replace(/\\/g, '/');
+        if (!relative || relative === '.' || relative === '..' || relative.startsWith('../')) {
+            throw new Error('Asset path is outside the active project');
+        }
+        return relative;
+    }
+
+    private bytesToBase64(bytes: Uint8Array): string {
+        let binary = '';
+        for (let offset = 0; offset < bytes.length; offset += 0x8000) {
+            binary += String.fromCharCode(...bytes.subarray(offset, offset + 0x8000));
+        }
+        return btoa(binary);
+    }
+
+    private setAssetMutationBusy(busy: boolean, message?: string): void {
+        this.assetMutationBusy = busy;
+        document.getElementById('assets-content')?.setAttribute('aria-busy', String(busy));
+        if (message) this.announceAssetMutation(message);
+    }
+
+    private announceAssetMutation(message: string): void {
+        const content = document.getElementById('assets-content');
+        if (!content) return;
+        let liveRegion = content.querySelector<HTMLElement>('[data-project-mutation-status]');
+        if (!liveRegion) {
+            liveRegion = document.createElement('div');
+            liveRegion.dataset.projectMutationStatus = 'true';
+            liveRegion.setAttribute('role', 'status');
+            liveRegion.setAttribute('aria-live', 'polite');
+            Object.assign(liveRegion.style, { position: 'absolute', width: '1px', height: '1px', overflow: 'hidden', clipPath: 'inset(50%)' });
+            content.appendChild(liveRegion);
+        }
+        liveRegion.textContent = message;
     }
 
     private async duplicateAsset(fullPath: string) {
         const targetPath = await this.getDuplicateTargetPath(fullPath);
         const stat = await this.fs.stat(fullPath);
-
-        if (stat.isDirectory()) {
-            await this.copyDirectoryWithoutMeta(fullPath, targetPath);
-        } else {
-            await this.fs.copyFile(fullPath, targetPath);
-        }
-
-        await this.refreshAssetDatabaseAndView();
+        await this.executeAssetMutation('Duplicate Asset', {
+            operation: 'duplicate',
+            sourcePath: fullPath,
+            targetPath,
+            assetKind: stat.isDirectory() ? 'directory' : 'file',
+            contentBase64: null,
+            metadataBase64: null,
+            referencePatches: []
+        });
     }
 
     private async drawFolderTree(parent: HTMLElement, path: string, indent: number) {
@@ -2139,16 +2324,15 @@ export class ProjectWindow {
         const impactSummary = await this.getDeleteImpactSummary(fullPath);
         if (!confirm(this.buildDeleteConfirmationMessage(name, impactSummary))) return;
 
-        if (isDirectory) {
-            await this.fs.rm(fullPath, { recursive: true, force: true });
-        } else {
-            await this.fs.unlink(fullPath);
-        }
-        const metaPath = fullPath + '.meta';
-        if (await this.fs.exists(metaPath)) await this.fs.unlink(metaPath);
-        this.selectedAssetPath = null;
-        this.focusedAssetPath = null;
-        await this.refreshAssetDatabaseAndView();
+        await this.executeAssetMutation('Delete Asset', {
+            operation: 'delete',
+            sourcePath: fullPath,
+            targetPath: null,
+            assetKind: isDirectory ? 'directory' : 'file',
+            contentBase64: null,
+            metadataBase64: null,
+            referencePatches: []
+        });
     }
 
     private showContextMenu(x: number, y: number) {
@@ -2159,8 +2343,7 @@ export class ProjectWindow {
             const name = prompt("Folder Name", "New Folder");
             if (name) {
                 const p = PathUtils.join(this.currentPath, name);
-                if (!await this.fs.exists(p)) await this.fs.mkdir(p);
-                await this.refreshAssetDatabaseAndView();
+                if (!await this.fs.exists(p)) await this.createAsset(p, 'directory', new Uint8Array());
             }
         });
 
@@ -2176,8 +2359,7 @@ export class ProjectWindow {
             if (name) {
                 const mat = new Material(name);
                 const p = PathUtils.join(this.currentPath, `${name}.mat`);
-                await this.fs.writeFile(p, JSON.stringify(mat.serialize(), null, 4));
-                await this.refreshAssetDatabaseAndView();
+                await this.createAsset(p, 'file', new TextEncoder().encode(JSON.stringify(mat.serialize(), null, 4)));
             }
         });
 
@@ -2186,8 +2368,7 @@ export class ProjectWindow {
             if (name) {
                 const scene = new Scene();
                 const p = PathUtils.join(this.currentPath, `${name}.scene`);
-                await this.fs.writeFile(p, scene.toJSON(), 'utf8');
-                await this.refreshAssetDatabaseAndView();
+                await this.createAsset(p, 'file', new TextEncoder().encode(scene.toJSON()));
             }
         });
 
@@ -2203,8 +2384,7 @@ export class ProjectWindow {
                     const instance = new Ctor();
                     instance.assetName = name;
                     const p = PathUtils.join(this.currentPath, `${name}.asset`);
-                    await this.fs.writeFile(p, instance.toAssetJSON(), 'utf8');
-                    await this.refreshAssetDatabaseAndView();
+                    await this.createAsset(p, 'file', new TextEncoder().encode(instance.toAssetJSON()));
                 });
             });
         }
@@ -2343,16 +2523,11 @@ export class ProjectWindow {
         this.addMenuItem(menu, 'Delete',  async() => {
             const impactSummary = await this.getDeleteImpactSummary(fullPath);
             if (confirm(this.buildDeleteConfirmationMessage(name, impactSummary))) {
-                if (isDirectory) {
-                    await this.fs.rm(fullPath, { recursive: true, force: true });
-                    const metaPath = fullPath + '.meta';
-                    if (await this.fs.exists(metaPath)) await this.fs.unlink(metaPath);
-                } else {
-                    await this.fs.unlink(fullPath);
-                    const metaPath = fullPath + '.meta';
-                    if (await this.fs.exists(metaPath)) await this.fs.unlink(metaPath);
-                }
-                await this.refreshAssetDatabaseAndView();
+                await this.executeAssetMutation('Delete Asset', {
+                    operation: 'delete', sourcePath: fullPath, targetPath: null,
+                    assetKind: isDirectory ? 'directory' : 'file', contentBase64: null,
+                    metadataBase64: null, referencePatches: []
+                });
             }
         }, '#ff6b6b');
 
@@ -2451,7 +2626,7 @@ export class ProjectWindow {
     }
 
     private async auditAndRepairReferenceFile(assetPath: string, applyFixes: boolean, result: AssetReferenceAuditResult): Promise<void> {
-        if (!this.fs || !(await this.fs.exists(assetPath) || await this.fs.stat(assetPath)).isDirectory()) return;
+        if (!this.fs || !await this.fs.exists(assetPath) || (await this.fs.stat(assetPath)).isDirectory()) return;
 
         try {
             const raw = await this.fs.readFile(assetPath, 'utf8');
@@ -3059,10 +3234,13 @@ export class ProjectWindow {
                             await this.refresh();
                             return;
                         }
-                        await this.fs.rename(fullPath, newPath);
-                        const oldMeta = fullPath + '.meta';
-                        const newMeta = newPath + '.meta';
-                        if (await this.fs.exists(oldMeta)) await this.fs.rename(oldMeta, newMeta);
+                        const referencePatches = await this.buildMoveReferencePatches(fullPath, newPath);
+                        const isDirectory = (await this.fs.stat(fullPath)).isDirectory();
+                        await this.executeAssetMutation('Rename Asset', {
+                            operation: 'move', sourcePath: fullPath, targetPath: newPath,
+                            assetKind: isDirectory ? 'directory' : 'file', contentBase64: null,
+                            metadataBase64: null, referencePatches
+                        });
                     } catch (err) {
                         console.error("Rename failed", err);
                     }
@@ -3075,10 +3253,12 @@ export class ProjectWindow {
         input.onkeydown =  async(e) => {
             if (e.key === 'Enter') {
                 e.preventDefault();
+                e.stopPropagation();
                 await finish();
             }
             if (e.key === 'Escape') {
                 e.preventDefault();
+                e.stopPropagation();
                 settled = true;
                 await this.refresh();
                 requestAnimationFrame(() => {
@@ -3180,8 +3360,7 @@ export default class ${name} extends Component {
             target = PathUtils.join(this.currentPath, `${base}_1.${ext}`);
         }
 
-        await this.fs.writeFile(target, template);
-        await this.refreshAssetDatabaseAndView();
+        await this.createAsset(target, 'file', new TextEncoder().encode(template));
     }
 
     private async getAllFilesRecursive(dir: string): Promise<any[]> {

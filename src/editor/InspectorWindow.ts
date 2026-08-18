@@ -13,6 +13,7 @@ import { ScriptRegistry } from '../engine/ScriptRegistry';
 import { CommandHistory } from './Command';
 import {
     AddComponentCommand,
+    AddSerializedComponentCommand,
     DeserializeComponentCommand,
     RemoveComponentCommand,
     ReorderComponentCommand,
@@ -750,11 +751,11 @@ export class InspectorWindow extends EditorWindow {
                 if (this.copiedComponentType && this.copiedComponentData) {
                     const ComponentClass = ScriptRegistry.getComponentClass(this.copiedComponentType);
                     if (ComponentClass && !go.components.find(c => c.constructor.name === this.copiedComponentType)) {
-                        const newComp = go.addComponent(ComponentClass);
-                        if (newComp.deserialize) {
-                            newComp.deserialize(this.copiedComponentData.data || {});
-                        }
-                        CommandHistory.execute(new AddComponentCommand(go, ComponentClass));
+                        CommandHistory.execute(new AddSerializedComponentCommand(
+                            go,
+                            ComponentClass,
+                            this.copiedComponentData.data || {}
+                        ));
                         this.refresh();
                     }
                 }
@@ -1535,8 +1536,8 @@ setTimeout(() => document.addEventListener('mousedown', close), 0);
     const validateRefsBtn = document.createElement('button');
     validateRefsBtn.className = 'unity-button';
     validateRefsBtn.innerText = 'Validate Refs';
-    validateRefsBtn.onclick = () => {
-        const result = (window as any).Editor?.instance?.projectWindow?.auditAssetReferences?.(asset.path) as AssetReferenceAuditResult | null;
+    validateRefsBtn.onclick = async () => {
+        const result = await (window as any).Editor?.instance?.projectWindow?.auditAssetReferences?.(asset.path) as AssetReferenceAuditResult | null;
         if (!result) {
             alert('No auditable references were found for this asset.');
             return;
@@ -1548,8 +1549,8 @@ setTimeout(() => document.addEventListener('mousedown', close), 0);
     const repairRefsBtn = document.createElement('button');
     repairRefsBtn.className = 'unity-button';
     repairRefsBtn.innerText = 'Auto Repair Refs';
-    repairRefsBtn.onclick = () => {
-        const result = (window as any).Editor?.instance?.projectWindow?.repairAssetReferences?.(asset.path) as AssetReferenceAuditResult | null;
+    repairRefsBtn.onclick = async () => {
+        const result = await (window as any).Editor?.instance?.projectWindow?.repairAssetReferences?.(asset.path) as AssetReferenceAuditResult | null;
         if (!result) {
             alert('No auditable references were found for this asset.');
             return;
@@ -1567,8 +1568,8 @@ setTimeout(() => document.addEventListener('mousedown', close), 0);
     const impactBtn = document.createElement('button');
     impactBtn.className = 'unity-button';
     impactBtn.innerText = 'Delete Impact';
-    impactBtn.onclick = () => {
-        const summary = (window as any).Editor?.instance?.projectWindow?.getDeleteImpactSummary?.(asset.path) as AssetDeleteImpactSummary | null;
+    impactBtn.onclick = async () => {
+        const summary = await (window as any).Editor?.instance?.projectWindow?.getDeleteImpactSummary?.(asset.path) as AssetDeleteImpactSummary | null;
         if (!summary) {
             alert('Impact summary is not available for this asset.');
             return;
@@ -1598,12 +1599,16 @@ setTimeout(() => document.addEventListener('mousedown', close), 0);
     const deleteImpact = projectWindow?.getDeleteImpactSummary
         ? projectWindow.getDeleteImpactSummary(asset.path) as AssetDeleteImpactSummary | null
         : null;
-    if(referenceHealth) {
-        this.appendAssetReferenceHealthSection(content, referenceHealth);
-    }
-        if(deleteImpact) {
-        this.appendAssetDeleteImpactSection(content, deleteImpact);
-    }
+    void Promise.resolve(referenceHealth).then((result) => {
+        if (result && content.isConnected && (this.selection as ProjectAssetSelection | null)?.path === asset.path) {
+            this.appendAssetReferenceHealthSection(content, result);
+        }
+    });
+    void Promise.resolve(deleteImpact).then((result) => {
+        if (result && content.isConnected && (this.selection as ProjectAssetSelection | null)?.path === asset.path) {
+            this.appendAssetDeleteImpactSection(content, result);
+        }
+    });
         this.appendAssetReferenceSection(content, usedByPaths, dependencyPaths);
 
     const importSection = document.createElement('div');

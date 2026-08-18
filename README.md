@@ -21,8 +21,13 @@ Engine Project is a full-scale game engine and runtime built as an Electron-base
 Kurulum:
 
 ```bash
-npm install
+npm run bootstrap
 ```
+
+Bu kanonik temiz-kopya komutu once kilit dosyasiyla `npm ci` calistirir,
+ardindan projede sabitlenmis Electron 43 paketinin resmi `install-electron`
+istege bagli indirme komutunu kullanir. Yalniz Electron ikilisini yeniden
+hazirlamak icin `npm run bootstrap:electron` kullanilabilir.
 
 Canli gelistirme:
 

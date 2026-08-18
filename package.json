@@ -8,11 +8,10 @@
   },
   "main": "electron/main.js",
   "scripts": {
+    "bootstrap": "npm ci && npm run bootstrap:electron",
+    "bootstrap:electron": "install-electron --no",
     "dev": "concurrently \"vite --port 5174\" \"wait-on tcp:5174 && node scripts/start-electron.js\"",
     "build": "tsc && vite build && node scripts/fix-dist-paths.js",
-    "test:parity": "node test_all_phases.cjs",
-    "test:phase8": "node verify_phase8_ui_rendering.cjs",
-    "test:phase9": "node verify_phase9_desktop_productization.cjs",
     "test:editor-workflow": "node --test test/editor-workflow-contract.test.cjs test/editor-interaction.test.cjs",
     "test:phase2-authoring-matrix": "node --test test/phase-2-authoring-matrix.test.cjs",
     "test:persistence": "node --test test/persistence.test.cjs",
@@ -23,16 +22,19 @@
     "test:viewport-sizing": "node --experimental-strip-types --test test/viewport-sizing.test.mjs",
     "test:scene-view": "node --experimental-strip-types --test test/scene-view-navigation.test.mjs",
     "test:release-integrity": "node --test test/release-integrity.test.cjs",
+    "test:play-sandbox": "node scripts/build-play-sandbox-launcher.cjs && node --test test/windows-play-sandbox-launcher.test.cjs",
     "test:source-built-smoke": "node scripts/source-built-editor-smoke.cjs",
     "test:source-built-smoke-contract": "node --test test/source-built-editor-smoke.test.cjs",
     "test:packaged-smoke": "node scripts/packaged-smoke.cjs",
+    "test:packaged-play-sandbox": "node scripts/packaged-play-sandbox-adversarial.cjs",
     "test:phase1-packaged-persistence": "node scripts/phase1-packaged-persistence.cjs",
     "test:installer": "node scripts/verify-installer.cjs",
     "audit:release": "npm audit --omit=dev --audit-level=high && npm audit --audit-level=critical",
     "verify:vertical-slice": "node --test test/vertical-slice.test.cjs && npm run build",
     "preview": "vite preview",
     "watch:csharp": "node scripts/watch-csharp.js",
-    "electron:build": "vite build && node scripts/fix-dist-paths.js && electron-builder"
+    "build:play-sandbox": "node scripts/build-play-sandbox-launcher.cjs",
+    "electron:build": "vite build && node scripts/fix-dist-paths.js && npm run build:play-sandbox && electron-builder"
   },
   "build": {
     "appId": "com.tugberk.engine",
@@ -45,6 +47,9 @@
       "dist/assets/**/*",
       "electron/**/*",
       "package.json"
+    ],
+    "asarUnpack": [
+      "electron/resources/win32-x64/**"
     ],
     "win": {
       "target": [

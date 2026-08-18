@@ -5,6 +5,9 @@ out/
 .vite/
 *.log
 *.tsbuildinfo
+smoke-test-result.json
+electron/resources/win32-x64/tugberk-play-sandbox.exe
+electron/resources/win32-x64/tugberk-play-sandbox.manifest.json
 
 .DS_Store
 Thumbs.db

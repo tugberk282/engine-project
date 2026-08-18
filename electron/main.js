@@ -15,6 +15,7 @@ const { createVersionedHandler } = require('./architecture/ipc-router');
 const { ProtocolGrants } = require('./architecture/protocol-grants');
 const { ProjectService } = require('./platform/project-service');
 const { AssetService } = require('./platform/asset-service');
+const { ProjectAssetTransactionService } = require('./platform/project-asset-transaction-service');
 const { RecentProjectService } = require('./platform/recent-project-service');
 const { DiagnosticStore } = require('./diagnostics/diagnostic-store');
 const { ShutdownCoordinator } = require('./lifecycle/shutdown-coordinator');
@@ -26,6 +27,7 @@ const confinedFileSystem = new ConfinedFileSystem();
 const protocolGrants = new ProtocolGrants(projectCapabilities);
 const projectService = new ProjectService({ grants: protocolGrants });
 const assetService = new AssetService({ projectService });
+const projectAssetTransactions = new ProjectAssetTransactionService({ projectService });
 const protocolGrantCleanupSenders = new Set();
 const assetScansByOwner = new Map();
 let editorWebContentsId = null;
@@ -127,7 +129,9 @@ function validateProjectRoot(projectPath) {
 }
 
 function protocolProjectResult(sender, status) {
-    const grant = createProtocolGrant(sender, status.root, { writable: status.trusted });
+    const grant = createProtocolGrant(sender, status.root, {
+        writable: status.trusted || process.env.ENGINE_SMOKE_TEST === '1'
+    });
     return { grantId: grant.grantId, root: status.root, name: path.basename(status.root), trust: status };
 }
 
@@ -274,6 +278,8 @@ async function executeProtocolCommand(event, request) {
                 request.payload,
                 { grantId: request.payload.grantId, path: request.payload.destinationPath }
             );
+        case COMMANDS.ASSET_TRANSACTION:
+            return projectAssetTransactions.transact(event.sender.id, request.payload);
         case COMMANDS.ASSET_WRITE_METADATA:
             return assetService.writeMetadata(event.sender.id, request.payload, request.payload.metadata);
         case COMMANDS.PROJECT_REVOKE_GRANT:
@@ -312,6 +318,11 @@ ipcMain.handle('tugberk:v1:request', createVersionedHandler({
 async function runSmokeTest(mainWindow) {
     const outputPath = process.env.ENGINE_SMOKE_TEST_OUTPUT
         || path.join(process.cwd(), 'smoke-test-result.json');
+    const expectLauncherFailure = process.env.ENGINE_SMOKE_EXPECT_LAUNCHER_FAILURE === '1';
+    const expectedSceneTransaction = process.env.ENGINE_SMOKE_EXPECT_SCENE_TRANSACTION || null;
+    if (!expectLauncherFailure && process.env.ENGINE_AUTO_OPEN_PROJECT_PATH) {
+        projectCapabilities.setWritable(process.env.ENGINE_AUTO_OPEN_PROJECT_PATH, true);
+    }
     const result = await mainWindow.webContents.executeJavaScript(`
         (async () => {
             const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -321,10 +332,34 @@ async function runSmokeTest(mainWindow) {
                 checks.push({ name, pass, details });
                 if (!pass) failures.push({ name, details });
             };
+            const commandRevision = (editor) => Number(editor?.dirtyState?.commandRevision);
+            const dispatchHistoryShortcut = async (key, shiftKey = false) => {
+                window.dispatchEvent(new KeyboardEvent('keydown', {
+                    key,
+                    code: key === 'z' ? 'KeyZ' : 'KeyY',
+                    ctrlKey: true,
+                    shiftKey,
+                    bubbles: true,
+                    cancelable: true
+                }));
+                await wait(75);
+            };
+            const sceneIdentity = (scene) => {
+                const parsed = JSON.parse(scene.toJSON());
+                const objects = Array.isArray(parsed.gameObjects) ? parsed.gameObjects : [];
+                const identity = [];
+                const visit = (entry, parentId, siblingIndex) => {
+                    identity.push({ id: entry.id, name: entry.name, parentId, siblingIndex });
+                    const children = Array.isArray(entry.children) ? entry.children : [];
+                    children.forEach((child, index) => visit(child, entry.id, index));
+                };
+                objects.forEach((entry, index) => visit(entry, null, index));
+                return identity;
+            };
 
             const getEditor = () => window.Editor?.instance ?? null;
             const waitForEditor = async () => {
-                for (let i = 0; i < 120; i += 1) {
+                for (let i = 0; i < ${expectLauncherFailure ? 40 : 120}; i += 1) {
                     const editor = getEditor();
                     if (editor?.scene && document.getElementById('hierarchy-content')) {
                         return editor;
@@ -336,6 +371,29 @@ async function runSmokeTest(mainWindow) {
 
             const editor = await waitForEditor();
             if (!editor) {
+                const launcher = document.getElementById('launcher-container');
+                const launcherStatus = document.getElementById('launcher-status');
+                const launcherVisible = !!launcher && getComputedStyle(launcher).display !== 'none';
+                const failureVisible = launcherStatus?.classList.contains('error') === true
+                    && (launcherStatus.textContent?.trim().length ?? 0) > 0;
+                if (${JSON.stringify(expectLauncherFailure)}) {
+                    return {
+                        ok: launcherVisible && failureVisible,
+                        failures: launcherVisible && failureVisible ? [] : [{
+                            name: 'launcher failure remains recoverable',
+                            details: 'launcherVisible=' + launcherVisible + ', status=' + (launcherStatus?.textContent ?? '')
+                        }],
+                        checks: [
+                            { name: 'launcher remains visible after project failure', pass: launcherVisible },
+                            { name: 'launcher exposes visible project failure', pass: failureVisible }
+                        ],
+                        snapshot: {
+                            launchError: window.__engineLaunchError ?? null,
+                            launcherVisible,
+                            launcherStatus: launcherStatus?.textContent ?? null
+                        }
+                    };
+                }
                 return {
                     ok: false,
                     failures: [{ name: 'editor booted', details: 'Editor instance was not created' }],
@@ -354,10 +412,27 @@ async function runSmokeTest(mainWindow) {
             }
             await wait(250);
 
+            const expectedTransaction = ${JSON.stringify(expectedSceneTransaction)};
+            if (expectedTransaction) {
+                const expected = JSON.parse(expectedTransaction);
+                const actualIdentity = sceneIdentity(editor.scene);
+                record('saved scene transaction survives editor relaunch with stable IDs and order',
+                    JSON.stringify(actualIdentity) === JSON.stringify(expected.identity),
+                    'Expected ' + expected.identity.length + ' serialized objects after relaunch; found ' + actualIdentity.length);
+                return {
+                    ok: failures.length === 0,
+                    failures,
+                    checks,
+                    snapshot: { identity: actualIdentity }
+                };
+            }
+
             const sceneView = document.getElementById('scene-view');
             const hierarchyContent = document.getElementById('hierarchy-content');
             const inspectorContent = document.getElementById('inspector-content');
             const initialObjects = Array.isArray(editor.scene?.gameObjects) ? editor.scene.gameObjects.length : -1;
+            const beforeCreateBytes = editor.scene.toJSON();
+            const beforeCreateRevision = commandRevision(editor);
             record('editor booted', !!editor, 'window.Editor.instance exists');
             record('scene view exists', !!sceneView, '#scene-view present');
             record('hierarchy content exists', !!hierarchyContent, '#hierarchy-content present');
@@ -382,9 +457,23 @@ async function runSmokeTest(mainWindow) {
             record('cube creation changes scene object count', afterCreateObjects > initialObjects, 'scene object count should increase');
             record('cube becomes active selection', createdCube?.name === 'Cube', createdCube ? 'Cube selected' : 'no selected object');
             record('hierarchy renders created cube row', hierarchyLabels.includes('Cube'), 'Cube label should appear in hierarchy');
+            const afterCreateBytes = editor.scene.toJSON();
+            const afterCreateRevision = commandRevision(editor);
+            await dispatchHistoryShortcut('z');
+            const createUndoPass = editor.scene.toJSON() === beforeCreateBytes
+                && commandRevision(editor) === beforeCreateRevision;
+            await dispatchHistoryShortcut('y');
+            record('rendered create is exactly one undo unit',
+                afterCreateRevision === beforeCreateRevision + 1
+                    && createUndoPass
+                    && editor.scene.toJSON() === afterCreateBytes
+                    && commandRevision(editor) === afterCreateRevision,
+                beforeCreateRevision + ' -> ' + afterCreateRevision + ' with byte-identical undo/redo');
 
             hierarchyContent?.focus();
             const beforeKeyboardCreate = editor.scene.gameObjects.length;
+            const beforeKeyboardCreateBytes = editor.scene.toJSON();
+            const beforeKeyboardCreateRevision = commandRevision(editor);
             window.dispatchEvent(new KeyboardEvent('keydown', {
                 key: 'N', code: 'KeyN', ctrlKey: true, shiftKey: true, bubbles: true, cancelable: true
             }));
@@ -393,8 +482,22 @@ async function runSmokeTest(mainWindow) {
             record('keyboard shortcut creates and selects GameObject',
                 editor.scene.gameObjects.length === beforeKeyboardCreate + 1 && keyboardCreated?.name === 'New GameObject',
                 'Ctrl+Shift+N should create exactly one selected GameObject');
+            const afterKeyboardCreateBytes = editor.scene.toJSON();
+            const afterKeyboardCreateRevision = commandRevision(editor);
+            await dispatchHistoryShortcut('z');
+            const keyboardCreateUndoPass = editor.scene.toJSON() === beforeKeyboardCreateBytes
+                && commandRevision(editor) === beforeKeyboardCreateRevision;
+            await dispatchHistoryShortcut('y');
+            record('keyboard create is exactly one undo unit',
+                afterKeyboardCreateRevision === beforeKeyboardCreateRevision + 1
+                    && keyboardCreateUndoPass
+                    && editor.scene.toJSON() === afterKeyboardCreateBytes
+                    && commandRevision(editor) === afterKeyboardCreateRevision,
+                beforeKeyboardCreateRevision + ' -> ' + afterKeyboardCreateRevision + ' with byte-identical undo/redo');
 
             hierarchyContent?.focus();
+            const beforeRenameBytes = editor.scene.toJSON();
+            const beforeRenameRevision = commandRevision(editor);
             hierarchyContent?.dispatchEvent(new KeyboardEvent('keydown', {
                 key: 'F2', bubbles: true, cancelable: true
             }));
@@ -410,6 +513,18 @@ async function runSmokeTest(mainWindow) {
             record('keyboard rename commits and returns hierarchy focus',
                 keyboardCreated?.name === 'Keyboard Authored' && document.activeElement === hierarchyContent,
                 'F2, text, Enter should rename and return focus to the hierarchy tree');
+            const afterRenameBytes = editor.scene.toJSON();
+            const afterRenameRevision = commandRevision(editor);
+            await dispatchHistoryShortcut('z');
+            const renameUndoPass = editor.scene.toJSON() === beforeRenameBytes
+                && commandRevision(editor) === beforeRenameRevision;
+            await dispatchHistoryShortcut('y');
+            record('rendered rename is exactly one undo unit',
+                afterRenameRevision === beforeRenameRevision + 1
+                    && renameUndoPass
+                    && editor.scene.toJSON() === afterRenameBytes
+                    && commandRevision(editor) === afterRenameRevision,
+                beforeRenameRevision + ' -> ' + afterRenameRevision + ' with byte-identical undo/redo');
 
             hierarchyContent?.dispatchEvent(new KeyboardEvent('keydown', {
                 key: 'ContextMenu', bubbles: true, cancelable: true
@@ -424,6 +539,163 @@ async function runSmokeTest(mainWindow) {
             record('hierarchy context menu traps and returns keyboard focus',
                 keyboardMenuFocused && !document.getElementById('hierarchy-context-menu') && document.activeElement === hierarchyContent,
                 'ContextMenu should focus an action; Escape should dismiss and restore the tree');
+
+            const hierarchyRows = Array.from(hierarchyContent?.querySelectorAll('[data-id]') ?? []);
+            if (hierarchyRows.length >= 2) {
+                hierarchyRows[0].dispatchEvent(new MouseEvent('click', { bubbles: true }));
+                hierarchyRows[hierarchyRows.length - 1].dispatchEvent(new MouseEvent('click', { bubbles: true, shiftKey: true }));
+                await wait(50);
+            }
+            record('hierarchy shift click selects a visible range',
+                hierarchyRows.length >= 2 && (editor.getSelectedGameObjects?.() ?? []).length >= 2,
+                'Shift+click should extend selection across visible hierarchy rows');
+
+            editor.selectGameObject(keyboardCreated, false);
+            hierarchyContent?.focus();
+            hierarchyContent?.dispatchEvent(new KeyboardEvent('keydown', {
+                key: 'F2', bubbles: true, cancelable: true
+            }));
+            await wait(25);
+            const cancelledRenameInput = hierarchyContent?.querySelector('input');
+            if (cancelledRenameInput) {
+                cancelledRenameInput.value = 'Cancelled Rename';
+                cancelledRenameInput.dispatchEvent(new KeyboardEvent('keydown', {
+                    key: 'Escape', bubbles: true, cancelable: true
+                }));
+            }
+            await wait(50);
+            record('hierarchy rename Escape preserves model and returns focus',
+                keyboardCreated?.name === 'Keyboard Authored' && document.activeElement === hierarchyContent,
+                'Escape should discard the staged rename and restore tree focus');
+
+            const dragBetweenRows = async (sourceId, targetId, { drop = true, escape = false } = {}) => {
+                const sourceRow = hierarchyContent?.querySelector('[data-id="' + sourceId + '"]');
+                const targetRow = hierarchyContent?.querySelector('[data-id="' + targetId + '"]');
+                if (!sourceRow || !targetRow || typeof DataTransfer !== 'function' || typeof DragEvent !== 'function') {
+                    return { sourceRow, targetRow, supported: false };
+                }
+                const transfer = new DataTransfer();
+                sourceRow.dispatchEvent(new DragEvent('dragstart', {
+                    bubbles: true, cancelable: true, dataTransfer: transfer
+                }));
+                targetRow.dispatchEvent(new DragEvent('dragover', {
+                    bubbles: true, cancelable: true, dataTransfer: transfer
+                }));
+                if (escape) {
+                    window.dispatchEvent(new KeyboardEvent('keydown', {
+                        key: 'Escape', bubbles: true, cancelable: true
+                    }));
+                } else if (drop) {
+                    targetRow.dispatchEvent(new DragEvent('drop', {
+                        bubbles: true, cancelable: true, dataTransfer: transfer
+                    }));
+                }
+                sourceRow.dispatchEvent(new DragEvent('dragend', {
+                    bubbles: true, cancelable: true, dataTransfer: transfer
+                }));
+                await wait(75);
+                return { sourceRow, targetRow, supported: true };
+            };
+
+            editor.selectGameObject(keyboardCreated, false);
+            editor.hierarchyWindow?.refresh?.();
+            await wait(50);
+            const beforeReparentBytes = editor.scene.toJSON();
+            const beforeReparentRevision = commandRevision(editor);
+            const reparentDrag = await dragBetweenRows(keyboardCreated.id, createdCube.id);
+            const afterReparentBytes = editor.scene.toJSON();
+            const afterReparentRevision = commandRevision(editor);
+            const reparented = keyboardCreated.transform.parent?.gameObject === createdCube;
+            await dispatchHistoryShortcut('z');
+            const reparentUndoPass = editor.scene.toJSON() === beforeReparentBytes
+                && commandRevision(editor) === beforeReparentRevision;
+            await dispatchHistoryShortcut('y');
+            record('rendered reparent is exactly one undo unit',
+                reparentDrag.supported
+                    && reparented
+                    && afterReparentRevision === beforeReparentRevision + 1
+                    && reparentUndoPass
+                    && editor.scene.toJSON() === afterReparentBytes
+                    && commandRevision(editor) === afterReparentRevision,
+                beforeReparentRevision + ' -> ' + afterReparentRevision + ' with byte-identical undo/redo');
+
+            editor.hierarchyWindow?.refresh?.();
+            await wait(50);
+            const beforeInvalidDropBytes = editor.scene.toJSON();
+            const beforeInvalidDropRevision = commandRevision(editor);
+            const beforeInvalidDropDirty = editor.dirtyState?.isDirty;
+            const invalidDrop = await dragBetweenRows(createdCube.id, keyboardCreated.id);
+            record('invalid descendant drop leaves scene, history, and dirty checkpoint unchanged',
+                invalidDrop.supported
+                    && editor.scene.toJSON() === beforeInvalidDropBytes
+                    && commandRevision(editor) === beforeInvalidDropRevision
+                    && editor.dirtyState?.isDirty === beforeInvalidDropDirty,
+                'Parent-to-descendant drop must be rejected without a transaction');
+
+            editor.hierarchyWindow?.refresh?.();
+            await wait(50);
+            const rootCancellationTarget = editor.scene.gameObjects.find((entry) =>
+                entry !== createdCube && entry !== keyboardCreated && entry.transform.parent === null && entry.name !== 'Editor Camera');
+            const beforeEscapeBytes = editor.scene.toJSON();
+            const beforeEscapeRevision = commandRevision(editor);
+            const beforeEscapeDirty = editor.dirtyState?.isDirty;
+            const escapeDrag = rootCancellationTarget
+                ? await dragBetweenRows(keyboardCreated.id, rootCancellationTarget.id, { drop: false, escape: true })
+                : { supported: false, sourceRow: null, targetRow: null };
+            record('hierarchy drag Escape clears visual state without mutation',
+                escapeDrag.supported
+                    && escapeDrag.sourceRow?.getAttribute('aria-grabbed') === null
+                    && escapeDrag.sourceRow?.style.opacity === '1'
+                    && escapeDrag.targetRow?.dataset.dropTarget === undefined
+                    && document.activeElement === hierarchyContent
+                    && editor.scene.toJSON() === beforeEscapeBytes
+                    && commandRevision(editor) === beforeEscapeRevision
+                    && editor.dirtyState?.isDirty === beforeEscapeDirty,
+                'Escape must clear grabbed/drop-target state, restore tree focus, and create no transaction');
+
+            editor.selectGameObject(keyboardCreated, false);
+            const beforeDuplicateBytes = editor.scene.toJSON();
+            const beforeDuplicateRevision = commandRevision(editor);
+            window.dispatchEvent(new KeyboardEvent('keydown', {
+                key: 'd', code: 'KeyD', ctrlKey: true, bubbles: true, cancelable: true
+            }));
+            await wait(100);
+            const duplicatedObject = (editor.getSelectedGameObjects?.() ?? []).at(-1) ?? null;
+            const afterDuplicateBytes = editor.scene.toJSON();
+            const afterDuplicateRevision = commandRevision(editor);
+            await dispatchHistoryShortcut('z');
+            const duplicateUndoPass = editor.scene.toJSON() === beforeDuplicateBytes
+                && commandRevision(editor) === beforeDuplicateRevision;
+            await dispatchHistoryShortcut('y');
+            record('rendered duplicate is exactly one undo unit',
+                duplicatedObject
+                    && duplicatedObject.id !== keyboardCreated.id
+                    && afterDuplicateRevision === beforeDuplicateRevision + 1
+                    && duplicateUndoPass
+                    && editor.scene.toJSON() === afterDuplicateBytes
+                    && commandRevision(editor) === afterDuplicateRevision,
+                beforeDuplicateRevision + ' -> ' + afterDuplicateRevision + ' with stable duplicate identity');
+
+            editor.selectGameObject(duplicatedObject, false);
+            const beforeDeleteBytes = editor.scene.toJSON();
+            const beforeDeleteRevision = commandRevision(editor);
+            window.dispatchEvent(new KeyboardEvent('keydown', {
+                key: 'Delete', code: 'Delete', bubbles: true, cancelable: true
+            }));
+            await wait(100);
+            const afterDeleteBytes = editor.scene.toJSON();
+            const afterDeleteRevision = commandRevision(editor);
+            await dispatchHistoryShortcut('z');
+            const deleteUndoPass = editor.scene.toJSON() === beforeDeleteBytes
+                && commandRevision(editor) === beforeDeleteRevision;
+            await dispatchHistoryShortcut('y');
+            record('rendered delete is exactly one undo unit',
+                !editor.scene.gameObjects.includes(duplicatedObject)
+                    && afterDeleteRevision === beforeDeleteRevision + 1
+                    && deleteUndoPass
+                    && editor.scene.toJSON() === afterDeleteBytes
+                    && commandRevision(editor) === afterDeleteRevision,
+                beforeDeleteRevision + ' -> ' + afterDeleteRevision + ' with byte-identical undo/redo');
 
             const shortcutGuard = document.createElement('textarea');
             document.body.appendChild(shortcutGuard);
@@ -454,6 +726,28 @@ async function runSmokeTest(mainWindow) {
             if (createdCube) {
                 editor.selectGameObject(createdCube, false);
                 await wait(100);
+                const nameInput = document.querySelector('#inspector-content #go-name');
+                const nameBeforeStagedEdit = createdCube.name;
+                if (nameInput) {
+                    nameInput.focus();
+                    nameInput.value = 'Inspector Staged Name';
+                    nameInput.dispatchEvent(new Event('input', { bubbles: true }));
+                    nameInput.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+                }
+                record('inspector staged edit is model-nonmutating until commit',
+                    createdCube.name === nameBeforeStagedEdit,
+                    'Typing without a change commit must not mutate the selected object');
+
+                const commitInput = document.querySelector('#inspector-content #go-name');
+                if (commitInput) {
+                    commitInput.value = 'Inspector Committed Name';
+                    commitInput.dispatchEvent(new Event('change', { bubbles: true }));
+                    await wait(50);
+                }
+                record('inspector change commits through the rendered control',
+                    createdCube.name === 'Inspector Committed Name',
+                    'A change event should commit the inspector name edit');
+
                 const addComponentButton = Array.from(document.querySelectorAll('#inspector-content button'))
                     .find((node) => node.textContent?.trim() === 'Add Component');
                 record('inspector add component button visible', !!addComponentButton, 'Add Component button should exist for selection');
@@ -472,6 +766,194 @@ async function runSmokeTest(mainWindow) {
                 record('component added to cube', componentAdded, componentAdded ? componentName + ' added' : 'component count did not change');
             }
 
+            await editor.projectWindow?.refresh?.();
+            await wait(100);
+            const assetItems = Array.from(document.querySelectorAll('.project-asset-grid .asset-item'));
+            const assetItem = assetItems.find((item) => /\.[a-z0-9]+$/i.test(item.textContent?.trim() ?? ''))
+                ?? assetItems[assetItems.length - 1]
+                ?? null;
+            assetItem?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+            await wait(100);
+            record('Project async item selection reaches observable state',
+                !!assetItem && assetItem.getAttribute('aria-selected') === 'true',
+                'Clicking a rendered asset should complete selection after async metadata lookup');
+            let dragPayload = null;
+            if (assetItem && typeof DataTransfer === 'function' && typeof DragEvent === 'function') {
+                const transfer = new DataTransfer();
+                assetItem.dispatchEvent(new DragEvent('dragstart', { bubbles: true, cancelable: true, dataTransfer: transfer }));
+                try { dragPayload = JSON.parse(transfer.getData('text/plain')); } catch {}
+            }
+            record('Project drag exposes a typed asset payload',
+                !!dragPayload?.type && !!dragPayload?.filename && !!dragPayload?.fullPath,
+                dragPayload ? JSON.stringify(dragPayload) : 'No drag payload was produced');
+
+            let transactionAssetItem = null;
+            for (const candidate of assetItems) {
+                const candidatePath = candidate?.dataset?.assetPath;
+                if (!candidatePath) continue;
+                const candidateStat = await window.electronAPI.fsStat(candidatePath);
+                if (candidateStat?.isFile === true) {
+                    transactionAssetItem = candidate;
+                    break;
+                }
+            }
+            let transactionAssetPath = transactionAssetItem?.dataset?.assetPath ?? null;
+            if (!transactionAssetPath) {
+                const recursiveAssets = await editor.projectWindow.getAllFilesRecursive(editor.rootPath);
+                transactionAssetPath = recursiveAssets.find((entry) => !entry.isDirectory() && entry.name.endsWith('.mat'))?.fullPath
+                    ?? recursiveAssets.find((entry) => !entry.isDirectory() && !entry.name.endsWith('.meta'))?.fullPath
+                    ?? null;
+            }
+            if (transactionAssetPath) {
+                const sourceAssetPath = transactionAssetPath;
+                const duplicateRevisionBefore = commandRevision(editor);
+                await editor.projectWindow.duplicateAsset(sourceAssetPath);
+                await wait(200);
+                const duplicatedItem = document.querySelector('.project-asset-grid .asset-item[aria-selected="true"]');
+                const duplicatedPath = duplicatedItem?.dataset?.assetPath ?? null;
+                const duplicateRevisionAfter = commandRevision(editor);
+                const sourceBytes = await window.electronAPI.fsReadFile(sourceAssetPath);
+                const duplicateBytes = duplicatedPath ? await window.electronAPI.fsReadFile(duplicatedPath) : null;
+                const sourceMeta = JSON.parse(await window.electronAPI.fsReadFile(sourceAssetPath + '.meta', 'utf8'));
+                const duplicateMeta = duplicatedPath
+                    ? JSON.parse(await window.electronAPI.fsReadFile(duplicatedPath + '.meta', 'utf8'))
+                    : null;
+                record('rendered Project duplicate is one global undo unit with fresh GUID',
+                    !!duplicatedPath
+                        && duplicateRevisionAfter === duplicateRevisionBefore + 1
+                        && JSON.stringify(sourceBytes) === JSON.stringify(duplicateBytes)
+                        && sourceMeta.guid !== duplicateMeta?.guid,
+                    duplicateRevisionBefore + ' -> ' + duplicateRevisionAfter + ', path=' + duplicatedPath);
+
+                await dispatchHistoryShortcut('z');
+                await wait(150);
+                const duplicateRemovedByUndo = duplicatedPath
+                    ? !(await window.electronAPI.fsExists(duplicatedPath))
+                        && !(await window.electronAPI.fsExists(duplicatedPath + '.meta'))
+                    : false;
+                await dispatchHistoryShortcut('y');
+                await wait(150);
+                const redoMeta = duplicatedPath && await window.electronAPI.fsExists(duplicatedPath + '.meta')
+                    ? JSON.parse(await window.electronAPI.fsReadFile(duplicatedPath + '.meta', 'utf8'))
+                    : null;
+                record('rendered Project duplicate undo and redo are byte-stable',
+                    duplicateRemovedByUndo
+                        && !!duplicatedPath
+                        && JSON.stringify(await window.electronAPI.fsReadFile(duplicatedPath)) === JSON.stringify(duplicateBytes)
+                        && redoMeta?.guid === duplicateMeta?.guid,
+                    'Undo removed asset/meta and redo restored the retained duplicate GUID');
+
+                const duplicateAfterRedo = Array.from(document.querySelectorAll('.project-asset-grid .asset-item'))
+                    .find((item) => item.dataset.assetPath === duplicatedPath);
+                const revisionBeforeCancel = commandRevision(editor);
+                duplicateAfterRedo?.focus();
+                duplicateAfterRedo?.dispatchEvent(new KeyboardEvent('keydown', { key: 'F2', bubbles: true, cancelable: true }));
+                const cancelInput = duplicateAfterRedo?.querySelector('input');
+                if (cancelInput) {
+                    cancelInput.value = 'Cancelled Rename.asset';
+                    cancelInput.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+                }
+                await wait(150);
+                record('Project F2 Escape is byte- and history-nonmutating',
+                    !!duplicatedPath && await window.electronAPI.fsExists(duplicatedPath)
+                        && commandRevision(editor) === revisionBeforeCancel,
+                    'Escape retained path and command revision ' + revisionBeforeCancel);
+
+                const duplicateForRename = Array.from(document.querySelectorAll('.project-asset-grid .asset-item'))
+                    .find((item) => item.dataset.assetPath === duplicatedPath);
+                duplicateForRename?.focus();
+                duplicateForRename?.dispatchEvent(new KeyboardEvent('keydown', { key: 'F2', bubbles: true, cancelable: true }));
+                const renameInput = duplicateForRename?.querySelector('input');
+                const lastSeparator = duplicatedPath
+                    ? Math.max(duplicatedPath.lastIndexOf('/'), duplicatedPath.lastIndexOf(String.fromCharCode(92)))
+                    : -1;
+                const duplicateFileName = duplicatedPath?.slice(lastSeparator + 1) ?? '';
+                const extensionIndex = duplicateFileName.lastIndexOf('.');
+                const extension = extensionIndex > 0 ? duplicateFileName.slice(extensionIndex) : '';
+                const renamedName = 'Rendered Renamed Asset' + extension;
+                const renamedPath = duplicatedPath ? duplicatedPath.slice(0, lastSeparator + 1) + renamedName : null;
+                const renameConfirm = window.confirm;
+                window.confirm = () => true;
+                if (renameInput) {
+                    renameInput.value = renamedName;
+                    renameInput.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+                }
+                for (let attempt = 0; attempt < 30 && renamedPath && !(await window.electronAPI.fsExists(renamedPath)); attempt += 1) {
+                    await wait(100);
+                }
+                window.confirm = renameConfirm;
+                const renameMeta = renamedPath && await window.electronAPI.fsExists(renamedPath + '.meta')
+                    ? JSON.parse(await window.electronAPI.fsReadFile(renamedPath + '.meta', 'utf8'))
+                    : null;
+                record('Project F2 Enter rename preserves GUID and is one global undo unit',
+                    !!renamedPath && !(await window.electronAPI.fsExists(duplicatedPath))
+                        && await window.electronAPI.fsExists(renamedPath)
+                        && renameMeta?.guid === duplicateMeta?.guid
+                        && commandRevision(editor) === revisionBeforeCancel + 1,
+                    duplicatedPath + ' -> ' + renamedPath);
+
+                if (renamedPath) await editor.projectWindow.focusAssetByPath(renamedPath);
+                let renamedItem = null;
+                for (let attempt = 0; attempt < 30 && !renamedItem; attempt += 1) {
+                    renamedItem = Array.from(document.querySelectorAll('.project-asset-grid .asset-item'))
+                        .find((item) => item.dataset.assetPath === renamedPath) ?? null;
+                    if (!renamedItem) await wait(100);
+                }
+                const originalConfirm = window.confirm;
+                window.confirm = () => false;
+                if (renamedItem) {
+                    renamedItem.focus();
+                    renamedItem.dispatchEvent(new KeyboardEvent('keydown', { key: 'Delete', bubbles: true, cancelable: true }));
+                }
+                await wait(200);
+                window.confirm = originalConfirm;
+                record('Project Delete cancellation preserves bytes, focus policy and history',
+                    !!renamedItem && !!renamedPath && await window.electronAPI.fsExists(renamedPath)
+                        && commandRevision(editor) === revisionBeforeCancel + 1
+                        && document.activeElement?.dataset?.assetPath === renamedPath,
+                    'Cancelled confirmation left the renamed asset present');
+            }
+
+            console.warn('TUG-40 rendered warning');
+            console.error('TUG-40 rendered error');
+            editor.consoleWindow?.refresh?.();
+            await wait(50);
+            const consoleList = document.querySelector('.console-log-container');
+            const consoleRows = Array.from(document.querySelectorAll('.console-item'));
+            consoleRows[0]?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+            const selectedConsoleRow = document.querySelector('.console-item[aria-selected="true"]');
+            const errorFilter = document.querySelector('.console-filter-error');
+            const errorsBeforeFilter = document.querySelectorAll('.console-item-error').length;
+            errorFilter?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+            await wait(25);
+            record('Console supports rendered selection and filtering',
+                !!consoleList && !!selectedConsoleRow && errorsBeforeFilter > 0 && document.querySelectorAll('.console-item-error').length === 0,
+                'Selecting a log should update aria state and disabling Error should hide error rows');
+            errorFilter?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+
+            const leftSplitter = document.getElementById('left-splitter');
+            const splitterBefore = Number(leftSplitter?.getAttribute('aria-valuenow'));
+            leftSplitter?.dispatchEvent(new KeyboardEvent('keydown', {
+                key: 'ArrowRight', bubbles: true, cancelable: true
+            }));
+            const splitterAfter = Number(leftSplitter?.getAttribute('aria-valuenow'));
+            leftSplitter?.dispatchEvent(new KeyboardEvent('keydown', {
+                key: 'ArrowLeft', bubbles: true, cancelable: true
+            }));
+            const splitterRestored = Number(leftSplitter?.getAttribute('aria-valuenow'));
+            record('docking splitter keyboard resize is reversible',
+                Number.isFinite(splitterBefore) && splitterAfter !== splitterBefore && splitterRestored === splitterBefore,
+                splitterBefore + ' -> ' + splitterAfter + ' -> ' + splitterRestored);
+
+            const persistedScene = {
+                bytes: editor.scene.toJSON(),
+                identity: sceneIdentity(editor.scene)
+            };
+            const sceneSaved = await editor.saveActiveScene();
+            record('rendered scene transaction saves at a clean checkpoint',
+                sceneSaved === true && editor.dirtyState?.isDirty === false,
+                'Save should persist the active scene and clear its dirty checkpoint');
+
             document.getElementById('menu-file')?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
             await wait(50);
             const fileMenuOpen = document.getElementById('menu-file')?.classList.contains('menu-open') === true;
@@ -487,7 +969,8 @@ async function runSmokeTest(mainWindow) {
                     initialObjects,
                     afterCreateObjects,
                     selectedName: createdCube?.name ?? null,
-                    hierarchyLabels
+                    hierarchyLabels,
+                    persistedScene
                 }
             };
         })();

@@ -21,6 +21,7 @@ test.before(async () => {
     const { Component } = await server.ssrLoadModule('/src/engine/Component.ts');
     const {
         CommandHistory,
+        GroupCommand,
         DuplicateGameObjectCommand
     } = await server.ssrLoadModule('/src/editor/Command.ts');
     const {
@@ -29,6 +30,7 @@ test.before(async () => {
         CreateGameObjectCommand,
         DeleteGameObjectCommand,
         AddComponentCommand,
+        AddSerializedComponentCommand,
         RemoveComponentCommand,
         ResetComponentCommand,
         DeserializeComponentCommand
@@ -39,12 +41,14 @@ test.before(async () => {
         GameObject,
         Component,
         CommandHistory,
+        GroupCommand,
         DuplicateGameObjectCommand,
         ReparentGameObjectCommand,
         ReorderComponentCommand,
         CreateGameObjectCommand,
         DeleteGameObjectCommand,
         AddComponentCommand,
+        AddSerializedComponentCommand,
         RemoveComponentCommand,
         ResetComponentCommand,
         DeserializeComponentCommand,
@@ -54,6 +58,175 @@ test.before(async () => {
 
 test.after(async () => {
     await server?.close();
+});
+
+test('async commands enter global history only after commit and retain retry-safe undo/redo', async () => {
+    const { CommandHistory } = modules;
+    CommandHistory.clear();
+    const values = [];
+    let release;
+    const command = {
+        name: 'Async Project Asset',
+        execute: async () => {
+            await new Promise((resolve) => { release = resolve; });
+            values.push('asset');
+        },
+        undo: async () => { values.pop(); }
+    };
+
+    const committing = CommandHistory.execute(command);
+    assert.equal(CommandHistory.canUndo(), false);
+    assert.throws(() => CommandHistory.execute({ name: 'Overlap', execute() {}, undo() {} }), /already in progress/);
+    release();
+    await committing;
+    assert.equal(CommandHistory.canUndo(), true);
+    assert.deepEqual(values, ['asset']);
+
+    await CommandHistory.undo();
+    assert.deepEqual(values, []);
+    assert.equal(CommandHistory.canRedo(), true);
+
+    // Redo uses a fresh async execution and becomes the same single history entry.
+    const redoing = CommandHistory.redo();
+    release();
+    await redoing;
+    assert.deepEqual(values, ['asset']);
+    assert.equal(CommandHistory.getUndoName(), 'Async Project Asset');
+});
+
+test('failed command groups roll back completed mutations without creating undo state', () => {
+    const { CommandHistory, GroupCommand } = modules;
+    const model = { value: 0 };
+    CommandHistory.clear();
+
+    const group = new GroupCommand('Atomic failure', [
+        {
+            name: 'Increment',
+            execute: () => { model.value += 1; },
+            undo: () => { model.value -= 1; }
+        },
+        {
+            name: 'Fail',
+            execute: () => { throw new Error('expected failure'); },
+            undo: () => { throw new Error('must not run'); }
+        }
+    ]);
+
+    assert.throws(() => CommandHistory.execute(group), /expected failure/);
+    assert.equal(model.value, 0);
+    assert.equal(CommandHistory.canUndo(), false);
+    assert.equal(CommandHistory.canRedo(), false);
+});
+
+test('failed grouped undo restores already-undone mutations and remains retryable', () => {
+    const { CommandHistory, GroupCommand } = modules;
+    const model = [];
+    let failFirstUndo = true;
+    const first = {
+        name: 'First',
+        execute: () => { model.push('first'); },
+        undo: () => {
+            if (failFirstUndo) throw new Error('expected undo failure');
+            assert.equal(model.pop(), 'first');
+        }
+    };
+    const second = {
+        name: 'Second',
+        execute: () => { model.push('second'); },
+        undo: () => { assert.equal(model.pop(), 'second'); }
+    };
+
+    CommandHistory.clear();
+    CommandHistory.execute(new GroupCommand('Atomic undo', [first, second]));
+    assert.deepEqual(model, ['first', 'second']);
+    assert.throws(() => CommandHistory.undo(), /expected undo failure/);
+    assert.deepEqual(model, ['first', 'second']);
+    assert.equal(CommandHistory.canUndo(), true);
+
+    failFirstUndo = false;
+    CommandHistory.undo();
+    assert.deepEqual(model, []);
+    assert.equal(CommandHistory.canUndo(), false);
+    assert.equal(CommandHistory.canRedo(), true);
+});
+
+test('failed undo and redo preserve their history entry for a safe retry', () => {
+    const { CommandHistory } = modules;
+    const model = { value: 0 };
+    let failExecute = false;
+    let failUndo = false;
+    const command = {
+        name: 'Retryable',
+        execute: () => {
+            if (failExecute) throw new Error('redo failure');
+            model.value += 1;
+        },
+        undo: () => {
+            if (failUndo) throw new Error('undo failure');
+            model.value -= 1;
+        }
+    };
+
+    CommandHistory.clear();
+    CommandHistory.execute(command);
+    failUndo = true;
+    assert.throws(() => CommandHistory.undo(), /undo failure/);
+    assert.equal(model.value, 1);
+    assert.equal(CommandHistory.canUndo(), true);
+    assert.equal(CommandHistory.canRedo(), false);
+
+    failUndo = false;
+    CommandHistory.undo();
+    failExecute = true;
+    assert.throws(() => CommandHistory.redo(), /redo failure/);
+    assert.equal(model.value, 0);
+    assert.equal(CommandHistory.canUndo(), false);
+    assert.equal(CommandHistory.canRedo(), true);
+
+    failExecute = false;
+    CommandHistory.redo();
+    assert.equal(model.value, 1);
+    assert.equal(CommandHistory.canUndo(), true);
+    assert.equal(CommandHistory.canRedo(), false);
+});
+
+test('serialized component paste is one undo unit and reuses identity on redo', () => {
+    const { GameObject, Component, CommandHistory, AddSerializedComponentCommand } = modules;
+    class Pasted extends Component {
+        static _serializableFields = ['count', 'label'];
+        count = 0;
+        label = '';
+    }
+    const go = new GameObject('Target');
+    const command = new AddSerializedComponentCommand(go, Pasted, { count: 42, label: 'copied' });
+    CommandHistory.clear();
+
+    CommandHistory.execute(command);
+    const pasted = go.getComponent(Pasted);
+    assert.ok(pasted);
+    assert.deepEqual(pasted.captureSerializableState(), { count: 42, label: 'copied' });
+    assert.equal(go.getComponents(Pasted).length, 1);
+
+    CommandHistory.undo();
+    assert.equal(go.getComponent(Pasted), undefined);
+    CommandHistory.redo();
+    assert.equal(go.getComponent(Pasted), pasted);
+    assert.equal(go.getComponents(Pasted).length, 1);
+    assert.deepEqual(go.getComponent(Pasted).captureSerializableState(), { count: 42, label: 'copied' });
+});
+
+test('component lifecycle failure leaves the model and command history unchanged', () => {
+    const { GameObject, Component, CommandHistory, AddComponentCommand } = modules;
+    class Broken extends Component {
+        awake() { throw new Error('broken awake'); }
+    }
+    const go = new GameObject('Target');
+    CommandHistory.clear();
+
+    assert.throws(() => CommandHistory.execute(new AddComponentCommand(go, Broken)), /broken awake/);
+    assert.equal(go.getComponent(Broken), undefined);
+    assert.equal(CommandHistory.canUndo(), false);
+    assert.equal(CommandHistory.canRedo(), false);
 });
 
 test('duplicate undo/redo preserves unknown payloads, stable ordering, and dirty checkpoints', () => {
@@ -313,6 +486,49 @@ test('reset and serialized field edits round-trip through undo/redo and scene pe
     CommandHistory.redo();
     assert.deepEqual(stateful.serialize().data, { count: 42, nested: { label: 'pasted', values: [3, 4] } });
     assert.equal(dirty.isDirty, true);
+});
+
+test('canonical hierarchy mutations survive a fresh scene load with stable IDs and order', () => {
+    const {
+        Scene, GameObject, CommandHistory,
+        DuplicateGameObjectCommand, ReparentGameObjectCommand
+    } = modules;
+    const scene = new Scene();
+    scene.name = 'Restart Round Trip';
+    const parent = new GameObject('Parent');
+    const source = new GameObject('Source');
+    const child = new GameObject('Child');
+    scene.addGameObject(parent);
+    scene.addGameObject(source);
+    scene.addGameObject(child);
+
+    CommandHistory.clear();
+    const duplicateCommand = new DuplicateGameObjectCommand(scene, source);
+    CommandHistory.execute(duplicateCommand);
+    const duplicate = duplicateCommand.getDuplicatedGameObject();
+    assert.ok(duplicate);
+    CommandHistory.execute(new ReparentGameObjectCommand(child, parent.transform));
+
+    const saved = scene.toJSON();
+    const savedData = JSON.parse(saved);
+    const restarted = new Scene();
+    restarted.loadFromJSON(saved);
+    const restartedData = JSON.parse(restarted.toJSON());
+
+    assert.deepEqual(restartedData, savedData, 'a fresh load must preserve the canonical scene bytes');
+    assert.equal(restarted.sceneId, scene.sceneId);
+    assert.deepEqual(
+        restartedData.gameObjects.map((entry) => [entry.id, entry.name]),
+        [
+            [parent.id, 'Parent'],
+            [source.id, 'Source'],
+            [duplicate.id, 'Source (Copy)']
+        ]
+    );
+    assert.deepEqual(
+        restartedData.gameObjects[0].children.map((entry) => [entry.id, entry.name]),
+        [[child.id, 'Child']]
+    );
 });
 
 test('destructive removal invokes component destruction once in execution order', () => {

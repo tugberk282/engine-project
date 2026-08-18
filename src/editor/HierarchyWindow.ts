@@ -22,7 +22,7 @@ import { UIScrollRect } from '../engine/components/UIScrollRect';
 import { PathUtils } from '../platform/PathUtils';
 import { CommandHistory, GroupCommand } from './Command';
 import { ScriptRegistry } from '../engine/ScriptRegistry';
-import { CreateGameObjectCommand, DeleteGameObjectCommand, RenameGameObjectCommand, ReparentGameObjectCommand } from './LifecycleCommands';
+import { AddComponentCommand, CreateGameObjectCommand, DeleteGameObjectCommand, RenameGameObjectCommand, ReparentGameObjectCommand } from './LifecycleCommands';
 
 export class HierarchyWindow extends EditorWindow {
     private scene: Scene;
@@ -32,6 +32,8 @@ export class HierarchyWindow extends EditorWindow {
     private keyboardRangeAnchorId: string | null = null;
     private chromeBound: boolean = false;
     private contextMenuReturnFocus: HTMLElement | null = null;
+    private activeDragSource: HTMLElement | null = null;
+    private activeDropTarget: HTMLElement | null = null;
 
     constructor(parent: HTMLElement, scene: Scene, onSelect: (go: GameObject) => void) {
         super(parent, "Hierarchy");
@@ -118,6 +120,12 @@ export class HierarchyWindow extends EditorWindow {
     private bindPanelChrome(): void {
         if (this.chromeBound) return;
         this.chromeBound = true;
+
+        window.addEventListener('keydown', (event) => {
+            if (event.key === 'Escape') this.cancelActiveDrag(true);
+        }, { capture: true });
+        window.addEventListener('blur', () => this.cancelActiveDrag(false));
+        window.addEventListener('resize', () => this.cancelActiveDrag(false));
 
         const searchInput = this.container.querySelector('#hierarchy-search') as HTMLInputElement | null;
         if (searchInput) {
@@ -249,11 +257,12 @@ export class HierarchyWindow extends EditorWindow {
                 ? selectedIds
                 : [go.id];
             e.dataTransfer!.setData('text/plain', JSON.stringify({ type: 'gameobject', id: go.id, ids: dragIds }));
+            this.cancelActiveDrag(false);
+            this.activeDragSource = container;
+            container.setAttribute('aria-grabbed', 'true');
             container.style.opacity = '0.5';
         };
-        container.ondragend = () => {
-            container.style.opacity = '1';
-        };
+        container.ondragend = () => this.cancelActiveDrag(false);
 
         // Collapse/Expand Arrow
         const arrow = document.createElement('span');
@@ -451,17 +460,22 @@ export class HierarchyWindow extends EditorWindow {
         container.ondragover = (e) => {
             e.preventDefault();
             e.stopPropagation();
+            if (this.activeDropTarget && this.activeDropTarget !== container) {
+                this.clearDropTarget(this.activeDropTarget);
+            }
+            this.activeDropTarget = container;
+            container.dataset.dropTarget = 'true';
             container.style.background = 'rgba(50, 103, 171, 0.3)';
         };
 
         container.ondragleave = () => {
-            container.style.background = 'transparent';
+            this.clearDropTarget(container);
         };
 
         container.ondrop = (e) => {
             e.preventDefault();
             e.stopPropagation();
-            container.style.background = 'transparent';
+            this.cancelActiveDrag(false);
             try {
                 const payload = JSON.parse(e.dataTransfer!.getData('text/plain'));
                 if (payload.type === 'gameobject') {
@@ -502,7 +516,7 @@ export class HierarchyWindow extends EditorWindow {
                         }
                         const ComponentClass = ScriptRegistry.getComponentClass(scriptName);
                         if (ComponentClass) {
-                            go.addComponent(ComponentClass);
+                            CommandHistory.execute(new AddComponentCommand(go, ComponentClass));
                             // @ts-ignore
                             window.Editor?.instance?.inspectorWindow?.refresh();
                             console.log(`Added component ${scriptName} to ${go.name}`);
@@ -537,6 +551,24 @@ export class HierarchyWindow extends EditorWindow {
             if (this.anyDescendantMatches(child.gameObject, query)) return true;
         }
         return false;
+    }
+
+    private cancelActiveDrag(restoreFocus: boolean): void {
+        const hadActiveDrag = this.activeDragSource !== null || this.activeDropTarget !== null;
+        if (this.activeDragSource) {
+            this.activeDragSource.style.opacity = '1';
+            this.activeDragSource.removeAttribute('aria-grabbed');
+        }
+        if (this.activeDropTarget) this.clearDropTarget(this.activeDropTarget);
+        this.activeDragSource = null;
+        this.activeDropTarget = null;
+        if (restoreFocus && hadActiveDrag) this.getHierarchyListElement()?.focus();
+    }
+
+    private clearDropTarget(target: HTMLElement): void {
+        target.style.background = 'transparent';
+        delete target.dataset.dropTarget;
+        if (this.activeDropTarget === target) this.activeDropTarget = null;
     }
 
     private getTopLevelDraggedSources(sources: GameObject[]): GameObject[] {

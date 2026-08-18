@@ -3,6 +3,7 @@
 const path = require('node:path');
 const { fork } = require('node:child_process');
 const { randomUUID } = require('node:crypto');
+const { validateRuntimeSnapshot } = require('./snapshot-validator');
 
 class RuntimeSupervisor {
     constructor({
@@ -39,6 +40,7 @@ class RuntimeSupervisor {
     }
 
     async start(snapshot) {
+        validateRuntimeSnapshot(snapshot);
         await this.stop();
         this.snapshot = snapshot;
         this.restartCount = 0;

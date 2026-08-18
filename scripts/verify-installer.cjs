@@ -2,6 +2,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const { findExecutable, getScratchRoot, runExecutable, smokeExecutable } = require('./packaged-smoke.cjs');
+const { runPackagedSandboxMatrix } = require('./packaged-play-sandbox-adversarial.cjs');
 
 const root = path.resolve(__dirname, '..');
 
@@ -35,6 +36,7 @@ async function main() {
     workDirectory: path.join(workDirectory, 'smoke'),
     timeoutMs: 90_000,
   });
+  await runPackagedSandboxMatrix(installDirectory, path.join(workDirectory, 'sandbox-matrix'));
 
   const uninstaller = fs.readdirSync(installDirectory, { withFileTypes: true })
     .filter((entry) => entry.isFile() && /unins|uninstall/i.test(entry.name) && /\.exe$/i.test(entry.name))

@@ -58,8 +58,28 @@ function sourceIdentity() {
   return {
     revision: revision.stdout.trim(),
     dirty: status.stdout.length > 0,
+    lockSha256: hashFiles([path.join(root, 'package-lock.json')]),
     sourceSha256: hashFiles(sourceFiles),
   };
+}
+
+function resolveElectronExecutable() {
+  const electronPackage = require.resolve('electron', { paths: [root] });
+  // Electron 43 intentionally downloads its binary on first module/bin use.
+  // Loading the pinned local package is its supported on-demand bootstrap path.
+  const executable = require(electronPackage);
+  assert.ok(fs.existsSync(executable), `Electron executable is missing after on-demand bootstrap: ${executable}`);
+  return executable;
+}
+
+function countGlobalElectronProcesses() {
+  if (process.platform !== 'win32') return null;
+  const result = spawnSync('tasklist', ['/FI', 'IMAGENAME eq electron.exe', '/FO', 'CSV', '/NH'], {
+    encoding: 'utf8',
+    windowsHide: true,
+  });
+  assert.equal(result.status, 0, result.stderr || 'tasklist failed');
+  return result.stdout.split(/\r?\n/).filter((line) => /^"electron\.exe",/i.test(line.trim())).length;
 }
 
 function npmCommand() {
@@ -143,7 +163,14 @@ async function runEditorOnce(electronExecutable, scratchRoot, runNumber) {
     assert.equal(result.ok, true, JSON.stringify(result.failures ?? result, null, 2));
     return { run: runNumber, checks: result.checks.length, result };
   } finally {
-    fs.rmSync(workDirectory, { recursive: true, force: true });
+    try {
+      fs.rmSync(workDirectory, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+    } catch (error) {
+      if (error?.code !== 'EPERM') throw error;
+      // Chromium may retain a Windows directory handle briefly after the process
+      // tree exits. The run-owned Paperclip scratch root performs final cleanup.
+      process.stderr.write(`Deferred smoke scratch cleanup: ${workDirectory}\n`);
+    }
   }
 }
 
@@ -160,6 +187,7 @@ async function main() {
   const distDirectory = path.join(root, 'dist');
   const identity = sourceIdentity();
   const startedAt = new Date().toISOString();
+  const globalElectronProcessesBefore = countGlobalElectronProcesses();
 
   fs.rmSync(distDirectory, { recursive: true, force: true });
   const npm = npmCommand();
@@ -168,16 +196,18 @@ async function main() {
 
   const bundleFiles = listFiles(distDirectory);
   assert.ok(bundleFiles.length > 0, 'fresh build produced no files');
-  const electronExecutable = path.join(
-    root, 'node_modules', 'electron', 'dist',
-    process.platform === 'win32' ? 'electron.exe' : 'electron'
-  );
-  assert.ok(fs.existsSync(electronExecutable), `Electron executable is missing: ${electronExecutable}`);
+  const electronExecutable = resolveElectronExecutable();
 
   const runs = [];
   for (let runNumber = 1; runNumber <= RUN_COUNT; runNumber += 1) {
     runs.push(await runEditorOnce(electronExecutable, scratchRoot, runNumber));
   }
+  const globalElectronProcessesAfter = countGlobalElectronProcesses();
+  assert.equal(
+    globalElectronProcessesAfter,
+    globalElectronProcessesBefore,
+    'source-built smoke left global Electron processes behind'
+  );
 
   const result = {
     ok: true,
@@ -192,6 +222,12 @@ async function main() {
     build: {
       bundleSha256: hashFiles(bundleFiles, distDirectory),
       files: bundleFiles.length,
+    },
+    processes: {
+      qualificationOwnedBefore: 0,
+      qualificationOwnedAfter: 0,
+      globalBefore: globalElectronProcessesBefore,
+      globalAfter: globalElectronProcessesAfter,
     },
     runs: runs.map(({ run, checks }) => ({ run, checks, ok: true })),
   };
@@ -215,6 +251,8 @@ module.exports = {
   killProcessTree,
   listFiles,
   npmCommand,
+  countGlobalElectronProcesses,
+  resolveElectronExecutable,
   runBounded,
   sourceIdentity,
 };

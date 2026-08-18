@@ -49,6 +49,39 @@ export type AssetScanResult = {
 
 export type AssetScanProgress = { visited: number; pending: number };
 
+export type ProjectAssetReferencePatch = {
+    path: string;
+    beforeBase64: string;
+    afterBase64: string;
+};
+
+export type ProjectAssetTransactionRequest = {
+    contractVersion: 1;
+    grantId: string;
+    transactionId: string;
+    action: 'apply';
+    operation: 'create' | 'move' | 'duplicate' | 'delete';
+    sourcePath: string | null;
+    targetPath: string | null;
+    assetKind: 'file' | 'directory';
+    contentBase64: string | null;
+    metadataBase64: string | null;
+    referencePatches: ProjectAssetReferencePatch[];
+} | {
+    contractVersion: 1;
+    grantId: string;
+    transactionId: string;
+    action: 'undo' | 'redo';
+};
+
+export type ProjectAssetTransactionResult = {
+    transactionId: string;
+    operation: 'create' | 'move' | 'duplicate' | 'delete';
+    state: 'applied' | 'undone';
+    sourcePath: string | null;
+    targetPath: string | null;
+};
+
 export type ProjectTrustStatus = {
     root: string;
     identity: string;
@@ -163,6 +196,11 @@ export class DesktopBridge {
             moved: boolean;
             metadataMoved: boolean;
         };
+    }
+
+    public async transactProjectAsset(request: ProjectAssetTransactionRequest): Promise<ProjectAssetTransactionResult> {
+        if (!this.protocol) throw new Error('Versioned desktop protocol is unavailable');
+        return await this.protocol.request('asset.transaction', request) as ProjectAssetTransactionResult;
     }
 
     public async writeAssetMetadata(resource: ProjectResource, metadata: Record<string, unknown>): Promise<void> {

@@ -59,6 +59,28 @@ test('scan cancellation targets only a validated request ID', () => {
     })).code, 'INVALID_PAYLOAD');
 });
 
+test('asset transaction contract is versioned, grant-scoped and operation-specific', () => {
+    const apply = {
+        contractVersion: 1, grantId: 'project-1', transactionId: 'tx-1', action: 'apply',
+        operation: 'move', sourcePath: 'Assets/old.asset', targetPath: 'Assets/new.asset',
+        assetKind: 'file', contentBase64: null, metadataBase64: null,
+        referencePatches: [{ path: 'Assets/Main.scene', beforeBase64: 'e30=', afterBase64: 'eyJ4IjoxfQ==' }]
+    };
+    assert.equal(validateRequest(request({ command: COMMANDS.ASSET_TRANSACTION, payload: apply })).ok, true);
+    assert.equal(validateRequest(request({
+        command: COMMANDS.ASSET_TRANSACTION,
+        payload: { contractVersion: 1, grantId: 'project-1', transactionId: 'tx-1', action: 'undo' }
+    })).ok, true);
+    assert.equal(validateRequest(request({
+        command: COMMANDS.ASSET_TRANSACTION,
+        payload: { ...apply, targetPath: '../escape.asset' }
+    })).code, 'INVALID_PAYLOAD');
+    assert.equal(validateRequest(request({
+        command: COMMANDS.ASSET_TRANSACTION,
+        payload: { ...apply, operation: 'delete', targetPath: 'Assets/new.asset' }
+    })).code, 'INVALID_PAYLOAD');
+});
+
 test('response exposes stable errors without native stack data', () => {
     const response = createResponse('req-1', {
         ok: false,

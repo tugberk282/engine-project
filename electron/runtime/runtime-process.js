@@ -1,6 +1,7 @@
 'use strict';
 
 const { createHash } = require('node:crypto');
+const { validateRuntimeSnapshot } = require('./snapshot-validator');
 
 const PROTOCOL_VERSION = 1;
 let sessionId = '';
@@ -27,18 +28,15 @@ process.on('message', (message) => {
     if (command === 'start') {
         sessionId = requestedSession;
         try {
-            const parsed = JSON.parse(payload.snapshot);
-            if (!parsed || typeof parsed !== 'object' || parsed.formatVersion !== 1) {
-                return failure(requestId, 'RUNTIME_SNAPSHOT_VERSION_MISMATCH', 'The runtime snapshot version is not supported.');
-            }
+            const { root: parsed } = validateRuntimeSnapshot(payload.snapshot);
             snapshot = parsed;
             state = 'running';
             frame = 0;
             timeMicros = 0;
             const snapshotHash = createHash('sha256').update(payload.snapshot).digest('hex');
             reply(requestId, { ok: true, value: { state, frame, timeMicros, snapshotHash } });
-        } catch {
-            failure(requestId, 'INVALID_SNAPSHOT', 'The persisted scene snapshot could not be loaded.');
+        } catch (error) {
+            failure(requestId, error?.code || 'INVALID_SNAPSHOT', error?.message || 'The persisted scene snapshot could not be loaded.');
         }
         return;
     }

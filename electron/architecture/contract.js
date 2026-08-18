@@ -9,6 +9,7 @@ const COMMANDS = Object.freeze({
     ASSET_SCAN: 'asset.scan',
     ASSET_CANCEL_SCAN: 'asset.cancelScan',
     ASSET_MOVE: 'asset.move',
+    ASSET_TRANSACTION: 'asset.transaction',
     ASSET_WRITE_METADATA: 'asset.writeMetadata',
     DIALOG_OPEN_PROJECT: 'dialog.openProject',
     DIALOG_CREATE_PROJECT: 'dialog.createProject',
@@ -81,6 +82,48 @@ function isRecentProjectsPayload(payload) {
     }
 }
 
+function isBase64(value) {
+    return typeof value === 'string'
+        && value.length <= 24 * 1024 * 1024
+        && value.length % 4 === 0
+        && /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(value);
+}
+
+function isAssetReferencePatch(value) {
+    return isRecord(value)
+        && hasExactKeys(value, ['path', 'beforeBase64', 'afterBase64'])
+        && isSafeRelativePath(value.path)
+        && isBase64(value.beforeBase64)
+        && isBase64(value.afterBase64);
+}
+
+function isAssetTransactionPayload(payload) {
+    if (!Number.isSafeInteger(payload.contractVersion) || payload.contractVersion !== 1
+        || !ID_PATTERN.test(payload.grantId || '')
+        || !ID_PATTERN.test(payload.transactionId || '')) return false;
+    if (payload.action === 'undo' || payload.action === 'redo') {
+        return hasExactKeys(payload, ['contractVersion', 'grantId', 'transactionId', 'action']);
+    }
+    if (payload.action !== 'apply'
+        || !['create', 'move', 'duplicate', 'delete'].includes(payload.operation)
+        || !Array.isArray(payload.referencePatches)
+        || payload.referencePatches.length > 1000
+        || !payload.referencePatches.every(isAssetReferencePatch)) return false;
+    const common = ['contractVersion', 'grantId', 'transactionId', 'action', 'operation', 'sourcePath',
+        'targetPath', 'assetKind', 'contentBase64', 'metadataBase64', 'referencePatches'];
+    const shapeIsValid = hasExactKeys(payload, common)
+        && (payload.sourcePath === null || isSafeRelativePath(payload.sourcePath))
+        && (payload.targetPath === null || isSafeRelativePath(payload.targetPath))
+        && (payload.assetKind === 'file' || payload.assetKind === 'directory')
+        && (payload.contentBase64 === null || isBase64(payload.contentBase64))
+        && (payload.metadataBase64 === null || isBase64(payload.metadataBase64))
+        && JSON.stringify(payload).length <= 32 * 1024 * 1024;
+    if (!shapeIsValid) return false;
+    if (payload.operation === 'create') return payload.sourcePath === null && payload.targetPath !== null;
+    if (payload.operation === 'delete') return payload.sourcePath !== null && payload.targetPath === null;
+    return payload.sourcePath !== null && payload.targetPath !== null && payload.sourcePath !== payload.targetPath;
+}
+
 function validatePayload(command, payload) {
     if (!isRecord(payload)) return false;
     if (command === COMMANDS.RUNTIME_START) {
@@ -125,6 +168,7 @@ function validatePayload(command, payload) {
             && isSafeRelativePath(payload.path)
             && isSafeRelativePath(payload.destinationPath);
     }
+    if (command === COMMANDS.ASSET_TRANSACTION) return isAssetTransactionPayload(payload);
     if (command === COMMANDS.ASSET_WRITE_METADATA) {
         return hasExactKeys(payload, ['grantId', 'path', 'metadata'])
             && ID_PATTERN.test(payload.grantId || '')

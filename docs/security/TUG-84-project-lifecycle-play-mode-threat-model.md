@@ -135,6 +135,39 @@ Verification: adversarial fixtures attempt reads/writes outside the project, env
 and credential access, network access, child process creation, native module loading,
 and survival after stop/revoke; all must fail or be explicitly consented and audited.
 
+#### TUG-105 fail-closed execution contract
+
+Until an OS-enforced launcher implements the untrusted requirements above, the engine
+supports no sandboxed project-code execution policy. `CodePlaySessions` now consults a
+main-process admission authority before it replaces an active session or calls any
+launcher. The default and `disabled` modes reject with `PLAY_CODE_DISABLED`;
+`sandboxed` rejects with `PLAY_SANDBOX_UNAVAILABLE`. Project trust alone is not code
+execution consent. Consequently JavaScript, compiled C#, plugins, native modules, and
+other project-controlled code remain disabled even for a trusted project unless the
+separate full-trust capability below has been issued.
+
+The only represented executable policy is explicitly consented `full-trust`. Its opaque
+consent capability is bound to renderer owner, project grant, canonical project identity,
+and trust epoch. The launcher receives an immutable policy labeled `sandboxed: false`,
+`securityBoundary: none`, with filesystem, environment, network, child-process, and
+native-module authority all declared ambient. Main-process UI code must issue this
+capability only after showing the exact acknowledgement exported by
+`play-execution-admission.js`; the admission API must not be exposed to a renderer.
+Revoking the renderer owner, grant, or project invalidates matching consent and awaits
+active runtime cleanup. Re-trusting creates a new epoch and cannot revive old consent.
+
+This is an admission gate, not a sandbox implementation. Full-trust code can compromise
+the desktop user and may evade cooperative cleanup or leave descendants. Safe/data-only
+preview is outside this code-enabled authority and remains the available workflow for
+untrusted projects. A future untrusted launcher must deny ambient filesystem,
+environment/credential, network, process, and native-module access with OS controls and
+must terminate the whole process tree before `sandboxed` can be admitted.
+
+Focused regression evidence is in `test/play-script-sandbox-gate.test.cjs`: adversarial
+capability probes are rejected before launcher invocation, denied replacement leaves an
+existing session intact, full-trust labeling and consent binding are exact, and revoked
+or stale consent cannot launch.
+
 ### F3 — Medium: runtime lifecycle is global and not bound to a renderer/project owner
 
 Preconditions: multiple editor windows/webContents exist, a renderer is replaced after

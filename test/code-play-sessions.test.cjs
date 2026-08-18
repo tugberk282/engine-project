@@ -9,6 +9,11 @@ const { ProtocolGrants } = require('../electron/architecture/protocol-grants');
 const { ProjectCapabilities } = require('../electron/security/project-capabilities');
 const { ProjectTrustStore } = require('../electron/security/project-trust');
 const { CodePlaySessions } = require('../electron/security/code-play-sessions');
+const {
+    PLAY_EXECUTION_MODES,
+    FULL_TRUST_ACKNOWLEDGEMENT,
+    FailClosedPlayExecutionAdmission
+} = require('../electron/security/play-execution-admission');
 
 function fixture(t, launch) {
     const base = fs.mkdtempSync(path.join(process.env.PAPERCLIP_RUN_SCRATCH_DIR || os.tmpdir(), 'tugberk-code-play-'));
@@ -18,8 +23,20 @@ function fixture(t, launch) {
     const trustStore = new ProjectTrustStore(path.join(base, 'state', 'trust.json'));
     const grants = new ProtocolGrants(new ProjectCapabilities());
     const grant = grants.create(7, project, { writable: true });
-    const sessions = new CodePlaySessions({ trustStore, grants, launch, createSessionId: () => 'opaque-session' });
-    return { project, trustStore, grants, grant, sessions };
+    const admission = new FailClosedPlayExecutionAdmission({ createConsentId: () => 'explicit-consent' });
+    const sessions = new CodePlaySessions({ trustStore, grants, launch, admission, createSessionId: () => 'opaque-session' });
+    const fullTrust = () => {
+        const trust = trustStore.get(project);
+        const consent = admission.issueFullTrustConsent({
+            ownerWebContentsId: 7,
+            grantId: grant.grantId,
+            projectIdentity: trust.identity,
+            trustEpoch: trust.trustEpoch,
+            acknowledgement: FULL_TRUST_ACKNOWLEDGEMENT
+        });
+        return { mode: PLAY_EXECUTION_MODES.FULL_TRUST, consentId: consent.consentId };
+    };
+    return { project, trustStore, grants, grant, admission, sessions, fullTrust };
 }
 
 test('safe and revoked projects fail before process launch', async (t) => {
@@ -39,7 +56,13 @@ test('trusted start binds opaque session to grant, trust epoch, and renderer own
     const runtime = { pause: async () => 'paused', stop: async () => {} };
     const f = fixture(t, async (value) => { context = value; return runtime; });
     const trusted = f.trustStore.trust(f.project);
-    const result = await f.sessions.start({ ownerWebContentsId: 7, grantId: f.grant.grantId, projectPath: f.project, snapshot: '{}' });
+    const result = await f.sessions.start({
+        ownerWebContentsId: 7,
+        grantId: f.grant.grantId,
+        projectPath: f.project,
+        snapshot: '{}',
+        execution: f.fullTrust()
+    });
     assert.deepEqual(result, { sessionId: 'opaque-session' });
     assert.equal(context.ownerWebContentsId, 7);
     assert.equal(context.grantId, f.grant.grantId);
@@ -53,10 +76,16 @@ test('grant revocation makes sessions stale and owner teardown awaits runtime cl
     let stopped = false;
     const f = fixture(t, async () => ({ stop: async () => { await new Promise((resolve) => setImmediate(resolve)); stopped = true; } }));
     f.trustStore.trust(f.project);
-    const { sessionId } = await f.sessions.start({ ownerWebContentsId: 7, grantId: f.grant.grantId, projectPath: f.project, snapshot: '{}' });
+    const { sessionId } = await f.sessions.start({
+        ownerWebContentsId: 7,
+        grantId: f.grant.grantId,
+        projectPath: f.project,
+        snapshot: '{}',
+        execution: f.fullTrust()
+    });
     f.grants.revoke(7, f.grant.grantId);
     await assert.rejects(f.sessions.control(7, sessionId, 'pause'), (error) => error.code === 'GRANT_NOT_FOUND');
-    await f.sessions.stopForOwner(7);
+    await f.sessions.revokeOwner(7);
     assert.equal(stopped, true);
     await assert.rejects(f.sessions.control(7, sessionId, 'pause'), (error) => error.code === 'STALE_PLAY_SESSION');
 });
@@ -67,7 +96,13 @@ test('trust revoke/start race aborts and awaits launched runtime cleanup', async
     const launched = new Promise((resolve) => { release = resolve; });
     const f = fixture(t, () => launched);
     f.trustStore.trust(f.project);
-    const starting = f.sessions.start({ ownerWebContentsId: 7, grantId: f.grant.grantId, projectPath: f.project, snapshot: '{}' });
+    const starting = f.sessions.start({
+        ownerWebContentsId: 7,
+        grantId: f.grant.grantId,
+        projectPath: f.project,
+        snapshot: '{}',
+        execution: f.fullTrust()
+    });
     await new Promise((resolve) => setImmediate(resolve));
     f.trustStore.revoke(f.project);
     const revoking = f.sessions.revokeProject(f.project);
@@ -80,7 +115,13 @@ test('trust revoke/start race aborts and awaits launched runtime cleanup', async
 test('revoking and re-trusting cannot revive a stale session epoch', async (t) => {
     const f = fixture(t, async () => ({ pause: async () => 'paused', stop: async () => {} }));
     const firstTrust = f.trustStore.trust(f.project);
-    const { sessionId } = await f.sessions.start({ ownerWebContentsId: 7, grantId: f.grant.grantId, projectPath: f.project, snapshot: '{}' });
+    const { sessionId } = await f.sessions.start({
+        ownerWebContentsId: 7,
+        grantId: f.grant.grantId,
+        projectPath: f.project,
+        snapshot: '{}',
+        execution: f.fullTrust()
+    });
     f.trustStore.revoke(f.project);
     const secondTrust = f.trustStore.trust(f.project);
     assert.notEqual(firstTrust.trustEpoch, secondTrust.trustEpoch);

@@ -19,9 +19,9 @@ test('launcher exposes live state and recent projects as keyboard-operable contr
 test('launcher keeps recovery UI visible and reports load, trust, and launch failures', () => {
     const source = read('src/editor/Launcher.ts');
     assert.match(source, /Recent projects could not be loaded\./);
-    assert.match(source, /trust was not granted/);
+    assert.match(source, /requestProjectTrust\(projectPath\)/);
     assert.match(source, /if \(launcher\) launcher\.style\.display = 'flex'/);
-    assert.match(source, /`Could not open “\$\{projectName\}”/);
+    assert.match(source, /`Could not open .+\$\{projectName\}.+Check that the project is valid and try again\.`/);
     assert.ok(source.indexOf('new Editor(projectPath)') < source.indexOf("launcher.style.display = 'none'"));
 });
 

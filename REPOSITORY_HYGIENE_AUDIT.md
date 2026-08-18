@@ -1,7 +1,6 @@
 # Repository Hygiene Audit
 
-Date: 2026-07-28
-Issue: TUG-28
+Last updated: 2026-08-18
 
 ## Removed
 
@@ -12,12 +11,13 @@ Issue: TUG-28
 
 Both files were ordinary TypeScript modules, were absent from dynamic registries and package/build resource lists, and had no side-effect import path. Removing them therefore changes neither the application entry graph nor packaged resources.
 
+The 2026-08-18 pass also removed the root `verify_phase*.cjs` mock/static suites, their compatibility runners, stale phase closure reports, and the tracked `smoke-test-result.json`. These artifacts were not part of CI, duplicated the roadmap, and could be mistaken for behavioral parity evidence. Smoke output is now ignored and CI retains qualified evidence as workflow artifacts.
+
 ## Retained after review
 
 - `src/scripts/AutoRotate.ts` and `src/scripts/PhysicsTest.ts`: script components can be resolved by name through the script registry/project asset flow, so a lack of static imports is not sufficient proof.
 - `Assets/**` and matching `.meta` files: user-authored/project assets and metadata are intentionally preserved.
-- Phase reports, roadmap documents, and root verification scripts: retained as historical/release evidence even when not called by the default npm scripts.
-- `smoke-test-result.json`: retained as release evidence produced by packaged smoke verification.
+- `UNITY_PARITY_ROADMAP.md` and focused architecture/quality/security documents: retained as the current evidence and planning record.
 - `scripts/fix-dist-paths.js`, packaged-smoke/installer scripts, Electron architecture/security files, and tests: currently referenced by package scripts or active implementation work.
 - `dist/`, `node_modules/`, and editor/OS caches: already covered by `.gitignore`; no tracked generated directory was found.
 

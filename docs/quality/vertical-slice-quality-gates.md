@@ -25,12 +25,18 @@ The test job deliberately uses focused `node --test` suites instead of the histo
 Local equivalents:
 
 ```powershell
-npm ci
+npm run bootstrap
 node --test test/architecture-contract.test.cjs test/persistence.test.cjs test/asset-database-contract.test.cjs test/editor-workflow-contract.test.cjs test/runtime-bridge.test.cjs test/project-capabilities.test.cjs test/editor-html-injection.test.cjs
 npm run test:source-built-smoke-contract
 npm run test:source-built-smoke
 npm run electron:build -- --win --dir --publish never
 ```
+
+`npm run bootstrap` is the canonical clean-checkout setup. It runs `npm ci` and
+then invokes the pinned Electron 43 package's official `install-electron --no`
+on-demand binary installer. The source-built smoke also loads the pinned local
+Electron package, so it cannot bypass that supported on-demand path by assuming
+`node_modules/electron/dist/electron.exe` already exists.
 
 ## Performance budgets
 

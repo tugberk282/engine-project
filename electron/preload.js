@@ -5,7 +5,7 @@ const { contextBridge, ipcRenderer } = require('electron');
 const PROTOCOL_VERSION = 1;
 const PROTOCOL_COMMANDS = new Set([
     'project.readText', 'project.writeText', 'project.listDirectory', 'project.revokeGrant',
-    'asset.scan', 'asset.cancelScan', 'asset.move', 'asset.writeMetadata',
+    'asset.scan', 'asset.cancelScan', 'asset.move', 'asset.transaction', 'asset.writeMetadata',
     'dialog.openProject', 'dialog.createProject', 'project.open', 'project.getTrust',
     'project.requestTrust', 'project.revokeTrust', 'recentProjects.load',
     'recentProjects.save', 'telemetry.record', 'runtime.start', 'runtime.pause',

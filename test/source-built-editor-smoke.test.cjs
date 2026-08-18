@@ -39,7 +39,20 @@ test('source identity retains revision, dirty state, and content hash', () => {
   const identity = sourceIdentity();
   assert.match(identity.revision, /^[a-f0-9]{40}$/);
   assert.equal(typeof identity.dirty, 'boolean');
+  assert.match(identity.lockSha256, /^[a-f0-9]{64}$/);
   assert.match(identity.sourceSha256, /^[a-f0-9]{64}$/);
+});
+
+test('canonical clean bootstrap uses Electron 43 official pinned on-demand command', () => {
+  const packageJson = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf8'));
+  assert.equal(packageJson.devDependencies.electron, '43.2.0');
+  assert.equal(packageJson.scripts['bootstrap:electron'], 'install-electron --no');
+  assert.match(packageJson.scripts.bootstrap, /^npm ci && npm run bootstrap:electron$/);
+
+  const smoke = fs.readFileSync(path.join(__dirname, '..', 'scripts', 'source-built-editor-smoke.cjs'), 'utf8');
+  assert.match(smoke, /require\.resolve\('electron', \{ paths: \[root\] \}\)/);
+  assert.doesNotMatch(smoke, /node_modules['"`], ['"`]electron['"`], ['"`]dist/);
+  assert.doesNotMatch(packageJson.scripts['bootstrap:electron'], /install\.js/);
 });
 
 test('bounded runner rejects a hung process within its deadline', async () => {

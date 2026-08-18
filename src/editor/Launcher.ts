@@ -92,7 +92,9 @@ export class Launcher {
             mode: trust?.trusted ? 'trusted' : 'safe',
             trusted: trust?.trusted === true,
             projectIdentity: trust?.identity ?? null,
-            allowsProjectExecution: trust?.trusted === true
+            allowsProjectExecution: trust?.trusted === true,
+            grantId: project.grantId,
+            root: project.root
         });
 
         const projectName = this.getPathBaseName(projectPath);

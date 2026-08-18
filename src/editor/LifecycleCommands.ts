@@ -222,13 +222,27 @@ export class AddComponentCommand implements Command {
     execute(): void {
         if (this.componentInstance) {
             const component = this.componentInstance;
-            this.go.addComponent(component, {
-                index: this.componentIndex >= 0 ? this.componentIndex : undefined,
-                invokeLifecycle: false
-            });
+            try {
+                this.go.addComponent(component, {
+                    index: this.componentIndex >= 0 ? this.componentIndex : undefined,
+                    invokeLifecycle: false
+                });
+            } catch (error) {
+                this.go.removeComponent(component, { destroy: false });
+                throw error;
+            }
         } else {
-            this.componentInstance = this.go.addComponent(this.componentClass);
-            this.componentIndex = this.go.components.indexOf(this.componentInstance!);
+            let component: Component | null = null;
+            try {
+                const createdComponent = new this.componentClass(this.go) as Component;
+                component = createdComponent;
+                this.go.addComponent(createdComponent);
+                this.componentInstance = component;
+                this.componentIndex = this.go.components.indexOf(createdComponent);
+            } catch (error) {
+                if (component) this.go.removeComponent(component, { destroy: false });
+                throw error;
+            }
         }
     }
 
@@ -237,6 +251,49 @@ export class AddComponentCommand implements Command {
             this.componentIndex = this.go.components.indexOf(this.componentInstance);
             this.go.removeComponent(this.componentInstance, { destroy: false });
         }
+    }
+}
+
+export class AddSerializedComponentCommand implements Command {
+    public name: string;
+    private go: GameObject;
+    private componentClass: new (go: GameObject) => Component;
+    private serializedData: unknown;
+    private componentInstance: Component | null = null;
+    private componentIndex: number = -1;
+    private hasExecuted: boolean = false;
+
+    constructor(go: GameObject, componentClass: new (go: GameObject) => Component, serializedData: unknown) {
+        this.go = go;
+        this.componentClass = componentClass;
+        this.serializedData = structuredClone(serializedData);
+        this.name = `Paste Component ${componentClass.name}`;
+    }
+
+    execute(): void {
+        if (!this.componentInstance) {
+            const component = new this.componentClass(this.go);
+            component.deserialize(structuredClone(this.serializedData));
+            this.componentInstance = component;
+        }
+
+        try {
+            this.go.addComponent(this.componentInstance, {
+                index: this.componentIndex >= 0 ? this.componentIndex : undefined,
+                invokeLifecycle: !this.hasExecuted
+            });
+            this.componentIndex = this.go.components.indexOf(this.componentInstance);
+            this.hasExecuted = true;
+        } catch (error) {
+            this.go.removeComponent(this.componentInstance, { destroy: false });
+            throw error;
+        }
+    }
+
+    undo(): void {
+        if (!this.componentInstance) return;
+        this.componentIndex = this.go.components.indexOf(this.componentInstance);
+        this.go.removeComponent(this.componentInstance, { destroy: false });
     }
 }
 
