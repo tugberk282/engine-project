@@ -34,7 +34,9 @@
     "preview": "vite preview",
     "watch:csharp": "node scripts/watch-csharp.js",
     "build:play-sandbox": "node scripts/build-play-sandbox-launcher.cjs",
-    "electron:build": "vite build && node scripts/fix-dist-paths.js && npm run build:play-sandbox && electron-builder"
+    "electron:build": "vite build && node scripts/fix-dist-paths.js && npm run build:play-sandbox && electron-builder",
+    "electron:build:dir": "vite build && node scripts/fix-dist-paths.js && npm run build:play-sandbox && electron-builder --win --dir --publish=never",
+    "electron:build:installer": "vite build && node scripts/fix-dist-paths.js && npm run build:play-sandbox && electron-builder --win nsis --publish=never"
   },
   "build": {
     "appId": "com.tugberk.engine",

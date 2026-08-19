@@ -87,6 +87,7 @@ export class AssetDatabase {
     private repairedMalformedMetaPaths: Set<string> = new Set();
     private repairedDuplicateGuidPaths: Set<string> = new Set();
     private orphanMetaFilePaths: Set<string> = new Set();
+    private refreshQueue: Promise<void> = Promise.resolve();
     private fs: DesktopFileSystem;
     private constructor() {
         this.fs = new DesktopFileSystem();
@@ -99,7 +100,16 @@ export class AssetDatabase {
         return AssetDatabase.instance;
     }
 
-    public async refresh(rootPath: string): Promise<AssetRefreshResult> {
+    public refresh(rootPath: string): Promise<AssetRefreshResult> {
+        const refresh = this.refreshQueue.then(
+            () => this.refreshInternal(rootPath),
+            () => this.refreshInternal(rootPath)
+        );
+        this.refreshQueue = refresh.then(() => undefined, () => undefined);
+        return refresh;
+    }
+
+    private async refreshInternal(rootPath: string): Promise<AssetRefreshResult> {
         const emptyResult: AssetRefreshResult = {
             added: [],
             removed: [],
