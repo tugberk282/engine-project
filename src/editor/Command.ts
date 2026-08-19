@@ -112,6 +112,10 @@ export class CommandHistory {
         return !this.pending && this.redoStack.length > 0;
     }
 
+    public static isPending(): boolean {
+        return this.pending;
+    }
+
     public static getUndoName(): string | null {
         return this.undoStack.length > 0 ? this.undoStack[this.undoStack.length - 1].command.name : null;
     }

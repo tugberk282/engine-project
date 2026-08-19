@@ -241,7 +241,8 @@ export class Editor {
         // @ts-ignore
         window.Editor = {
             instance: this,
-            selectGameObjectPublic: (go: GameObject | null) => this.selectGameObject(go)
+            selectGameObjectPublic: (go: GameObject | null) => this.selectGameObject(go),
+            isCommandPending: () => CommandHistory.isPending()
         };
 
         // UI Systems

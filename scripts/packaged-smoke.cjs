@@ -60,6 +60,13 @@ async function smokeExecutable(executable, options = {}) {
   const project = path.join(workDirectory, 'project');
   assert.ok(fs.existsSync(fixture), `smoke fixture is missing: ${fixture}`);
   fs.cpSync(fixture, project, { recursive: true });
+  const smokeAssetDirectory = path.join(project, 'Assets', 'Smoke');
+  fs.mkdirSync(smokeAssetDirectory, { recursive: true });
+  fs.writeFileSync(
+    path.join(smokeAssetDirectory, '__SmokeTransaction.asset'),
+    '{"name":"Disposable packaged-smoke transaction asset"}\n',
+    'utf8'
+  );
 
   await runExecutable(executable, {
     cwd: workDirectory,

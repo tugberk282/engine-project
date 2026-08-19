@@ -352,7 +352,11 @@ async function runSmokeTest(mainWindow) {
                     bubbles: true,
                     cancelable: true
                 }));
-                await wait(75);
+                for (let attempt = 0; attempt < 200; attempt += 1) {
+                    if (!window.Editor?.isCommandPending?.()) return;
+                    await wait(25);
+                }
+                throw new Error('Global command transaction exceeded the 5 second smoke bound');
             };
             const sceneIdentity = (scene) => {
                 const parsed = JSON.parse(scene.toJSON());

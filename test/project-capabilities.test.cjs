@@ -6,7 +6,7 @@ const test = require('node:test');
 const { ProjectCapabilities, normalizeWriteData } = require('../electron/security/project-capabilities');
 
 function fixture() {
-    const base = fs.mkdtempSync(path.join(os.tmpdir(), 'tugberk-capability-'));
+    const base = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'tugberk-capability-')));
     const project = path.join(base, 'project');
     const outside = path.join(base, 'outside');
     fs.mkdirSync(project);
