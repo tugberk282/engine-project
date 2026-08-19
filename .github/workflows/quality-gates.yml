@@ -104,15 +104,23 @@ jobs:
       - name: Launch packaged application and run editor smoke
         shell: pwsh
         run: |
-          npm run test:packaged-smoke 2>&1 | Tee-Object -FilePath "${{ runner.temp }}/packaged-smoke.log"
-          if ($LASTEXITCODE -ne 0) { throw "Packaged smoke failed with exit code $LASTEXITCODE." }
+          npm run test:packaged-smoke 2>&1 | Tee-Object -FilePath "${{ runner.temp }}/packaged-smoke.log" -Variable captured
+          if ($LASTEXITCODE -ne 0) {
+            $tail = ($captured | Select-Object -Last 40) -join "%0A"
+            "::error title=Packaged smoke failed::$tail"
+            exit $LASTEXITCODE
+          }
       - name: Build Windows installer
         run: npm run electron:build:installer
       - name: Verify install, installed launch, and uninstall
         shell: pwsh
         run: |
-          npm run test:installer 2>&1 | Tee-Object -FilePath "${{ runner.temp }}/installer-smoke.log"
-          if ($LASTEXITCODE -ne 0) { throw "Installer smoke failed with exit code $LASTEXITCODE." }
+          npm run test:installer 2>&1 | Tee-Object -FilePath "${{ runner.temp }}/installer-smoke.log" -Variable captured
+          if ($LASTEXITCODE -ne 0) {
+            $tail = ($captured | Select-Object -Last 40) -join "%0A"
+            "::error title=Installer smoke failed::$tail"
+            exit $LASTEXITCODE
+          }
       - name: Record package provenance
         shell: pwsh
         run: |
