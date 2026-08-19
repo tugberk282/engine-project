@@ -23,6 +23,16 @@ class ConfinedFileSystem {
         this.beforeCommit = beforeCommit;
     }
 
+    async exists(targetPath) {
+        try {
+            await this.fs.lstat(targetPath);
+            return true;
+        } catch (error) {
+            if (error?.code === 'ENOENT') return false;
+            throw error;
+        }
+    }
+
     async inspect(rootPath, targetPath, {
         allowRoot = false,
         rejectTargetLink = true,
@@ -97,9 +107,11 @@ class ConfinedFileSystem {
 
     async atomicWrite(context, data, encoding, guard = () => {}) {
         const temporary = `${context.path}.tugberk-${randomUUID()}.tmp`;
+        const backup = `${context.path}.tugberk-${randomUUID()}.bak`;
         let handle;
         try {
             await this.inspect(context.root, temporary, { rootIdentity: context.rootIdentity });
+            await this.inspect(context.root, backup, { rootIdentity: context.rootIdentity });
             handle = await this.fs.open(temporary, 'wx');
             await handle.writeFile(data, encoding);
             await handle.sync();
@@ -109,13 +121,38 @@ class ConfinedFileSystem {
                 root: context.root,
                 path: temporary,
                 options: { rejectTargetLink: true }
-            }], ([target, temp]) => this.fs.rename(temp.target, target.target), guard);
+            }, {
+                root: context.root,
+                path: backup,
+                options: { rejectTargetLink: true }
+            }], async ([target, temp, recovery]) => {
+                const targetExists = await this.exists(target.target);
+                if (!targetExists) return this.fs.rename(temp.target, target.target);
+
+                await this.fs.rename(target.target, recovery.target);
+                try {
+                    await this.fs.rename(temp.target, target.target);
+                    await this.fs.rm(recovery.target, { force: true });
+                } catch (error) {
+                    if (await this.exists(recovery.target) && !await this.exists(target.target)) {
+                        await this.fs.rename(recovery.target, target.target);
+                    }
+                    throw error;
+                }
+            }, guard);
         } catch (error) {
             await handle?.close().catch(() => {});
             // Only clean up while the lexical temp path is still demonstrably confined.
             try {
                 const safeTemp = await this.inspect(context.root, temporary, { rootIdentity: context.rootIdentity });
                 await this.fs.rm(safeTemp.target, { force: true });
+            } catch {}
+            try {
+                const safeBackup = await this.inspect(context.root, backup, { rootIdentity: context.rootIdentity });
+                if (await this.exists(safeBackup.target)) {
+                    if (!await this.exists(context.path)) await this.fs.rename(safeBackup.target, context.path);
+                    else await this.fs.rm(safeBackup.target, { force: true });
+                }
             } catch {}
             throw error;
         }

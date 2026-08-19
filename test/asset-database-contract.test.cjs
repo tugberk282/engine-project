@@ -15,7 +15,8 @@ test('asset metadata has a versioned, GUID-backed importer contract', () => {
   assert.match(databaseSource, /settings:\s*Record<string,\s*string \| number \| boolean>/);
   assert.match(databaseSource, /crypto\.randomUUID\(\)/);
   assert.match(databaseSource, /const metaPath = `\$\{assetPath\}\.meta`/);
-  assert.match(databaseSource, /await this\.fs\.rename\(temporaryPath,\s*metaPath\)/);
+  assert.match(databaseSource, /await this\.fs\.writeFile\(metaPath,/);
+  assert.doesNotMatch(databaseSource, /await this\.fs\.rename\(temporaryPath,\s*metaPath\)/);
 });
 
 test('refresh detects source and metadata invalidation and preserves moves by GUID', () => {

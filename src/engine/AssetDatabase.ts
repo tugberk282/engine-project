@@ -427,15 +427,7 @@ export class AssetDatabase {
 
     private async writeMeta(assetPath: string, meta: AssetMeta) {
         const metaPath = `${assetPath}.meta`;
-        const temporaryPath = `${metaPath}.${crypto.randomUUID()}.tmp`;
-        try {
-            await this.fs.writeFile(temporaryPath, `${JSON.stringify(meta, null, 2)}\n`, 'utf8');
-            await this.fs.rename(temporaryPath, metaPath);
-        } finally {
-            if (await this.fs.exists(temporaryPath)) {
-                await this.fs.unlink(temporaryPath);
-            }
-        }
+        await this.fs.writeFile(metaPath, `${JSON.stringify(meta, null, 2)}\n`, 'utf8');
     }
 
     private async readMeta(metaPath: string): Promise<MetaReadResult> {
