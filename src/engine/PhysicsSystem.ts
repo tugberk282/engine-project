@@ -86,6 +86,28 @@ export class PhysicsSystem {
     }
 
     /**
+     * Returns true when a dynamic body has a supporting contact beneath it.
+     * The normal test avoids treating walls and ceilings as ground and is more
+     * reliable than guessing from vertical velocity at the top of a jump.
+     */
+    public isGrounded(rb: RigidBody, maxSlopeDegrees: number = 50): boolean {
+        if (!rb.body) return false;
+        const minimumUp = Math.cos(Math.max(0, Math.min(89, maxSlopeDegrees)) * Math.PI / 180);
+
+        return this.world.contacts.some((contact) => {
+            const bodyI = contact.bi as CANNON.Body;
+            const bodyJ = contact.bj as CANNON.Body;
+            if (bodyI !== rb.body && bodyJ !== rb.body) return false;
+            if (!bodyI.collisionResponse || !bodyJ.collisionResponse) return false;
+
+            // Cannon's contact normal points from body i toward body j. For
+            // body j it is therefore the supporting normal; body i gets its inverse.
+            const supportingY = bodyJ === rb.body ? contact.ni.y : -contact.ni.y;
+            return supportingY >= minimumUp;
+        });
+    }
+
+    /**
      * Keep runtime world parameters in sync with project-level physics settings.
      * This makes settings changes effective immediately and keeps scene load deterministic.
      */

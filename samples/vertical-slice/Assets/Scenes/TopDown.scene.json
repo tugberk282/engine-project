@@ -1,0 +1,59 @@
+{
+  "environment": { "ambientColor": "#e6f2ee", "backgroundColor": "#162622" },
+  "formatVersion": 1,
+  "gameObjects": [
+    {
+      "id": "topdown-player",
+      "name": "Top-down Player",
+      "tag": "Player",
+      "enabled": true,
+      "children": [],
+      "transform": { "position": [0, 0.5, 0], "rotation": [0, 0, 0], "scale": [1, 1, 1] },
+      "components": [
+        { "type": "CapsuleCollider", "data": { "radius": 0.5, "height": 1 } },
+        { "type": "PlayerController", "data": { "moveSpeed": 4, "gravity": 0, "jumpForce": 0, "requiredCollectibles": 1, "fixedStep": 0.02 } }
+      ]
+    },
+    {
+      "id": "topdown-wall",
+      "name": "Static Wall",
+      "enabled": true,
+      "isStatic": true,
+      "children": [],
+      "transform": { "position": [0, 0.5, -1.5], "rotation": [0, 0, 0], "scale": [1, 1, 1] },
+      "components": [{ "type": "BoxCollider", "data": { "size": [2, 2, 0.5] } }]
+    },
+    {
+      "id": "topdown-collectible",
+      "name": "Collectible",
+      "tag": "Collect",
+      "enabled": true,
+      "isStatic": true,
+      "children": [],
+      "transform": { "position": [2, 0.5, 0], "rotation": [0, 0, 0], "scale": [1, 1, 1] },
+      "components": [{ "type": "BoxCollider", "data": { "size": [0.5, 1, 1], "isTrigger": true } }]
+    },
+    {
+      "id": "topdown-goal",
+      "name": "Goal",
+      "tag": "Finish",
+      "enabled": true,
+      "isStatic": true,
+      "children": [],
+      "transform": { "position": [4, 0.5, 0], "rotation": [0, 0, 0], "scale": [1, 1, 1] },
+      "components": [{ "type": "BoxCollider", "data": { "size": [0.5, 1, 1], "isTrigger": true } }]
+    },
+    {
+      "id": "topdown-hazard",
+      "name": "Lose Zone",
+      "tag": "Lose",
+      "enabled": true,
+      "isStatic": true,
+      "children": [],
+      "transform": { "position": [0, 0.5, 2], "rotation": [0, 0, 0], "scale": [1, 1, 1] },
+      "components": [{ "type": "BoxCollider", "data": { "size": [1, 1, 0.5], "isTrigger": true } }]
+    }
+  ],
+  "name": "Top-down Collect and Goal",
+  "sceneId": "scene-topdown-primitives"
+}

@@ -34,8 +34,7 @@ import { MaterialManager } from '../engine/Material';
 
 import { Input } from '../engine/Input';
 import { Component } from '../engine/Component';
-import { Time } from '../engine/Time';
-import { CoroutineManager } from '../engine/CoroutineManager';
+import { PlayModeManager } from '../engine/PlayModeManager';
 import { EditorCameraController } from '../engine/components/EditorCameraController';
 import { ScriptRegistry } from '../engine/ScriptRegistry';
 import { Prefab, PrefabManager } from '../engine/Prefab';
@@ -43,7 +42,7 @@ import { CommandHistory, DuplicateGameObjectCommand, GroupCommand, type Command 
 import { AddComponentCommand, CreateGameObjectCommand, DeleteGameObjectCommand, ReparentGameObjectCommand } from './LifecycleCommands';
 import { ProjectSettingsWindow } from './ProjectSettingsWindow';
 import { EditorInspectors } from './EditorInspectors';
-import { ProjectWindow } from './ProjectWindow';
+import { ProjectWindow, type ProjectAssetSelection } from './ProjectWindow';
 import { HierarchyWindow } from './HierarchyWindow';
 import { InspectorWindow } from './InspectorWindow';
 import { ThemeManager } from './ThemeManager';
@@ -74,6 +73,7 @@ import {
     type EditorViewportTab
 } from './EditorSettings';
 import { calculateViewportSize, viewportSizeEquals, type ViewportSize } from './ViewportSizing';
+import { EditorSelection, type EditorSelectionSource } from './EditorSelection';
 // // import { BuildSettingsWindow } from './BuildSettingsWindow';
 
 type FloatingDockTarget = {
@@ -94,6 +94,7 @@ export class Editor {
     private sceneView: HTMLElement;
     private selectedGameObject: GameObject | null = null;
     private selectedGameObjects: GameObject[] = [];
+    public readonly selection = new EditorSelection();
     private clipboard: ClipboardGameObjectPayload[] = [];
     private transformControls: TransformControls;
     private activeTransformToolMode: 'view' | 'translate' | 'rotate' | 'scale' | 'rect' = 'translate';
@@ -119,7 +120,7 @@ export class Editor {
     private isPlaying: boolean = false;
     private isPaused: boolean = false;
     private stepRequest: boolean = false;
-    private cachedSceneState: string | null = null;
+    private readonly playMode = PlayModeManager.getInstance();
     private isGameView: boolean = false;
     private perfAccumulatedSeconds: number = 0;
     private perfAccumulatedFrames: number = 0;
@@ -254,6 +255,20 @@ export class Editor {
         this.renderSettingsWindow = new RenderSettingsWindow(document.getElementById('render-content')!, this.scene, () => this.updatePostProcessing());
 
         this.electronAPI = this.desktopBridge.getElectronAPI();
+        this.playMode.onStop(() => {
+            const runtimeFailed = this.playMode.getRuntimeError() !== null;
+            this.isPlaying = false;
+            this.isPaused = false;
+            this.stepRequest = false;
+            this.updatePlayModeButtons();
+            this.hierarchyWindow.refresh();
+            this.inspectorWindow.refresh();
+            this.setTab('scene', false);
+            if (runtimeFailed) {
+                this.setBottomTab('console', false);
+                this.consoleWindow.onGUI();
+            }
+        });
         CommandHistory.addMutationListener((state) => this.dirtyState.setCommandRevision(state));
         this.dirtyState.subscribe((dirty) => this.desktopBridge.setEditorDirty(dirty));
         this.desktopBridge.onCloseSaveRequested( async() => await this.saveActiveScene());
@@ -4239,28 +4254,15 @@ export class Editor {
 
         if (playBtn) {
             playBtn.onclick = () => {
-                this.isPlaying = !this.isPlaying;
+                if (this.isPlaying) {
+                    this.playMode.exitPlayMode();
+                    return;
+                }
+                this.playMode.enterPlayMode();
+                this.isPlaying = true;
                 this.isPaused = false;
                 this.updatePlayModeButtons();
-
-                if (this.isPlaying) {
-                    this.cachedSceneState = this.scene.toJSON();
-                    Time.resetRuntime();
-                    CoroutineManager.getInstance().clearAll();
-                    console.log("Enter Play Mode");
-                    this.setTab('game', false);
-                } else {
-                    if (this.cachedSceneState) {
-                        this.scene.loadFromJSON(this.cachedSceneState);
-                        this.hierarchyWindow.refresh();
-                        this.inspectorWindow.refresh();
-                        this.cachedSceneState = null;
-                        Time.resetRuntime();
-                        CoroutineManager.getInstance().clearAll();
-                        console.log("Exit Play Mode");
-                        this.setTab('scene', false);
-                    }
-                }
+                this.setTab('game', false);
             };
         }
 
@@ -4268,6 +4270,8 @@ export class Editor {
             pauseBtn.onclick = () => {
                 if (!this.isPlaying) return;
                 this.isPaused = !this.isPaused;
+                if (this.isPaused) this.playMode.pausePlayMode();
+                else this.playMode.resumePlayMode();
                 this.updatePlayModeButtons();
             };
         }
@@ -4276,7 +4280,7 @@ export class Editor {
             stepBtn.onclick = () => {
                 if (!this.isPlaying) return;
                 this.isPaused = true;
-                this.stepRequest = true;
+                this.playMode.stepFrame();
                 this.updatePlayModeButtons();
             };
         }
@@ -4464,7 +4468,7 @@ export class Editor {
             if (hitOwners.length > 0) {
                 const hitOwner = hitOwners[0];
                 if (!this.selectedGameObjects.includes(hitOwner)) {
-                    this.selectGameObject(hitOwner, false);
+                    this.selectGameObject(hitOwner, false, 'scene');
                 }
             }
 
@@ -4514,16 +4518,16 @@ export class Editor {
                     const go = this.resolveSceneClickSelection(hitOwners, e.clientX, e.clientY, reverseCycle);
                     if (go) {
                         if (additiveOnly) {
-                            this.addGameObjectToSelection(go);
+                            this.addGameObjectToSelection(go, 'scene');
                         } else {
-                            this.selectGameObject(go, toggleAdditive);
+                            this.selectGameObject(go, toggleAdditive, 'scene');
                         }
                         if (e.detail >= 2 && !toggleAdditive && !additiveOnly) {
                             this.focusOnSelection();
                         }
                     }
                 } else if (!e.ctrlKey && !e.metaKey && !e.shiftKey) {
-                    this.selectGameObject(null);
+                    this.selectGameObject(null, false, 'scene');
                     this.sceneClickCycleState = null;
                 }
             } else {
@@ -4550,7 +4554,7 @@ export class Editor {
                 });
 
                 const additive = e.ctrlKey || e.metaKey || e.shiftKey;
-                this.selectGameObjectRange(boxTargets, additive);
+                this.selectGameObjectRange(boxTargets, additive, null, 'scene');
             }
         });
     }
@@ -7830,7 +7834,7 @@ export class Editor {
         Input.update(deltaTime);
 
         if (this.isPlaying && (!this.isPaused || this.stepRequest)) {
-            this.scene.update(deltaTime);
+            this.playMode.update();
             this.stepRequest = false;
         } else {
             if (this.cameraGO?.enabled) {
@@ -8026,9 +8030,9 @@ export class Editor {
         this.sceneOnboardingHint.style.display = 'none';
     }
 
-    public selectGameObject(go: GameObject | null, additive: boolean = false) {
+    public selectGameObject(go: GameObject | null, additive: boolean = false, source: EditorSelectionSource = 'hierarchy') {
         if (!go) {
-            this.applyGameObjectSelection([], null);
+            this.applyGameObjectSelection([], null, source);
             return;
         }
 
@@ -8038,18 +8042,23 @@ export class Editor {
             if (index > -1) {
                 current.splice(index, 1);
                 const nextActive = current[current.length - 1] ?? null;
-                this.applyGameObjectSelection(current, nextActive);
+                this.applyGameObjectSelection(current, nextActive, source);
                 return;
             }
 
-            this.applyGameObjectSelection([...current, go], go);
+            this.applyGameObjectSelection([...current, go], go, source);
             return;
         }
 
-        this.applyGameObjectSelection([go], go);
+        this.applyGameObjectSelection([go], go, source);
     }
 
-    public selectGameObjectRange(gameObjects: GameObject[], additive: boolean = false, preferredActive: GameObject | null = null) {
+    public selectGameObjectRange(
+        gameObjects: GameObject[],
+        additive: boolean = false,
+        preferredActive: GameObject | null = null,
+        source: EditorSelectionSource = 'hierarchy'
+    ) {
         const uniqueTargets = this.normalizeSelectionTargets(gameObjects);
         const nextSelection = additive
             ? [
@@ -8060,16 +8069,16 @@ export class Editor {
         const nextActive = preferredActive && nextSelection.includes(preferredActive)
             ? preferredActive
             : (nextSelection[nextSelection.length - 1] ?? null);
-        this.applyGameObjectSelection(nextSelection, nextActive);
+        this.applyGameObjectSelection(nextSelection, nextActive, source);
     }
 
-    private addGameObjectToSelection(go: GameObject): void {
+    private addGameObjectToSelection(go: GameObject, source: EditorSelectionSource = 'hierarchy'): void {
         if (!go || go === this.cameraGO) return;
         const ordered = [
             ...this.selectedGameObjects.filter((selected) => selected !== go && selected !== this.cameraGO),
             go
         ];
-        this.selectGameObjectRange(ordered, false);
+        this.selectGameObjectRange(ordered, false, null, source);
     }
 
     private updateOutlineSelection() {
@@ -8151,7 +8160,11 @@ export class Editor {
             : [];
     }
 
-    private applyGameObjectSelection(targets: Array<GameObject | null | undefined>, preferredActive: GameObject | null = null): void {
+    private applyGameObjectSelection(
+        targets: Array<GameObject | null | undefined>,
+        preferredActive: GameObject | null = null,
+        source: EditorSelectionSource = 'command'
+    ): void {
         const normalizedTargets = this.normalizeSelectionTargets(targets);
         const activeSelection = preferredActive && normalizedTargets.includes(preferredActive)
             ? preferredActive
@@ -8162,6 +8175,8 @@ export class Editor {
 
         this.selectedGameObjects = normalizedTargets;
         this.selectedGameObject = activeSelection;
+        this.selection.selectScene(normalizedTargets.map((target) => target.id), activeSelection?.id ?? null, source);
+        this.projectWindow?.applyAuthoritativeSelection(null);
 
         this.selectedGameObjects.forEach((target) => {
             const helper = new THREE.BoxHelper(target.object3D, 0xffff00);
@@ -8195,6 +8210,41 @@ export class Editor {
         this.hierarchyWindow.refresh();
         this.updateOutlineSelection();
         this.syncWindowMenuState();
+    }
+
+    public selectProjectAsset(asset: ProjectAssetSelection, focus = false): void {
+        if (!asset.meta?.guid) throw new Error(`Cannot select asset without GUID: ${asset.path}`);
+        this.clearSceneSelectionVisuals();
+        this.selection.selectAsset(asset.meta.guid, asset.path, 'project', {
+            panel: 'project', controlId: focus ? asset.meta.guid : null
+        });
+        this.projectWindow?.applyAuthoritativeSelection(asset.path);
+        this.inspectorWindow.selectAsset(asset);
+        this.hierarchyWindow.refresh();
+        this.syncWindowMenuState();
+    }
+
+    public reconcileProjectSelection(clearMissing = false): void {
+        const next = this.selection.reconcileAsset((guid) => AssetDatabase.getInstance().getPath(guid) ?? null);
+        if (next.kind !== 'asset' || next.resolved) return;
+        this.projectWindow?.applyAuthoritativeSelection(null);
+        if (clearMissing) {
+            this.selection.clear('command');
+            this.inspectorWindow.selectGameObject(null);
+        } else {
+            this.inspectorWindow.selectMissingAsset(next.guid, next.lastKnownPath);
+        }
+    }
+
+    private clearSceneSelectionVisuals(): void {
+        this.selectionHelpers.forEach((helper) => this.scene.threeScene.remove(helper));
+        this.selectionHelpers.clear();
+        this.selectedGameObjects = [];
+        this.selectedGameObject = null;
+        if (this.outlinePass) this.outlinePass.selectedObjects = [];
+        this.updateTransformControlsAttachment();
+        this.gizmos.forEach((gizmo) => this.scene.threeScene.remove(gizmo));
+        this.gizmos.clear();
     }
 
     public selectAllSceneObjects() {

@@ -24,6 +24,7 @@ const COMMANDS = Object.freeze({
     RUNTIME_PAUSE: 'runtime.pause',
     RUNTIME_RESUME: 'runtime.resume',
     RUNTIME_TICK: 'runtime.tick',
+    RUNTIME_STEP: 'runtime.step',
     RUNTIME_STOP: 'runtime.stop'
 });
 const COMMAND_SET = new Set(Object.values(COMMANDS));
@@ -131,7 +132,7 @@ function validatePayload(command, payload) {
             && typeof payload.snapshot === 'string'
             && utf8Length(payload.snapshot) <= 16 * 1024 * 1024;
     }
-    if (command === COMMANDS.RUNTIME_TICK) {
+    if (command === COMMANDS.RUNTIME_TICK || command === COMMANDS.RUNTIME_STEP) {
         return hasExactKeys(payload, ['deltaTime'])
             && Number.isFinite(payload.deltaTime)
             && payload.deltaTime >= 0

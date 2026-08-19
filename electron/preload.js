@@ -9,7 +9,7 @@ const PROTOCOL_COMMANDS = new Set([
     'dialog.openProject', 'dialog.createProject', 'project.open', 'project.getTrust',
     'project.requestTrust', 'project.revokeTrust', 'recentProjects.load',
     'recentProjects.save', 'telemetry.record', 'runtime.start', 'runtime.pause',
-    'runtime.resume', 'runtime.tick', 'runtime.stop'
+    'runtime.resume', 'runtime.tick', 'runtime.step', 'runtime.stop'
 ]);
 const PROTOCOL_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const isRecord = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);

@@ -2,6 +2,7 @@
 
 const assert = require('node:assert/strict');
 const { createHash } = require('node:crypto');
+const fs = require('node:fs');
 const path = require('node:path');
 const test = require('node:test');
 const { RuntimeSupervisor } = require('../electron/runtime/runtime-supervisor');
@@ -11,6 +12,10 @@ const snapshot = JSON.stringify({
     sceneId: 'replay-fixture',
     gameObjects: [{ id: 'player', position: [0, 0, 0] }]
 });
+
+const authoredSnapshot = fs.readFileSync(path.join(
+    __dirname, '..', 'samples', 'playable-runtime', 'Assets', 'Scenes', 'PlayableSlice.json'
+), 'utf8');
 
 function hashReplay(states) {
     return createHash('sha256').update(JSON.stringify(states)).digest('hex');
@@ -79,4 +84,35 @@ test('shutdown is idempotent and releases process, timers, and pending requests'
     assert.equal(supervisor.child, null);
     assert.equal(supervisor.pending.size, 0);
     assert.equal(supervisor.heartbeatTimer, null);
+});
+
+test('authored Update and fixed-step components execute in the child runtime and return observable transforms', async () => {
+    const supervisor = new RuntimeSupervisor({ heartbeatIntervalMs: 60_000 });
+    const originalBytes = Buffer.from(authoredSnapshot);
+    const started = await supervisor.start(authoredSnapshot);
+    assert.deepEqual(started.transforms[0], {
+        id: 'moving-cube', position: [0, 2, 0], rotation: [0, 0, 0], scale: [1, 1, 1]
+    });
+
+    const advanced = await supervisor.tick(0.04);
+    assert.equal(advanced.updateCount, 1);
+    assert.equal(advanced.fixedUpdateCount, 2);
+    assert.equal(advanced.transforms[0].rotation[1], 0.16);
+    assert.ok(advanced.transforms[0].position[1] < 2, 'fixed-step gravity must visibly move the authored object');
+    assert.deepEqual(Buffer.from(authoredSnapshot), originalBytes, 'runtime must not mutate editor snapshot bytes');
+    await supervisor.shutdown();
+});
+
+test('pause freezes authored state and step advances exactly one frame while remaining paused', async () => {
+    const supervisor = new RuntimeSupervisor({ heartbeatIntervalMs: 60_000 });
+    await supervisor.start(authoredSnapshot);
+    const paused = await supervisor.pause();
+    assert.equal(paused.state, 'paused');
+    await assert.rejects(supervisor.tick(0.02), (error) => error.code === 'INVALID_TRANSITION');
+    const stepped = await supervisor.step(0.02);
+    assert.equal(stepped.state, 'paused');
+    assert.equal(stepped.frame, 1);
+    assert.equal(stepped.fixedUpdateCount, 1);
+    assert.equal(stepped.transforms[0].rotation[1], 0.08);
+    await supervisor.shutdown();
 });

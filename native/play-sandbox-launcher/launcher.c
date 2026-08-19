@@ -76,9 +76,33 @@ static int parse_options(int argc, wchar_t **argv, Options *out) {
 
 static int is_absolute_non_reparse_directory(const wchar_t *path) {
     if (!path || wcslen(path) < 3 || path[1] != L':' || (path[2] != L'\\' && path[2] != L'/')) return 0;
-    DWORD attrs = GetFileAttributesW(path);
-    return attrs != INVALID_FILE_ATTRIBUTES
-        && (attrs & FILE_ATTRIBUTE_DIRECTORY)
+    wchar_t *cursor_path = _wcsdup(path);
+    if (!cursor_path) return 0;
+    int valid = 1;
+    for (wchar_t *cursor = cursor_path + 3; ; cursor++) {
+        if (*cursor != L'\\' && *cursor != L'/' && *cursor != L'\0') continue;
+        wchar_t saved = *cursor;
+        *cursor = L'\0';
+        DWORD attrs = GetFileAttributesW(cursor_path);
+        if (attrs == INVALID_FILE_ATTRIBUTES || !(attrs & FILE_ATTRIBUTE_DIRECTORY)
+            || (attrs & FILE_ATTRIBUTE_REPARSE_POINT)) valid = 0;
+        *cursor = saved;
+        if (!valid || saved == L'\0') break;
+    }
+    free(cursor_path);
+    return valid;
+}
+
+static int is_confined_regular_file(const wchar_t *root, const wchar_t *candidate) {
+    wchar_t canonical_root[32768];
+    wchar_t canonical_candidate[32768];
+    DWORD root_length = GetFullPathNameW(root, 32768, canonical_root, NULL);
+    DWORD candidate_length = GetFullPathNameW(candidate, 32768, canonical_candidate, NULL);
+    if (!root_length || root_length >= 32768 || !candidate_length || candidate_length >= 32768) return 0;
+    if (candidate_length <= root_length || _wcsnicmp(canonical_root, canonical_candidate, root_length)
+        || (canonical_candidate[root_length] != L'\\' && canonical_candidate[root_length] != L'/')) return 0;
+    DWORD attrs = GetFileAttributesW(canonical_candidate);
+    return attrs != INVALID_FILE_ATTRIBUTES && !(attrs & FILE_ATTRIBUTE_DIRECTORY)
         && !(attrs & FILE_ATTRIBUTE_REPARSE_POINT);
 }
 
@@ -153,6 +177,11 @@ int wmain(int argc, wchar_t **argv) {
     }
     if (!is_absolute_non_reparse_directory(options.staging)) {
         report_error(L"INVALID_STAGING_ROOT", ERROR_INVALID_REPARSE_DATA);
+        return 65;
+    }
+    if (!is_confined_regular_file(options.staging, options.executable)
+        || !is_confined_regular_file(options.staging, options.adapter)) {
+        report_error(L"INVALID_STAGED_EXECUTABLE", ERROR_ACCESS_DENIED);
         return 65;
     }
 

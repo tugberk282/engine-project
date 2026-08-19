@@ -5,6 +5,22 @@ export interface RuntimeFailure {
     message: string;
 }
 
+export interface RuntimeTransformState {
+    id: string;
+    position: [number, number, number];
+    rotation: [number, number, number];
+    scale: [number, number, number];
+}
+
+export interface RuntimeFrame {
+    state: RuntimeState;
+    frame: number;
+    timeMicros: number;
+    fixedUpdateCount: number;
+    updateCount: number;
+    transforms: RuntimeTransformState[];
+}
+
 export interface RuntimeBridgeOptions {
     heartbeatIntervalMs?: number;
     heartbeatTimeoutMs?: number;
@@ -18,6 +34,7 @@ export class RuntimeBridge {
     private stoppingIntentionally = false;
     private readonly stateListeners = new Set<(state: RuntimeState) => void>();
     private readonly errorListeners = new Set<(error: RuntimeFailure) => void>();
+    private readonly frameListeners = new Set<(frame: RuntimeFrame) => void>();
 
     public constructor(_options: RuntimeBridgeOptions = {}) {}
 
@@ -39,6 +56,10 @@ export class RuntimeBridge {
         if (this.state === 'running') void this.request('runtime.tick', { deltaTime });
     }
 
+    public step(deltaTime: number): void {
+        void this.stepOnce(deltaTime);
+    }
+
     public restart(snapshot: string): void {
         this.start(snapshot);
     }
@@ -55,6 +76,7 @@ export class RuntimeBridge {
         this.setState('idle');
         this.stateListeners.clear();
         this.errorListeners.clear();
+        this.frameListeners.clear();
     }
 
     public getState(): RuntimeState {
@@ -71,14 +93,24 @@ export class RuntimeBridge {
         return () => this.errorListeners.delete(listener);
     }
 
+    public onFrame(listener: (frame: RuntimeFrame) => void): () => void {
+        this.frameListeners.add(listener);
+        return () => this.frameListeners.delete(listener);
+    }
+
     private async request(command: string, payload: Record<string, unknown>): Promise<void> {
         try {
             const protocol = (window as any).tugberk?.v1;
             if (!protocol?.request) throw Object.assign(new Error('The supervised runtime protocol is unavailable.'), {
                 code: 'RUNTIME_PROTOCOL_UNAVAILABLE'
             });
-            const value = await protocol.request(command, payload) as { state?: RuntimeState };
+            const value = await protocol.request(command, payload) as Partial<RuntimeFrame>;
             if (value?.state) this.setState(value.state);
+            if (Array.isArray(value?.transforms)
+                && typeof value.frame === 'number'
+                && typeof value.timeMicros === 'number') {
+                this.frameListeners.forEach((listener) => listener(value as RuntimeFrame));
+            }
         } catch (cause) {
             if (this.stoppingIntentionally) {
                 this.setState('idle');
@@ -93,6 +125,11 @@ export class RuntimeBridge {
             this.setState('failed');
             this.errorListeners.forEach((listener) => listener(error));
         }
+    }
+
+    private async stepOnce(deltaTime: number): Promise<void> {
+        if (this.state === 'running') await this.request('runtime.pause', {});
+        if (this.state === 'paused') await this.request('runtime.step', { deltaTime });
     }
 
     private setState(state: RuntimeState): void {

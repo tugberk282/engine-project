@@ -5,7 +5,7 @@
 
 import { Scene } from './Scene';
 import { SceneManager } from './SceneManager';
-import { RuntimeBridge, RuntimeFailure, RuntimeState } from './RuntimeBridge';
+import { RuntimeBridge, RuntimeFailure, RuntimeFrame, RuntimeState } from './RuntimeBridge';
 
 export type PlayMode = 'edit' | 'play' | 'paused';
 export type PlayStep = 'frame' | 'physics' | 'full';
@@ -32,6 +32,7 @@ export class PlayModeManager {
 
     private constructor() {
         this.runtime.onStateChange((state) => this.handleRuntimeState(state));
+        this.runtime.onFrame((runtimeFrame) => this.applyRuntimeFrame(runtimeFrame));
         this.runtime.onError((error) => {
             this.runtimeError = error;
             console.error(`[PlayMode] ${error.code}: ${error.message}`);
@@ -137,9 +138,10 @@ export class PlayModeManager {
      * Step one frame in paused mode
      */
     public stepFrame(): void {
-        if (this.mode !== 'play' || !this.isPaused) return;
-
-        this.updateFrame(this.targetFrameTime);
+        if (this.mode !== 'play') return;
+        this.isPaused = true;
+        this.deltaTime = this.targetFrameTime;
+        this.runtime.step(this.targetFrameTime);
     }
 
     /**
@@ -164,9 +166,6 @@ export class PlayModeManager {
      */
     private updateFrame(delta: number): void {
         this.deltaTime = delta;
-        this.time += delta;
-        this.frame++;
-
         this.runtime.tick(delta);
 
         // Call frame callbacks
@@ -198,7 +197,7 @@ export class PlayModeManager {
         const editor = window.Editor?.instance;
         if (editor) {
             this.editorState = {
-                selectedGameObject: editor.selectedGameObject,
+                selectedGameObjectId: editor.selectedGameObject?.id ?? null,
                 sceneView: editor.getSceneViewState?.()
             };
         }
@@ -211,7 +210,11 @@ export class PlayModeManager {
         // @ts-ignore
         const editor = window.Editor?.instance;
         if (editor && this.editorState) {
-            editor.selectGameObject?.(this.editorState.selectedGameObject);
+            const scene = SceneManager.getInstance().getActiveScene();
+            const selected = this.editorState.selectedGameObjectId
+                ? scene?.findGameObjectByID(this.editorState.selectedGameObjectId) ?? null
+                : null;
+            editor.selectGameObject?.(selected);
             editor.setSceneViewState?.(this.editorState.sceneView);
         }
     }
@@ -274,6 +277,22 @@ export class PlayModeManager {
     private handleRuntimeState(state: RuntimeState): void {
         if (state === 'paused') this.isPaused = true;
         if (state === 'running') this.isPaused = false;
+    }
+
+    private applyRuntimeFrame(runtimeFrame: RuntimeFrame): void {
+        if (this.mode !== 'play') return;
+        this.frame = runtimeFrame.frame;
+        this.time = runtimeFrame.timeMicros / 1_000_000;
+        const scene = SceneManager.getInstance().getActiveScene();
+        if (!scene) return;
+        for (const transformState of runtimeFrame.transforms) {
+            const gameObject = scene.findGameObjectByID(transformState.id);
+            if (!gameObject) continue;
+            gameObject.transform.position.set(...transformState.position);
+            gameObject.transform.rotation.set(...transformState.rotation);
+            gameObject.transform.scale.set(...transformState.scale);
+            gameObject.object3D.updateMatrixWorld(true);
+        }
     }
 
     // Event listeners

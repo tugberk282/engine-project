@@ -1,0 +1,11 @@
+{
+  "formatVersion": 1,
+  "projectId": "playable-runtime-sample",
+  "name": "Playable Runtime Sample",
+  "scenes": [
+    {
+      "sceneId": "playable-runtime-slice",
+      "path": "Assets/Scenes/PlayableSlice.json"
+    }
+  ]
+}

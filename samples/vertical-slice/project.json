@@ -1,11 +1,23 @@
 {
   "formatVersion": 1,
-  "name": "Vertical Slice",
+  "name": "Simple Game Samples",
   "projectId": "project-vertical-slice",
   "scenes": [
     {
       "path": "Assets/Scenes/Main.scene.json",
       "sceneId": "scene-vertical-slice-main"
+    },
+    {
+      "path": "Assets/Scenes/JumpPractice.scene.json",
+      "sceneId": "scene-sample-jump-practice"
+    },
+    {
+      "path": "Assets/Scenes/PhysicsMotion.scene.json",
+      "sceneId": "scene-sample-physics-motion"
+    },
+    {
+      "path": "Assets/Scenes/TopDown.scene.json",
+      "sceneId": "scene-topdown-primitives"
     }
   ]
 }

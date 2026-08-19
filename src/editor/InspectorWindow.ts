@@ -65,6 +65,11 @@ export class InspectorWindow extends EditorWindow {
         this.refresh();
     }
 
+    public selectMissingAsset(guid: string, lastKnownPath: string): void {
+        this.selection = { kind: 'missing-asset', guid, lastKnownPath };
+        this.refresh();
+    }
+
     public onGUI(): void {
         const content = this.getContentArea();
         content.innerHTML = '';
@@ -82,6 +87,16 @@ export class InspectorWindow extends EditorWindow {
             this.renderGameObjectInspector(content, this.selection);
         } else if (this.selection?.kind === 'asset') {
             this.renderAssetInspector(content, this.selection as ProjectAssetSelection);
+        } else if (this.selection?.kind === 'missing-asset') {
+            const missing = document.createElement('div');
+            missing.className = 'editor-empty-state editor-error-state';
+            missing.setAttribute('role', 'status');
+            missing.setAttribute('aria-live', 'polite');
+            missing.innerHTML = `
+                <div class="editor-empty-state-title">Missing asset reference</div>
+                <div class="editor-empty-state-hint">GUID ${escapeHtml(this.selection.guid)} no longer resolves. Last known path: ${escapeHtml(this.selection.lastKnownPath)}</div>
+            `;
+            content.appendChild(missing);
         } else if (this.selection instanceof ScriptableObject) {
             this.renderScriptableObjectInspector(content, this.selection);
         } else if (this.selection.constructor.name === 'Material') {

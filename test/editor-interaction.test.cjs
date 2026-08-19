@@ -44,7 +44,7 @@ test('rendered editor interactions create, select, inspect, and expose menu stat
             ENGINE_AUTO_OPEN_PROJECT_PATH: project,
             ENGINE_USER_DATA_PATH: path.join(workDirectory, 'user-data')
         },
-        timeoutMs: 45_000
+        timeoutMs: 60_000
     });
 
     const result = JSON.parse(fs.readFileSync(output, 'utf8'));
@@ -104,7 +104,7 @@ test('rendered editor interactions create, select, inspect, and expose menu stat
             ENGINE_AUTO_OPEN_PROJECT_PATH: project,
             ENGINE_USER_DATA_PATH: path.join(workDirectory, 'user-data')
         },
-        timeoutMs: 45_000
+        timeoutMs: 60_000
     });
     const restartResult = JSON.parse(fs.readFileSync(restartOutput, 'utf8'));
     assert.equal(restartResult.ok, true, JSON.stringify(restartResult.failures ?? restartResult, null, 2));

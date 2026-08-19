@@ -9,6 +9,7 @@ const test = require('node:test');
 const { BuildService } = require('../electron/build/build-service');
 const { assertBuildRequest } = require('../electron/build/build-contract');
 const { runPackagedPlayer } = require('../electron/build/player-runtime');
+const { spawn } = require('node:child_process');
 
 function revision(projectRoot) {
     return crypto.createHash('sha256').update(
@@ -46,6 +47,23 @@ test('canonical sample builds reproducibly and player runs deterministic frames'
     assert.deepEqual(runA, runB);
     assert.equal(runA.frame, 120);
     assert.equal(runA.sceneId, 'scene-vertical-slice-main');
+    if (process.platform === 'win32') {
+        const smokeOutput = path.join(root, 'player-smoke.json');
+        await new Promise((resolve, reject) => {
+            const playerEnvironment = { ...process.env, TUGBERK_PLAYER_SMOKE: '1', TUGBERK_PLAYER_SMOKE_OUTPUT: smokeOutput };
+            delete playerEnvironment.ELECTRON_RUN_AS_NODE;
+            const child = spawn(path.join(root, 'first', 'Tugberk Player.exe'), [], {
+                env: playerEnvironment,
+                stdio: 'ignore'
+            });
+            const timeout = setTimeout(() => { child.kill(); reject(new Error('Standalone player smoke timed out')); }, 30_000);
+            child.once('error', reject);
+            child.once('exit', (code) => { clearTimeout(timeout); code === 0 ? resolve() : reject(new Error(`Player exited ${code}`)); });
+        });
+        assert.deepEqual(JSON.parse(fs.readFileSync(smokeOutput, 'utf8')), {
+            ok: true, sceneId: 'scene-vertical-slice-main', objectCount: runA.objectCount
+        });
+    }
 });
 
 test('stale revision and malicious output fail without partial publication', async (t) => {

@@ -1,8 +1,9 @@
 # TUG-107 Windows sandbox launcher decision record
 
-Status: native launcher and source-built adversarial harness implemented; production
-admission remains fail closed with `PLAY_SANDBOX_UNAVAILABLE` until the installed-NSIS
-matrix, signing identity, and remaining adapter-specific probes are qualified.
+Status: native launcher and the standalone clean-installed NSIS adversarial matrix are
+implemented. Production admission remains fail closed with `PLAY_SANDBOX_UNAVAILABLE`
+until the release artifact is Authenticode-signed and each runtime adapter passes the
+same matrix through real stop/revoke lifecycle integration.
 
 ## Verified baseline
 
@@ -76,10 +77,17 @@ Run from a clean installed NSIS artifact, not only from source:
 - Runtime owners: provide separately signed headless JavaScript and managed-C# adapters.
   The helper intentionally applies Win32k and child-process restrictions; the Electron GUI
   executable is not a sandbox adapter.
-- Security: extend the packaged probe from the current outside-root read/write, secret,
-  loopback, child-process, timeout, hash-tamper, and cleanup gates to LAN/Internet/DNS,
-  named pipes, process handles, non-allowlisted DLLs, CPU/memory/output quotas, revocation
-  races, and helper-crash cleanup. Native/plugin inputs remain disabled.
+- TUG-116 (release owner): provision the Authenticode identity and reproduce the passing
+  installed matrix against the signed helper and installer.
+- TUG-117 (runtime owners): supply separately signed headless JavaScript and managed-C#
+  adapters, then expose real renderer/grant/project-revocation hooks to the matrix. Native
+  and plugin inputs remain disabled.
+- TUG-118 (security): the installed standalone helper now denies outside-root reads/writes,
+  environment secrets, loopback/LAN/Internet/DNS, named pipes, process handles, child
+  creation, and external DLL loading. CPU, memory, output, wall-clock, abort, worker crash,
+  helper crash, and ancestor-junction probes all fail closed with empty staging cleanup.
+  Final signed-artifact replay is blocked by TUG-116; lifecycle replay is blocked by
+  TUG-117.
 
 ## Primary platform references
 

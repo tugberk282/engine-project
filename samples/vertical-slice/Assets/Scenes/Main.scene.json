@@ -1,41 +1,74 @@
 {
-  "environment": {
-    "ambientColor": "#20283a"
-  },
+  "environment": { "ambientColor": "#d8e6ff", "backgroundColor": "#20323a" },
   "formatVersion": 1,
   "gameObjects": [
     {
       "children": [],
       "components": [
-        {
-          "type": "MeshRenderer",
-          "geometry": "cube",
-          "material": "Assets/Materials/Player.material.json"
-        },
-        {
-          "type": "PlayerController",
-          "inputAxis": "Horizontal",
-          "speed": 4
-        }
+        { "type": "MeshFilter", "data": { "geometryType": "Cube" } },
+        { "type": "MeshRenderer", "data": { "color": "#4da3ff", "materialPath": "Assets/Materials/Player.material.json" } },
+        { "type": "CapsuleCollider", "data": { "radius": 0.45, "height": 1.8, "center": [0, 0, 0] } },
+        { "type": "RigidBody", "data": { "mass": 1, "useGravity": true, "freezeRotationX": true, "freezeRotationY": true, "freezeRotationZ": true, "collisionDetectionMode": "Continuous Dynamic" } },
+        { "type": "PlayerController", "data": { "moveSpeed": 5, "jumpForce": 6, "respawnY": -8, "fixedStep": 0.02 } }
       ],
       "enabled": true,
       "id": "object-player",
-      "name": "Player"
+      "name": "Player",
+      "tag": "Player",
+      "transform": { "position": [-2, 2, 0], "rotation": [0, 0, 0], "scale": [0.9, 1.8, 0.9] }
     },
     {
       "children": [],
       "components": [
-        {
-          "type": "Camera",
-          "isMain": true
-        }
+        { "type": "MeshFilter", "data": { "geometryType": "Cube" } },
+        { "type": "MeshRenderer", "data": { "color": "#586174" } },
+        { "type": "BoxCollider", "data": { "size": [20, 1, 10], "center": [0, 0, 0] } },
+        { "type": "RigidBody", "data": { "mass": 0, "useGravity": false } }
       ],
       "enabled": true,
+      "id": "object-platform-start",
+      "isStatic": true,
+      "name": "Movement Floor",
+      "transform": { "position": [3, -0.5, 0], "rotation": [0, 0, 0], "scale": [20, 1, 10] }
+    },
+    {
+      "children": [],
+      "components": [
+        { "type": "MeshFilter", "data": { "geometryType": "Cube" } },
+        { "type": "MeshRenderer", "data": { "color": "#41e38b" } },
+        { "type": "BoxCollider", "data": { "size": [0.5, 3, 4], "center": [0, 0, 0], "isTrigger": true } },
+        { "type": "RigidBody", "data": { "mass": 0, "useGravity": false } }
+      ],
+      "enabled": true,
+      "id": "object-finish",
+      "isStatic": true,
+      "name": "Goal Beacon",
+      "tag": "Finish",
+      "transform": { "position": [8, 1.5, 0], "rotation": [0, 0, 0], "scale": [0.5, 3, 4] }
+    },
+    {
+      "children": [],
+      "components": [
+        { "type": "BoxCollider", "data": { "size": [40, 1, 40], "center": [0, 0, 0], "isTrigger": true } },
+        { "type": "RigidBody", "data": { "mass": 0, "useGravity": false } }
+      ],
+      "enabled": true,
+      "id": "object-respawn",
+      "isStatic": true,
+      "name": "Respawn Trigger",
+      "tag": "Respawn",
+      "transform": { "position": [0, -6, 0], "rotation": [0, 0, 0], "scale": [40, 1, 40] }
+    },
+    {
+      "children": [],
+      "components": [{ "type": "Camera", "data": { "isMain": true } }],
+      "enabled": true,
       "id": "object-main-camera",
-      "name": "Main Camera"
+      "name": "Main Camera",
+      "transform": { "position": [3, 7, 12], "rotation": [-0.4, 0, 0], "scale": [1, 1, 1] }
     }
   ],
-  "name": "Main",
+  "name": "Movement Goal",
   "sceneId": "scene-vertical-slice-main",
   "version": "1.4"
 }

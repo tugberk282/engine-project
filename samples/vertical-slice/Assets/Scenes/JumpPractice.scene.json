@@ -1,0 +1,75 @@
+{
+  "environment": { "ambientColor": "#fff0d0", "backgroundColor": "#2f2940" },
+  "formatVersion": 1,
+  "gameObjects": [
+    {
+      "children": [],
+      "components": [
+        { "type": "MeshFilter", "data": { "geometryType": "Cube" } },
+        { "type": "MeshRenderer", "data": { "color": "#ffb84d", "materialPath": "Assets/Materials/Player.material.json" } },
+        { "type": "CapsuleCollider", "data": { "radius": 0.45, "height": 1.8, "center": [0, 0, 0] } },
+        { "type": "RigidBody", "data": { "mass": 1, "useGravity": true, "freezeRotationX": true, "freezeRotationY": true, "freezeRotationZ": true, "collisionDetectionMode": "Continuous Dynamic" } },
+        { "type": "PlayerController", "data": { "moveSpeed": 4, "jumpForce": 6, "respawnY": -8, "fixedStep": 0.02 } }
+      ],
+      "enabled": true,
+      "id": "jump-player",
+      "name": "Player",
+      "tag": "Player",
+      "transform": { "position": [-3, 2, 0], "rotation": [0, 0, 0], "scale": [0.9, 1.8, 0.9] }
+    },
+    {
+      "children": [],
+      "components": [
+        { "type": "MeshFilter", "data": { "geometryType": "Cube" } },
+        { "type": "MeshRenderer", "data": { "color": "#6f6780" } },
+        { "type": "BoxCollider", "data": { "size": [16, 1, 8], "center": [0, 0, 0] } },
+        { "type": "RigidBody", "data": { "mass": 0, "useGravity": false } }
+      ],
+      "enabled": true,
+      "id": "jump-floor",
+      "isStatic": true,
+      "name": "Practice Floor",
+      "transform": { "position": [0, -0.5, 0], "rotation": [0, 0, 0], "scale": [16, 1, 8] }
+    },
+    {
+      "children": [],
+      "components": [
+        { "type": "MeshFilter", "data": { "geometryType": "Cube" } },
+        { "type": "MeshRenderer", "data": { "color": "#c58cff" } },
+        { "type": "BoxCollider", "data": { "size": [1, 1.5, 4], "center": [0, 0, 0] } },
+        { "type": "RigidBody", "data": { "mass": 0, "useGravity": false } }
+      ],
+      "enabled": true,
+      "id": "jump-barrier",
+      "isStatic": true,
+      "name": "Jump Barrier",
+      "transform": { "position": [0, 0.75, 0], "rotation": [0, 0, 0], "scale": [1, 1.5, 4] }
+    },
+    {
+      "children": [],
+      "components": [
+        { "type": "MeshFilter", "data": { "geometryType": "Cube" } },
+        { "type": "MeshRenderer", "data": { "color": "#57e389" } },
+        { "type": "BoxCollider", "data": { "size": [0.5, 3, 4], "center": [0, 0, 0], "isTrigger": true } },
+        { "type": "RigidBody", "data": { "mass": 0, "useGravity": false } }
+      ],
+      "enabled": true,
+      "id": "jump-goal",
+      "isStatic": true,
+      "name": "Goal Beacon",
+      "tag": "Finish",
+      "transform": { "position": [5, 1.5, 0], "rotation": [0, 0, 0], "scale": [0.5, 3, 4] }
+    },
+    {
+      "children": [],
+      "components": [{ "type": "Camera", "data": { "isMain": true, "fieldOfView": 55 } }],
+      "enabled": true,
+      "id": "jump-camera",
+      "name": "Main Camera",
+      "transform": { "position": [1, 6, 12], "rotation": [-0.35, 0, 0], "scale": [1, 1, 1] }
+    }
+  ],
+  "name": "Jump Practice",
+  "sceneId": "scene-sample-jump-practice",
+  "version": "1.4"
+}

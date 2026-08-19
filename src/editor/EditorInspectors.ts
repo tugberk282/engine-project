@@ -2,6 +2,8 @@ import { CommandHistory } from './Command';
 import { LayerManager } from '../engine/LayerManager';
 import { MaterialManager } from '../engine/Material';
 import { AssetImporter } from '../engine/AssetImporter';
+import { AssetDatabase } from '../engine/AssetDatabase';
+import { describeObjectReference, parseObjectReferenceDropPayload, sameObjectReference } from './ObjectReference';
 
 export class EditorInspectors {
     public refreshSelected: (() => void) | null = null;
@@ -2828,21 +2830,46 @@ export class EditorInspectors {
         objSlot.style.fontSize = '11px';
         objSlot.style.cursor = 'pointer';
         objSlot.style.overflow = 'hidden';
+        objSlot.tabIndex = 0;
+        objSlot.setAttribute('role', 'button');
+        objSlot.setAttribute('aria-keyshortcuts', 'Delete Backspace');
+
+        const commitReference = (nextValue: any) => {
+            if (sameObjectReference(value, nextValue)) return;
+            onChange(nextValue);
+            value = nextValue;
+            updateSlot();
+        };
 
         const updateSlot = () => {
-            if (value && value.name) {
+            const identity = describeObjectReference(value);
+            if (identity?.kind === 'missing') {
+                objSlot.innerText = `Missing (${identity.label})`;
+                objSlot.style.color = 'var(--unity-error, #e57373)';
+                objSlot.setAttribute('aria-invalid', 'true');
+            } else if (value && value.name) {
                 objSlot.innerText = `${value.name} (${value.constructor.name})`;
                 objSlot.style.color = '#fff';
+                objSlot.removeAttribute('aria-invalid');
             } else {
                 objSlot.innerText = 'None (Object)';
                 objSlot.style.color = 'var(--unity-text-dim)';
+                objSlot.removeAttribute('aria-invalid');
             }
+            objSlot.setAttribute('aria-label', `${label}: ${objSlot.innerText}. Drop a compatible reference or press Delete to clear.`);
         };
         updateSlot();
 
         // Drag and Drop
         objSlot.ondragover = (e) => {
+            const payload = parseObjectReferenceDropPayload(e.dataTransfer?.getData('text/plain') ?? '');
+            if (!payload) {
+                if (e.dataTransfer) e.dataTransfer.dropEffect = 'none';
+                objSlot.style.borderColor = 'var(--unity-error, #e57373)';
+                return;
+            }
             e.preventDefault();
+            if (e.dataTransfer) e.dataTransfer.dropEffect = 'link';
             objSlot.style.borderColor = 'var(--unity-accent)';
         };
         objSlot.ondragleave = () => {
@@ -2851,35 +2878,39 @@ export class EditorInspectors {
         objSlot.ondrop = (e) => {
             e.preventDefault();
             objSlot.style.borderColor = 'var(--unity-border-light)';
-            const data = e.dataTransfer?.getData('text/plain');
-            if (data) {
-                try {
-                    const payload = JSON.parse(data);
-                    // @ts-ignore
-                    const scene = window.Editor?.instance?.scene;
-                    if (scene) {
-                        if (payload.type === 'gameobject') {
-                            const targetGO = scene.findGameObjectByID(payload.id);
-                            if (targetGO) {
-                                onChange(targetGO);
-                                value = targetGO;
-                                updateSlot();
-                            }
-                        } else if (payload.type === 'material') {
-                            const mat = MaterialManager.getMaterial(payload.fullPath || payload.name);
-                            if (mat) {
-                                onChange(mat);
-                                value = mat;
-                                updateSlot();
-                            }
-                        } else if (payload.type === 'prefab') {
-                            // Link to prefab asset path?
-                            // For now maybe we don't have a Prefab asset type to assign to fields easily
-                            // unless it's a GameObject field.
-                            console.log("Dropped prefab into object slot:", payload.name);
-                        }
-                    }
-                } catch (e) { }
+            const payload = parseObjectReferenceDropPayload(e.dataTransfer?.getData('text/plain') ?? '');
+            if (!payload) return;
+            // @ts-ignore
+            const scene = window.Editor?.instance?.scene;
+            if (payload.type === 'gameobject') {
+                const targetGO = scene?.findGameObjectByID(payload.id);
+                if (targetGO) commitReference(targetGO);
+                return;
+            }
+            const resolvedPath = payload.guid
+                ? AssetDatabase.getInstance().getPath(payload.guid)
+                : payload.fullPath;
+            if (!resolvedPath) {
+                objSlot.setAttribute('aria-invalid', 'true');
+                objSlot.title = `Missing asset reference ${payload.guid ?? payload.name ?? ''}`.trim();
+                return;
+            }
+            const mat = MaterialManager.getMaterial(resolvedPath);
+            if (mat) {
+                (mat as any).assetGuid = payload.guid ?? AssetDatabase.getInstance().getGuid(resolvedPath) ?? null;
+                commitReference(mat);
+            }
+        };
+
+        objSlot.onkeydown = (event) => {
+            if (event.key === 'Delete' || event.key === 'Backspace') {
+                event.preventDefault();
+                event.stopPropagation();
+                if (value !== null && value !== undefined) commitReference(null);
+            } else if (event.key === 'Escape') {
+                event.preventDefault();
+                objSlot.style.borderColor = 'var(--unity-border-light)';
+                updateSlot();
             }
         };
 

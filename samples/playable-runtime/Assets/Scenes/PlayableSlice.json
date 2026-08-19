@@ -1,0 +1,45 @@
+{
+  "formatVersion": 1,
+  "sceneId": "playable-runtime-slice",
+  "name": "PlayableSlice",
+  "version": "1.4",
+  "environment": {},
+  "gameObjects": [
+    {
+      "id": "moving-cube",
+      "name": "Moving Cube",
+      "tag": "Untagged",
+      "layer": 0,
+      "isStatic": false,
+      "enabled": true,
+      "prefabSource": null,
+      "sourceAssetPath": null,
+      "sourceAssetGuid": null,
+      "sourceAssetType": null,
+      "transform": {
+        "position": [0, 2, 0],
+        "rotation": [0, 0, 0],
+        "scale": [1, 1, 1]
+      },
+      "components": [
+        {
+          "type": "MeshFilter",
+          "data": { "primitiveType": "Cube" }
+        },
+        {
+          "type": "MeshRenderer",
+          "data": { "color": 16755200 }
+        },
+        {
+          "type": "AutoRotate",
+          "data": { "enabled": true, "rotationSpeed": 4 }
+        },
+        {
+          "type": "RigidBody",
+          "data": { "enabled": true, "mass": 1, "useGravity": true, "isKinematic": false }
+        }
+      ],
+      "children": []
+    }
+  ]
+}

@@ -16,6 +16,13 @@ remove temporary output. No partial artifact is published. Logs are bounded.
 The packaged player validates the manifest and every content digest before
 loading the entry scene.
 
+For `win-x64`, package emits a self-contained `Tugberk Player.exe` beside its
+runtime DLLs, `manifest.json`, and `content` directory. The executable starts
+the dedicated sandboxed player document directly; it does not load the editor
+application. The shell is project-data-driven and has no sample-specific game
+logic. Relocating the complete output directory preserves launch behavior.
+
 `node --test test/build-service.test.cjs` verifies repeatable manifests,
-deterministic player frames, stale-revision and path rejection, cancellation,
-cleanup, and absence of partial published artifacts.
+deterministic player frames, a fresh Windows executable launch, stale-revision
+and path rejection, cancellation, cleanup, and absence of partial published
+artifacts.

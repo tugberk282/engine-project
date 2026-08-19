@@ -159,6 +159,11 @@ export class ProjectWindow {
     private recentRepairHistory: AssetRepairHistoryEntry[] = [];
     private assetMutationBusy = false;
 
+    public applyAuthoritativeSelection(assetPath: string | null): void {
+        this.selectedAssetPath = assetPath;
+        if (assetPath) this.focusedAssetPath = assetPath;
+    }
+
     constructor(editor: any) {
         this.editor = editor;
         this.fs = new DesktopFileSystem();
@@ -503,7 +508,7 @@ export class ProjectWindow {
                     footer.innerText = PathUtils.relative(PathUtils.dirname(this.rootPath), fullPath).replace(/\\/g, '/');
                     this.selectedAssetPath = fullPath;
                     this.focusedAssetPath = fullPath;
-                    this.editor.inspectorWindow.selectAsset(await this.buildAssetSelection(fullPath, name, isFolder));
+                    this.editor.selectProjectAsset(await this.buildAssetSelection(fullPath, name, isFolder), focusItem);
                     if (focusItem) item.focus();
                 };
 
@@ -580,7 +585,8 @@ export class ProjectWindow {
                         source: 'project',
                         name: name.split('.')[0],
                         filename: name,
-                        fullPath: fullPath
+                        fullPath: fullPath,
+                        guid: AssetDatabase.getInstance().getGuid(fullPath) ?? null
                     }));
                     e.dataTransfer!.effectAllowed = 'copyMove';
                 };
@@ -628,7 +634,7 @@ export class ProjectWindow {
                 const item = createItem(f.name, AssetIcons.Folder, true,  async() => {
                     this.currentPath = f.fullPath;
                     this.selectedAssetPath = f.fullPath;
-                    this.editor.inspectorWindow.selectAsset(await this.buildAssetSelection(f.fullPath, f.name, true));
+                    this.editor.selectProjectAsset(await this.buildAssetSelection(f.fullPath, f.name, true));
                     await this.refresh();
                 }, f.fullPath);
                 grid.appendChild(item);
@@ -839,7 +845,7 @@ export class ProjectWindow {
         const runtimeAssetPaths = await this.getRuntimeReimportPathsForAsset(assetPath, false);
         await this.refreshAssetDatabaseAndView({ focusAssetPath: assetPath, runtimeAssetPaths });
         const selection = await this.buildAssetSelection(assetPath, PathUtils.basename(assetPath), (await this.fs.stat(assetPath)).isDirectory());
-        this.editor.inspectorWindow.selectAsset(selection);
+        this.editor.selectProjectAsset(selection);
         return selection;
     }
 
@@ -852,7 +858,7 @@ export class ProjectWindow {
         if (!await this.fs.exists(assetPath)) return null;
 
         const selection = await this.buildAssetSelection(assetPath, PathUtils.basename(assetPath), (await this.fs.stat(assetPath)).isDirectory());
-        this.editor.inspectorWindow.selectAsset(selection);
+        this.editor.selectProjectAsset(selection);
         return selection;
     }
 
@@ -876,7 +882,7 @@ export class ProjectWindow {
         if (!await this.fs.exists(scopePath)) return null;
         const isDirectory = (await this.fs.stat(scopePath)).isDirectory();
         const selection = await this.buildAssetSelection(scopePath, PathUtils.basename(scopePath), isDirectory);
-        this.editor.inspectorWindow.selectAsset(selection);
+        this.editor.selectProjectAsset(selection);
         return selection;
     }
 
@@ -1072,7 +1078,7 @@ export class ProjectWindow {
         const isDirectory = (await this.fs.stat(assetPath)).isDirectory();
         await this.refreshAssetDatabaseAndView({ focusAssetPath: assetPath });
         const selection = await this.buildAssetSelection(assetPath, PathUtils.basename(assetPath), isDirectory);
-        this.editor.inspectorWindow.selectAsset(selection);
+        this.editor.selectProjectAsset(selection, true);
         return selection;
     }
 
@@ -1138,6 +1144,7 @@ export class ProjectWindow {
         runtimeAssetPaths?: string[];
     }): Promise<AssetRefreshResult> {
         const refreshResult = await AssetDatabase.getInstance().refresh(this.rootPath);
+        this.editor.reconcileProjectSelection(options?.focusAssetPath === null);
         ScriptRegistry.refreshScriptExecutionOrderFromAssetDatabase();
         if (refreshResult.moved.length > 0) {
             this.applyMovedAssetReferenceEffects(refreshResult.moved);
@@ -1162,7 +1169,7 @@ export class ProjectWindow {
         if (this.selectedAssetPath && await this.fs.exists(this.selectedAssetPath)) {
             const assetName = PathUtils.basename(this.selectedAssetPath);
             const isFolder = (await this.fs.stat(this.selectedAssetPath)).isDirectory();
-            this.editor.inspectorWindow.selectAsset(await this.buildAssetSelection(this.selectedAssetPath, assetName, isFolder));
+            this.editor.selectProjectAsset(await this.buildAssetSelection(this.selectedAssetPath, assetName, isFolder));
         }
 
         return refreshResult;
@@ -2221,7 +2228,7 @@ export class ProjectWindow {
         item.onclick =  async() => {
             this.focusedFolderPath = path;
             this.currentPath = path;
-            this.editor.inspectorWindow.selectAsset(await this.buildAssetSelection(path, name, true));
+            this.editor.selectProjectAsset(await this.buildAssetSelection(path, name, true));
             await this.refresh();
             this.focusFolderAfterRefresh(path);
         };

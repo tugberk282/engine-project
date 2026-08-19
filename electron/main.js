@@ -302,6 +302,8 @@ async function executeProtocolCommand(event, request) {
             return runtimeSupervisor.resume();
         case COMMANDS.RUNTIME_TICK:
             return runtimeSupervisor.tick(request.payload.deltaTime);
+        case COMMANDS.RUNTIME_STEP:
+            return runtimeSupervisor.step(request.payload.deltaTime);
         case COMMANDS.RUNTIME_STOP:
             return runtimeSupervisor.stop();
         default:
@@ -319,10 +321,18 @@ async function runSmokeTest(mainWindow) {
     const outputPath = process.env.ENGINE_SMOKE_TEST_OUTPUT
         || path.join(process.cwd(), 'smoke-test-result.json');
     const expectLauncherFailure = process.env.ENGINE_SMOKE_EXPECT_LAUNCHER_FAILURE === '1';
+    const expectPlayableRuntime = process.env.ENGINE_PLAYABLE_RUNTIME_SMOKE === '1';
+    const expectPlayableRuntimeCrash = process.env.ENGINE_PLAYABLE_RUNTIME_CRASH_SMOKE === '1';
     const expectedSceneTransaction = process.env.ENGINE_SMOKE_EXPECT_SCENE_TRANSACTION || null;
     if (!expectLauncherFailure && process.env.ENGINE_AUTO_OPEN_PROJECT_PATH) {
         projectCapabilities.setWritable(process.env.ENGINE_AUTO_OPEN_PROJECT_PATH, true);
     }
+    const runtimeCrashPoll = expectPlayableRuntimeCrash ? setInterval(() => {
+        if (!runtimeSupervisor.child) return;
+        const child = runtimeSupervisor.child;
+        clearInterval(runtimeCrashPoll);
+        child.kill();
+    }, 10) : null;
     const result = await mainWindow.webContents.executeJavaScript(`
         (async () => {
             const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -424,6 +434,70 @@ async function runSmokeTest(mainWindow) {
                     failures,
                     checks,
                     snapshot: { identity: actualIdentity }
+                };
+            }
+
+            if (${JSON.stringify(expectPlayableRuntime)}) {
+                const click = async (id, delay = 150) => {
+                    document.getElementById(id)?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+                    await wait(delay);
+                };
+                const movingCube = editor.scene.findGameObjectByID('moving-cube');
+                const originalBytes = editor.scene.toJSON();
+                const initial = movingCube ? {
+                    y: movingCube.transform.position.y,
+                    rotationY: movingCube.transform.rotation.y
+                } : null;
+                record('retained playable scene loads an authored object', !!movingCube,
+                    movingCube ? movingCube.name : 'moving-cube was not loaded');
+                if (${JSON.stringify(expectPlayableRuntimeCrash)}) {
+                    await click('play-btn', 900);
+                    const consoleText = document.getElementById('console-content')?.innerText ?? '';
+                    record('runtime crash exits Play without terminating the editor',
+                        editor.isPlaying === false && !!window.Editor?.instance,
+                        JSON.stringify({ isPlaying: editor.isPlaying, editorPresent: !!window.Editor?.instance }));
+                    record('runtime crash surfaces a visible bounded error',
+                        consoleText.includes('[PlayMode]') && consoleText.includes('RUNTIME_'), consoleText.slice(-500));
+                    return {
+                        ok: failures.length === 0,
+                        failures,
+                        checks,
+                        snapshot: { consoleText: consoleText.slice(-500), editorPresent: !!window.Editor?.instance }
+                    };
+                }
+                await click('play-btn', 100);
+                for (let attempt = 0; attempt < 30; attempt += 1) {
+                    if (movingCube && movingCube.transform.rotation.y > (initial?.rotationY ?? 0)
+                        && movingCube.transform.position.y < (initial?.y ?? 0)) break;
+                    editor.playMode?.update();
+                    await wait(100);
+                }
+                const afterPlay = movingCube ? {
+                    y: movingCube.transform.position.y,
+                    rotationY: movingCube.transform.rotation.y
+                } : null;
+                record('child runtime visibly advances authored Update and fixed-step state',
+                    !!initial && !!afterPlay && afterPlay.rotationY > initial.rotationY && afterPlay.y < initial.y,
+                    JSON.stringify({ initial, afterPlay }));
+                await click('pause-btn', 100);
+                const pausedRotation = movingCube?.transform.rotation.y ?? null;
+                await wait(250);
+                record('Pause freezes runtime-authored state',
+                    pausedRotation !== null && movingCube?.transform.rotation.y === pausedRotation,
+                    JSON.stringify({ pausedRotation, current: movingCube?.transform.rotation.y ?? null }));
+                await click('step-btn', 150);
+                record('Step advances one paused runtime frame',
+                    pausedRotation !== null && (movingCube?.transform.rotation.y ?? pausedRotation) > pausedRotation,
+                    JSON.stringify({ pausedRotation, steppedRotation: movingCube?.transform.rotation.y ?? null }));
+                await click('play-btn', 250);
+                const restoredBytes = editor.scene.toJSON();
+                record('Stop restores edit scene byte-for-byte', restoredBytes === originalBytes,
+                    'before=' + originalBytes.length + ' bytes, after=' + restoredBytes.length + ' bytes');
+                return {
+                    ok: failures.length === 0,
+                    failures,
+                    checks,
+                    snapshot: { initial, afterPlay, pausedRotation, restoredByteLength: restoredBytes.length }
                 };
             }
 
@@ -975,6 +1049,7 @@ async function runSmokeTest(mainWindow) {
             };
         })();
     `, true);
+    if (runtimeCrashPoll) clearInterval(runtimeCrashPoll);
 
     fs.writeFileSync(outputPath, JSON.stringify(result, null, 2), 'utf8');
     console.log('Smoke test result written to', outputPath);

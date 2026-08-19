@@ -47,6 +47,18 @@ async function listFiles(root, relative = '') {
     return files;
 }
 
+async function copyTree(source, destination) {
+    const entries = await fs.promises.readdir(source, { withFileTypes: true });
+    await fs.promises.mkdir(destination, { recursive: true });
+    for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name, 'en'))) {
+        checkCancelled();
+        const from = path.join(source, entry.name);
+        const to = path.join(destination, entry.name);
+        if (entry.isDirectory()) await copyTree(from, to);
+        else if (entry.isFile()) await fs.promises.copyFile(from, to);
+    }
+}
+
 async function run(rawRequest) {
     const request = assertBuildRequest(rawRequest);
     const projectFile = path.join(request.projectRoot, 'project.json');
@@ -118,6 +130,22 @@ async function run(rawRequest) {
     });
 
     const manifest = await stage('package', async () => {
+        if (request.target === 'win-x64') {
+            const electronRoot = path.resolve(__dirname, '..', '..', 'node_modules', 'electron', 'dist');
+            if (!fs.existsSync(path.join(electronRoot, 'electron.exe'))) {
+                throw new BuildError('PLAYER_RUNTIME_MISSING', 'The Windows player runtime is not installed');
+            }
+            await copyTree(electronRoot, workspace);
+            await fs.promises.rename(path.join(workspace, 'electron.exe'), path.join(workspace, 'Tugberk Player.exe'));
+            const appRoot = path.join(workspace, 'resources', 'app');
+            await fs.promises.mkdir(appRoot, { recursive: true });
+            for (const file of ['player-main.js', 'player-preload.js', 'player.html', 'player-renderer.js']) {
+                await fs.promises.copyFile(path.join(__dirname, file), path.join(appRoot, file));
+            }
+            await fs.promises.writeFile(path.join(appRoot, 'package.json'), stableStringify({
+                name: 'tugberk-standalone-player', version: '1.0.0', private: true, main: 'player-main.js'
+            }), 'utf8');
+        }
         const contentFiles = await listFiles(path.join(workspace, 'content'));
         const files = [];
         for (const relative of contentFiles) {

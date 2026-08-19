@@ -1,8 +1,11 @@
 # First buildable vertical slice
 
-The checked-in `samples/vertical-slice` project is the canonical fixture for the
-first packaged slice. It contains one scene, a renderable player material, a
-main camera, and a player controller bound to the `Horizontal` input axis.
+The checked-in `samples/vertical-slice` project is the canonical fixture gallery
+for the first packaged slice. Its movement scenes use a grounded capsule,
+optional gravity/jumping, static boxes, respawn volumes, and goal triggers. A
+contrasting top-down scene reuses the same configured primitives without
+gravity for wall collision, collection, win, and lose states. Use WASD to move,
+Shift to sprint, and Space to jump where gravity is enabled.
 
 ## Reproduce from a clean checkout
 
@@ -19,8 +22,9 @@ npm run test:installer
 
 The verification proves that the project resolves its scene and asset, the
 canonical scene survives edit/save/reopen without identifier drift, and the
-same serialized payload starts, accepts an input-bearing tick, renders a
-runtime frame acknowledgement, stops, and leaves the editor snapshot intact.
+same serialized payload starts and simulates fixed-step movement and collision.
+It separately proves grounded jumping/respawn and gravity-free top-down
+collection/goal/lose behavior, then stops without mutating the editor snapshot.
 
 The package command creates `dist/win-unpacked/Tugberk Engine.exe`. The
 `test:packaged-smoke` command launches that binary with an isolated user-data
@@ -49,7 +53,6 @@ the uninstaller.
 | --- | --- | --- |
 | High | The packaged slice is Windows x64 only and is unsigned. | Qualify signing and installer publishing before external distribution. |
 | High | Runtime script execution is not yet a production trust boundary. | Require explicit project trust and isolate compilation/execution before enabling arbitrary project scripts. |
-| Medium | The runtime worker acknowledges input-bearing frames but does not yet expose deterministic gameplay-state assertions. | Extend the runtime protocol with bounded state snapshots and add movement assertions for the sample controller. |
 | Medium | Launch/play/save performance budgets still require manual release evidence. | Add timestamp probes and collect p50/p95 data in packaged CI. |
 | Medium | macOS, Linux, ARM64, auto-update, and crash ingestion are unqualified. | Track each platform/release service as an independently approved qualification issue. |
 

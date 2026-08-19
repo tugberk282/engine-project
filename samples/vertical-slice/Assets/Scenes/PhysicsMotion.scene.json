@@ -1,0 +1,59 @@
+{
+  "environment": { "ambientColor": "#d8f5ff", "backgroundColor": "#172f3d" },
+  "formatVersion": 1,
+  "gameObjects": [
+    {
+      "children": [],
+      "components": [
+        { "type": "MeshFilter", "data": { "geometryType": "Cube" } },
+        { "type": "MeshRenderer", "data": { "color": "#4dd6ff" } },
+        { "type": "BoxCollider", "data": { "size": [1, 1, 1], "center": [0, 0, 0] } },
+        { "type": "RigidBody", "data": { "enabled": true, "mass": 1, "useGravity": true, "isKinematic": false } },
+        { "type": "AutoRotate", "data": { "enabled": true, "rotationSpeed": 2 } }
+      ],
+      "enabled": true,
+      "id": "physics-cube-a",
+      "name": "Falling Cube A",
+      "transform": { "position": [-2, 5, 0], "rotation": [0, 0, 0], "scale": [1, 1, 1] }
+    },
+    {
+      "children": [],
+      "components": [
+        { "type": "MeshFilter", "data": { "geometryType": "Cube" } },
+        { "type": "MeshRenderer", "data": { "color": "#ff6f91" } },
+        { "type": "BoxCollider", "data": { "size": [1, 1, 1], "center": [0, 0, 0] } },
+        { "type": "RigidBody", "data": { "enabled": true, "mass": 1, "useGravity": true, "isKinematic": false } },
+        { "type": "AutoRotate", "data": { "enabled": true, "rotationSpeed": -3 } }
+      ],
+      "enabled": true,
+      "id": "physics-cube-b",
+      "name": "Falling Cube B",
+      "transform": { "position": [2, 8, 0], "rotation": [0, 0, 0], "scale": [1.4, 1.4, 1.4] }
+    },
+    {
+      "children": [],
+      "components": [
+        { "type": "MeshFilter", "data": { "geometryType": "Cube" } },
+        { "type": "MeshRenderer", "data": { "color": "#52697a" } },
+        { "type": "BoxCollider", "data": { "size": [12, 1, 8], "center": [0, 0, 0] } },
+        { "type": "RigidBody", "data": { "mass": 0, "useGravity": false } }
+      ],
+      "enabled": true,
+      "id": "physics-floor",
+      "isStatic": true,
+      "name": "Floor",
+      "transform": { "position": [0, -0.5, 0], "rotation": [0, 0, 0], "scale": [12, 1, 8] }
+    },
+    {
+      "children": [],
+      "components": [{ "type": "Camera", "data": { "isMain": true, "fieldOfView": 55 } }],
+      "enabled": true,
+      "id": "physics-camera",
+      "name": "Main Camera",
+      "transform": { "position": [0, 6, 13], "rotation": [-0.35, 0, 0], "scale": [1, 1, 1] }
+    }
+  ],
+  "name": "Physics Motion",
+  "sceneId": "scene-sample-physics-motion",
+  "version": "1.4"
+}
