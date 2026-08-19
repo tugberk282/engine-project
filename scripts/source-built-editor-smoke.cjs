@@ -144,6 +144,13 @@ async function runEditorOnce(electronExecutable, scratchRoot, runNumber) {
   const output = path.join(workDirectory, 'renderer-result.json');
   const project = path.join(workDirectory, 'project');
   fs.cpSync(path.join(root, 'samples', 'vertical-slice'), project, { recursive: true });
+  const smokeAssetDirectory = path.join(project, 'Assets', 'Smoke');
+  fs.mkdirSync(smokeAssetDirectory, { recursive: true });
+  fs.writeFileSync(
+    path.join(smokeAssetDirectory, '__SmokeTransaction.asset'),
+    '{"name":"Disposable source-smoke transaction asset"}\n',
+    'utf8'
+  );
 
   try {
     await runBounded(electronExecutable, ['.'], {

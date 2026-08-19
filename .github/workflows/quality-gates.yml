@@ -32,8 +32,9 @@ jobs:
         run: |
           $output = node --test test/architecture-contract.test.cjs test/persistence.test.cjs test/asset-database-contract.test.cjs test/editor-workflow-contract.test.cjs test/runtime-bridge.test.cjs test/diagnostics-lifecycle.test.cjs test/vertical-slice.test.cjs test/project-capabilities.test.cjs test/editor-html-injection.test.cjs 2>&1 | Tee-Object -Variable captured
           if ($LASTEXITCODE -ne 0) {
-            $tail = ($captured | Select-Object -Last 30) -join "%0A"
-            "::error title=Contract quality gate failed::$tail"
+            $failures = $captured | Select-String -Pattern 'not ok|failureType:|error:|code:|stack:|location:' -Context 1,4
+            $details = (($failures | ForEach-Object { $_.ToString() }) | Select-Object -Last 120) -join "%0A"
+            "::error title=Contract quality gate failed::$details"
             exit $LASTEXITCODE
           }
 
@@ -92,7 +93,7 @@ jobs:
       - name: Assemble unpacked Windows application
         shell: pwsh
         run: |
-          npm run electron:build -- --win --dir --publish never 2>&1 | Tee-Object -Variable captured
+          npm run electron:build -- --win --dir --publish=never 2>&1 | Tee-Object -Variable captured
           if ($LASTEXITCODE -ne 0) {
             $tail = ($captured | Select-Object -Last 30) -join "%0A"
             "::error title=Unpacked Windows build failed::$tail"

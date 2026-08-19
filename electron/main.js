@@ -861,19 +861,9 @@ async function runSmokeTest(mainWindow) {
                 !!dragPayload?.type && !!dragPayload?.filename && !!dragPayload?.fullPath,
                 dragPayload ? JSON.stringify(dragPayload) : 'No drag payload was produced');
 
-            let transactionAssetItem = null;
-            for (const candidate of assetItems) {
-                const candidatePath = candidate?.dataset?.assetPath;
-                if (!candidatePath) continue;
-                const candidateStat = await window.electronAPI.fsStat(candidatePath);
-                if (candidateStat?.isFile === true) {
-                    transactionAssetItem = candidate;
-                    break;
-                }
-            }
-            let transactionAssetPath = transactionAssetItem?.dataset?.assetPath ?? null;
+            const recursiveAssets = await editor.projectWindow.getAllFilesRecursive(editor.rootPath);
+            let transactionAssetPath = recursiveAssets.find((entry) => entry.name === '__SmokeTransaction.asset')?.fullPath ?? null;
             if (!transactionAssetPath) {
-                const recursiveAssets = await editor.projectWindow.getAllFilesRecursive(editor.rootPath);
                 transactionAssetPath = recursiveAssets.find((entry) => !entry.isDirectory() && entry.name.endsWith('.mat'))?.fullPath
                     ?? recursiveAssets.find((entry) => !entry.isDirectory() && !entry.name.endsWith('.meta'))?.fullPath
                     ?? null;
