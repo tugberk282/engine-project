@@ -27,7 +27,15 @@ jobs:
       - run: npm run test:release-integrity
       - run: node --test test/ci-provenance.test.cjs
       - run: npm run audit:release
-      - run: node --test test/architecture-contract.test.cjs test/persistence.test.cjs test/asset-database-contract.test.cjs test/editor-workflow-contract.test.cjs test/runtime-bridge.test.cjs test/diagnostics-lifecycle.test.cjs test/vertical-slice.test.cjs test/project-capabilities.test.cjs test/editor-html-injection.test.cjs
+      - name: Run contract suites with actionable failure output
+        shell: pwsh
+        run: |
+          $output = node --test test/architecture-contract.test.cjs test/persistence.test.cjs test/asset-database-contract.test.cjs test/editor-workflow-contract.test.cjs test/runtime-bridge.test.cjs test/diagnostics-lifecycle.test.cjs test/vertical-slice.test.cjs test/project-capabilities.test.cjs test/editor-html-injection.test.cjs 2>&1 | Tee-Object -Variable captured
+          if ($LASTEXITCODE -ne 0) {
+            $tail = ($captured | Select-Object -Last 30) -join "%0A"
+            "::error title=Contract quality gate failed::$tail"
+            exit $LASTEXITCODE
+          }
 
   build:
     name: Production renderer build
@@ -42,7 +50,14 @@ jobs:
       - run: npm ci
       - run: npm run test:source-built-smoke-contract
       - name: Build source and run the bounded rendered editor smoke twice
-        run: npm run test:source-built-smoke
+        shell: pwsh
+        run: |
+          npm run test:source-built-smoke 2>&1 | Tee-Object -Variable captured
+          if ($LASTEXITCODE -ne 0) {
+            $tail = ($captured | Select-Object -Last 30) -join "%0A"
+            "::error title=Source-built smoke failed::$tail"
+            exit $LASTEXITCODE
+          }
         env:
           ENGINE_SOURCE_SMOKE_RESULT: ${{ runner.temp }}/baseline-evidence/source-built-editor-smoke.json
       - name: Enforce initial renderer bundle budget
@@ -75,7 +90,14 @@ jobs:
           cache: npm
       - run: npm ci
       - name: Assemble unpacked Windows application
-        run: npm run electron:build -- --win --dir --publish never
+        shell: pwsh
+        run: |
+          npm run electron:build -- --win --dir --publish never 2>&1 | Tee-Object -Variable captured
+          if ($LASTEXITCODE -ne 0) {
+            $tail = ($captured | Select-Object -Last 30) -join "%0A"
+            "::error title=Unpacked Windows build failed::$tail"
+            exit $LASTEXITCODE
+          }
       - name: Launch packaged application and run editor smoke
         shell: pwsh
         run: |
