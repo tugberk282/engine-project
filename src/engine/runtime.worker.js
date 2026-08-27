@@ -42,6 +42,10 @@ function createGameplay(scene) {
     if (!playerObject) return null;
 
     const controller = componentData(findComponent(playerObject, 'PlayerController'));
+    const cameraObject = objects.find((object) => findComponent(object, 'GameplayCamera'));
+    const camera = componentData(cameraObject ? findComponent(cameraObject, 'GameplayCamera') : null);
+    const uiObject = objects.find((object) => findComponent(object, 'GameplayUI'));
+    const ui = componentData(uiObject ? findComponent(uiObject, 'GameplayUI') : null);
     const capsule = componentData(findComponent(playerObject, 'CapsuleCollider'));
     const spawn = vector3(playerObject.transform?.position || playerObject.position, [0, 2, 0]);
     const radius = Math.max(0.05, Number(capsule.radius) || 0.45);
@@ -91,7 +95,13 @@ function createGameplay(scene) {
         pendingJump: false,
         status: 'playing',
         collectedCount: 0,
-        respawnCount: 0
+        respawnCount: 0,
+        scorePerCollectible: Math.max(0, Number(ui.scorePerCollectible) || 100),
+        camera: {
+            mode: camera.mode === 'fixed' ? 'fixed' : 'follow',
+            position: vector3(cameraObject?.transform?.position, [0, 6, 8]),
+            offset: vector3(camera.offset, [0, 6, 8])
+        }
     };
 }
 
@@ -223,7 +233,16 @@ function gameplayState() {
         status: gameplay.status,
         collectedCount: gameplay.collectedCount,
         respawnCount: gameplay.respawnCount,
-        fixedStep: gameplay.fixedStep
+        fixedStep: gameplay.fixedStep,
+        score: gameplay.collectedCount * gameplay.scorePerCollectible,
+        goal: gameplay.requiredCollectibles,
+        camera: {
+            mode: gameplay.camera.mode,
+            position: (gameplay.camera.mode === 'follow'
+                ? gameplay.position.map((value, index) => value + gameplay.camera.offset[index])
+                : gameplay.camera.position).map((value) => Number(value.toFixed(6))),
+            target: gameplay.position.map((value) => Number(value.toFixed(6)))
+        }
     };
 }
 

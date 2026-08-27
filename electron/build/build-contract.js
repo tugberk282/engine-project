@@ -38,11 +38,15 @@ function assertBuildRequest(request) {
     if (request.hooks !== undefined || request.nativeTools !== undefined) {
         throw new BuildError('EXECUTION_DISABLED', 'Build hooks and native tools are disabled by policy');
     }
+    if (request.scenes !== undefined && (!Array.isArray(request.scenes) || request.scenes.length === 0
+        || request.scenes.length > 1024 || request.scenes.some((entry) => typeof entry !== 'string'))) {
+        throw new BuildError('INVALID_SCENES', 'scenes must be a non-empty list of project-relative paths');
+    }
     const relative = path.relative(request.projectRoot, request.outputPath);
     if (relative === '' || (!relative.startsWith(`..${path.sep}`) && relative !== '..' && !path.isAbsolute(relative))) {
         throw new BuildError('INVALID_OUTPUT_PATH', 'Build output must be outside the project root');
     }
-    return Object.freeze({ ...request });
+    return Object.freeze({ ...request, ...(request.scenes === undefined ? {} : { scenes: Object.freeze([...request.scenes]) }) });
 }
 
 function serializeError(error) {

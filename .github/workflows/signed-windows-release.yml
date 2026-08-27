@@ -1,0 +1,76 @@
+name: Signed Windows release qualification
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  qualify:
+    name: Reproduce, sign, install, and verify Windows artifacts
+    runs-on: windows-2025
+    timeout-minutes: 35
+    environment: windows-code-signing
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22.12.0
+          cache: npm
+      - name: Install locked JavaScript dependencies
+        run: npm ci
+      - name: Install digest-pinned native compiler
+        shell: pwsh
+        run: ./scripts/bootstrap-llvm-mingw.ps1
+      - name: Reproduce native sandbox helper
+        run: node scripts/build-play-sandbox-launcher.cjs
+      - name: Authenticate to Azure with GitHub OIDC
+        uses: azure/login@0949e32778441b2c442592b7a0e6313466dc8f29 # v3.0.2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      - name: Sign native sandbox helper
+        uses: azure/artifact-signing-action@208f8af4bf26cf2af8597424e3cb5582801523ba # v2.0.0
+        with:
+          endpoint: ${{ vars.ARTIFACT_SIGNING_ENDPOINT }}
+          signing-account-name: ${{ vars.ARTIFACT_SIGNING_ACCOUNT }}
+          certificate-profile-name: ${{ vars.ARTIFACT_SIGNING_PROFILE }}
+          files: ${{ github.workspace }}\electron\resources\win32-x64\tugberk-play-sandbox.exe
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+          cache-dependencies: false
+      - name: Record signed helper digest and build NSIS installer
+        shell: pwsh
+        run: |
+          node scripts/write-play-sandbox-manifest.cjs
+          npm run build
+          npx electron-builder --win nsis --publish=never
+      - name: Sign NSIS installer
+        uses: azure/artifact-signing-action@208f8af4bf26cf2af8597424e3cb5582801523ba # v2.0.0
+        with:
+          endpoint: ${{ vars.ARTIFACT_SIGNING_ENDPOINT }}
+          signing-account-name: ${{ vars.ARTIFACT_SIGNING_ACCOUNT }}
+          certificate-profile-name: ${{ vars.ARTIFACT_SIGNING_PROFILE }}
+          files: ${{ github.workspace }}\release\Tugberk Engine-Setup-0.1.0.exe
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+          cache-dependencies: false
+      - name: Verify trusted signatures and clean installed sandbox matrix
+        shell: pwsh
+        env:
+          TUGBERK_REQUIRE_AUTHENTICODE: '1'
+        run: node scripts/verify-installer.cjs release
+      - name: Retain qualified signed installer
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: signed-windows-installer-${{ github.sha }}-${{ github.run_attempt }}
+          path: release/Tugberk Engine-Setup-0.1.0.exe
+          if-no-files-found: error
+          retention-days: 30

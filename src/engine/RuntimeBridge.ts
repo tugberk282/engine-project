@@ -19,6 +19,7 @@ export interface RuntimeFrame {
     fixedUpdateCount: number;
     updateCount: number;
     transforms: RuntimeTransformState[];
+    gameplay?: Record<string, unknown> | null;
 }
 
 export interface RuntimeBridgeOptions {
@@ -52,8 +53,8 @@ export class RuntimeBridge {
         if (this.state === 'paused') void this.request('runtime.resume', {});
     }
 
-    public tick(deltaTime: number): void {
-        if (this.state === 'running') void this.request('runtime.tick', { deltaTime });
+    public tick(deltaTime: number, input: Record<string, number | boolean> = {}): void {
+        if (this.state === 'running') void this.request('runtime.tick', { deltaTime, input });
     }
 
     public step(deltaTime: number): void {

@@ -83,8 +83,13 @@ async function run(rawRequest) {
     let scenes;
     await stage('resolve', async () => {
         scenes = [];
-        for (const entry of project.scenes) {
+        const selected = request.scenes === undefined ? project.scenes.map((entry) => entry.path) : request.scenes;
+        const duplicate = selected.find((entry, index) => selected.indexOf(entry) !== index);
+        if (duplicate) throw new BuildError('SCENE_DUPLICATE', `Scene is selected more than once: ${duplicate}`);
+        for (const selectedPath of selected) {
             checkCancelled();
+            const entry = project.scenes.find((candidate) => candidate.path.replaceAll('\\', '/') === selectedPath.replaceAll('\\', '/'));
+            if (!entry) throw new BuildError('SCENE_NOT_IN_PROJECT', `Selected scene is not in project.json: ${selectedPath}`);
             const scenePath = path.resolve(request.projectRoot, entry.path);
             if (!isInside(request.projectRoot, scenePath)) {
                 throw new BuildError('SCENE_PATH_INVALID', `Scene escapes project root: ${entry.path}`);
@@ -121,7 +126,7 @@ async function run(rawRequest) {
         }
         for (const asset of assets) {
             const projectRelative = path.posix.join('Assets', asset);
-            if (scenes.some((scene) => scene.path === projectRelative)) continue;
+            if (project.scenes.some((scene) => scene.path.replaceAll('\\', '/') === projectRelative)) continue;
             const source = path.join(request.projectRoot, 'Assets', asset);
             const destination = path.join(workspace, 'content', projectRelative);
             await fs.promises.mkdir(path.dirname(destination), { recursive: true });
@@ -142,6 +147,7 @@ async function run(rawRequest) {
             for (const file of ['player-main.js', 'player-preload.js', 'player.html', 'player-renderer.js']) {
                 await fs.promises.copyFile(path.join(__dirname, file), path.join(appRoot, file));
             }
+            await fs.promises.copyFile(path.resolve(__dirname, '..', '..', 'src', 'engine', 'runtime.worker.js'), path.join(appRoot, 'runtime.worker.js'));
             await fs.promises.writeFile(path.join(appRoot, 'package.json'), stableStringify({
                 name: 'tugberk-standalone-player', version: '1.0.0', private: true, main: 'player-main.js'
             }), 'utf8');
@@ -162,7 +168,7 @@ async function run(rawRequest) {
             projectId: project.projectId,
             projectRevision: request.projectRevision,
             target: request.target,
-            entryScene: project.scenes[0].path.replaceAll('\\', '/'),
+            entryScene: scenes[0].path,
             scenes: project.scenes.map((scene) => ({ sceneId: scene.sceneId, path: scene.path.replaceAll('\\', '/') })),
             files
         };

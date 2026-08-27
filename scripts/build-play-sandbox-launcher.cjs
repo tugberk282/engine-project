@@ -19,6 +19,7 @@ fs.mkdirSync(outputDirectory, { recursive: true });
 const compiler = process.env.TUGBERK_MINGW_CC || 'gcc.exe';
 const result = spawnSync(compiler, [
     '-std=c11', '-O2', '-Wall', '-Wextra', '-Werror',
+    '-Wl,--no-insert-timestamp',
     '-D_WIN32_WINNT=0x0A00', '-municode', '-mwindows',
     source, '-o', output, '-luserenv', '-ladvapi32', '-lshell32'
 ], { cwd: root, stdio: 'inherit', windowsHide: true });

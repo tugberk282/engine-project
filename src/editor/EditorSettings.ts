@@ -61,6 +61,9 @@ export interface EditorLayoutSnapshot {
 }
 
 export class EditorSettings {
+    private static readonly storageKey = 'tugberkengine_editor_settings';
+    private static readonly lastKnownGoodStorageKey = 'tugberkengine_editor_settings_lkg';
+    private static readonly pendingStorageKey = 'tugberkengine_editor_settings_pending';
     // Snap settings
     public static snapEnabled: boolean = false;
     public static snapTranslation: number = 1.0;
@@ -186,14 +189,30 @@ export class EditorSettings {
             prefabApplyTargetRootIds: this.prefabApplyTargetRootIds,
             collapsedComponentsPerGameObject: this.collapsedComponentsPerGameObject
         };
-        localStorage.setItem('tugberkengine_editor_settings', JSON.stringify(settings));
+        const serialized = JSON.stringify(settings);
+        // localStorage has no multi-key transaction. Stage the complete value,
+        // publish it, then advance the recovery copy only after publication.
+        // A failed write therefore leaves the previous LKG bytes untouched.
+        localStorage.setItem(this.pendingStorageKey, serialized);
+        try {
+            localStorage.setItem(this.storageKey, serialized);
+            localStorage.setItem(this.lastKnownGoodStorageKey, serialized);
+        } finally {
+            localStorage.removeItem(this.pendingStorageKey);
+        }
     }
 
     public static load(): void {
-        const saved = localStorage.getItem('tugberkengine_editor_settings');
-        if (saved) {
+        const candidates = [
+            localStorage.getItem(this.storageKey),
+            localStorage.getItem(this.lastKnownGoodStorageKey)
+        ].filter((value): value is string => value !== null);
+        for (const saved of candidates) {
             try {
                 const settings = JSON.parse(saved);
+                if (!settings || typeof settings !== 'object' || Array.isArray(settings)) {
+                    throw new TypeError('Editor settings must be a JSON object.');
+                }
                 Object.assign(this, settings);
                 if (!this.savedLayouts || typeof this.savedLayouts !== 'object') {
                     this.savedLayouts = {};
@@ -243,6 +262,7 @@ export class EditorSettings {
                 if (this.transformSpaceMode !== 'local' && this.transformSpaceMode !== 'world') {
                     this.transformSpaceMode = 'local';
                 }
+                return;
             } catch (e) {
                 console.error("Failed to load editor settings", e);
             }

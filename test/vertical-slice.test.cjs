@@ -62,6 +62,8 @@ test('canonical sample gallery resolves its genre-neutral scenes and shared mate
     assert.equal(scene.gameObjects.some((object) => object.components.some((component) => component.type === 'Camera')), true);
     assert.equal(jumpScene.gameObjects.some((object) => object.name === 'Jump Barrier'), true);
     assert.equal(physicsScene.gameObjects.filter((object) => object.components.some((component) => component.type === 'AutoRotate')).length, 2);
+    assert.equal(scene.gameObjects.some((object) => object.components.some((component) => component.type === 'GameplayUI')), true);
+    assert.equal(topDownScene.gameObjects.some((object) => object.components.some((component) => component.type === 'GameplayUI')), true);
     assert.equal(material.shader, 'Standard');
 });
 
@@ -173,6 +175,10 @@ test('the same primitives support a gravity-free top-down collect and goal scena
     for (let index = 0; index < 60; index += 1) state = tick({ Horizontal: 1 });
     assert.equal(state.gameplay.collectedCount, 1, 'a collect trigger fires once');
     assert.equal(state.gameplay.status, 'finished', 'the goal emits the configured win state after collection');
+    assert.equal(state.gameplay.score, 250, 'the reusable HUD score uses scene configuration');
+    assert.equal(state.gameplay.goal, 1);
+    assert.equal(state.gameplay.camera.mode, 'fixed');
+    assert.deepEqual(Array.from(state.gameplay.camera.position), [2, 10, 5]);
 
     runtime.send('start', { snapshot: JSON.stringify(scene) });
     for (let index = 0; index < 30; index += 1) state = tick({ Vertical: -1 });

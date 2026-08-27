@@ -33,6 +33,7 @@ import { MeshFilter } from '../engine/components/MeshFilter';
 import { MaterialManager } from '../engine/Material';
 
 import { Input } from '../engine/Input';
+import { editorOwnsKeyboardInput } from './EditorInputOwnership';
 import { Component } from '../engine/Component';
 import { PlayModeManager } from '../engine/PlayModeManager';
 import { EditorCameraController } from '../engine/components/EditorCameraController';
@@ -74,7 +75,7 @@ import {
 } from './EditorSettings';
 import { calculateViewportSize, viewportSizeEquals, type ViewportSize } from './ViewportSizing';
 import { EditorSelection, type EditorSelectionSource } from './EditorSelection';
-// // import { BuildSettingsWindow } from './BuildSettingsWindow';
+import { BuildSettingsWindow } from './BuildSettingsWindow';
 
 type FloatingDockTarget = {
     panelId: Exclude<EditorPanelId, 'viewport-panel'>;
@@ -216,6 +217,7 @@ export class Editor {
         startY: number;
         originX: number;
         originY: number;
+        originalState: EditorFloatingPanelState;
     } | null = null;
     private floatingPanelResizeState: {
         panelId: Exclude<EditorPanelId, 'viewport-panel'>;
@@ -224,6 +226,7 @@ export class Editor {
         startY: number;
         originWidth: number;
         originHeight: number;
+        originalState: EditorFloatingPanelState;
     } | null = null;
 
     constructor(projectPath: string) {
@@ -402,6 +405,7 @@ export class Editor {
         document.getElementById('save-btn')?.addEventListener('click',  async() => await this.saveActiveScene());
         document.getElementById('load-btn')?.addEventListener('click',  async() => await this.showOpenSceneDialog());
         document.getElementById('settings-btn')?.addEventListener('click', () => ProjectSettingsWindow.show());
+        document.getElementById('menu-build-settings')?.addEventListener('click', () => new BuildSettingsWindow(document.body));
         window.setInterval( async() => {
             if (!this.dirtyState.isDirty) return;
             const scenePath = SceneManager.getInstance().getActiveScenePath();
@@ -924,7 +928,8 @@ export class Editor {
                 startX: event.clientX,
                 startY: event.clientY,
                 originX: parseFloat(panel.style.left || '0'),
-                originY: parseFloat(panel.style.top || '0')
+                originY: parseFloat(panel.style.top || '0'),
+                originalState: { ...this.ensureFloatingPanelState(panelId) }
             };
 
             panel.classList.add('floating-panel-dragging');
@@ -940,16 +945,37 @@ export class Editor {
                 this.updateFloatingDockGuides(panelId, moveEvent.clientX, moveEvent.clientY);
             };
 
+            const cleanup = (cancelled: boolean, pointerId = event.pointerId) => {
+                const state = this.floatingPanelDragState;
+                if (!state) return false;
+                this.floatingPanelDragState = null;
+                panel.classList.remove('floating-panel-dragging');
+                if (header.hasPointerCapture(pointerId)) header.releasePointerCapture(pointerId);
+                header.removeEventListener('pointermove', handleMove);
+                header.removeEventListener('pointerup', handleUp);
+                header.removeEventListener('pointercancel', handleCancel);
+                document.removeEventListener('keydown', handleKeyDown, true);
+                window.removeEventListener('blur', handleBlur);
+                this.clearFloatingDockGuides();
+                if (cancelled) {
+                    EditorSettings.floatingPanels[panelId] = { ...state.originalState };
+                    this.applyFloatingPanelStates();
+                }
+                return true;
+            };
+            const handleCancel = (cancelEvent: PointerEvent) => cleanup(true, cancelEvent.pointerId);
+            const handleKeyDown = (keyEvent: KeyboardEvent) => {
+                if (keyEvent.key !== 'Escape') return;
+                keyEvent.preventDefault();
+                cleanup(true);
+                header.focus({ preventScroll: true });
+            };
+            const handleBlur = () => cleanup(true);
             const handleUp = (upEvent: PointerEvent) => {
                 if (!this.floatingPanelDragState || this.floatingPanelDragState.pointerId !== upEvent.pointerId) return;
                 const dockTarget = this.activeFloatingDockTarget;
                 let didDockToHost = false;
-                this.floatingPanelDragState = null;
-                panel.classList.remove('floating-panel-dragging');
-                header.releasePointerCapture(upEvent.pointerId);
-                header.removeEventListener('pointermove', handleMove);
-                header.removeEventListener('pointerup', handleUp);
-                this.clearFloatingDockGuides();
+                cleanup(false, upEvent.pointerId);
 
                 if (dockTarget && dockTarget.panelId === panelId) {
                     if (panelId === 'assets-panel' && dockTarget.host === 'viewport') {
@@ -1033,6 +1059,9 @@ export class Editor {
 
             header.addEventListener('pointermove', handleMove);
             header.addEventListener('pointerup', handleUp);
+            header.addEventListener('pointercancel', handleCancel);
+            document.addEventListener('keydown', handleKeyDown, true);
+            window.addEventListener('blur', handleBlur);
         });
     }
 
@@ -1055,7 +1084,8 @@ export class Editor {
             startX: event.clientX,
             startY: event.clientY,
             originWidth: panel.offsetWidth,
-            originHeight: panel.offsetHeight
+            originHeight: panel.offsetHeight,
+            originalState: { ...this.ensureFloatingPanelState(panelId) }
         };
 
         const handleMove = (moveEvent: PointerEvent) => {
@@ -1067,17 +1097,41 @@ export class Editor {
             );
         };
 
-        const handleUp = (upEvent: PointerEvent) => {
-            if (!this.floatingPanelResizeState || this.floatingPanelResizeState.pointerId !== upEvent.pointerId) return;
+        const cleanup = (cancelled: boolean) => {
+            const state = this.floatingPanelResizeState;
+            if (!state) return false;
             this.floatingPanelResizeState = null;
             panel.classList.remove('floating-panel-resizing');
             document.removeEventListener('pointermove', handleMove);
             document.removeEventListener('pointerup', handleUp);
+            document.removeEventListener('pointercancel', handleCancel);
+            document.removeEventListener('keydown', handleKeyDown, true);
+            window.removeEventListener('blur', handleBlur);
+            if (cancelled) {
+                EditorSettings.floatingPanels[panelId] = { ...state.originalState };
+                this.applyFloatingPanelStates();
+            }
+            return true;
+        };
+        const handleCancel = () => cleanup(true);
+        const handleKeyDown = (keyEvent: KeyboardEvent) => {
+            if (keyEvent.key !== 'Escape') return;
+            keyEvent.preventDefault();
+            cleanup(true);
+            panel.focus({ preventScroll: true });
+        };
+        const handleBlur = () => cleanup(true);
+        const handleUp = (upEvent: PointerEvent) => {
+            if (!this.floatingPanelResizeState || this.floatingPanelResizeState.pointerId !== upEvent.pointerId) return;
+            cleanup(false);
             this.saveLayout();
         };
 
         document.addEventListener('pointermove', handleMove);
         document.addEventListener('pointerup', handleUp);
+        document.addEventListener('pointercancel', handleCancel);
+        document.addEventListener('keydown', handleKeyDown, true);
+        window.addEventListener('blur', handleBlur);
     }
 
     private isPanelFloating(panelId: EditorPanelId): boolean {
@@ -1867,19 +1921,44 @@ export class Editor {
             document.body.style.cursor = cursor;
             document.body.style.userSelect = 'none';
 
-            const handleMove = (moveEvent: PointerEvent) => onMove(moveEvent, start, targetId);
-            const handleUp = () => {
+            let active = true;
+            const handleMove = (moveEvent: PointerEvent) => {
+                if (active) onMove(moveEvent, start, targetId);
+            };
+            const cleanup = (cancelled: boolean) => {
+                if (!active) return;
+                active = false;
                 splitter.classList.remove('dragging');
                 document.body.style.cursor = previousCursor;
                 document.body.style.userSelect = previousUserSelect;
                 document.removeEventListener('pointermove', handleMove);
                 document.removeEventListener('pointerup', handleUp);
+                document.removeEventListener('pointercancel', handleCancel);
+                document.removeEventListener('keydown', handleKeyDown, true);
+                window.removeEventListener('blur', handleBlur);
+                if (cancelled) {
+                    onMove(new PointerEvent('pointermove'), { x: 0, y: 0, size: start.size }, targetId);
+                }
                 syncSeparatorValue();
+            };
+            const handleUp = () => {
+                cleanup(false);
                 this.saveLayout();
             };
+            const handleCancel = () => cleanup(true);
+            const handleKeyDown = (keyEvent: KeyboardEvent) => {
+                if (keyEvent.key !== 'Escape') return;
+                keyEvent.preventDefault();
+                cleanup(true);
+                splitter.focus({ preventScroll: true });
+            };
+            const handleBlur = () => cleanup(true);
 
             document.addEventListener('pointermove', handleMove);
             document.addEventListener('pointerup', handleUp);
+            document.addEventListener('pointercancel', handleCancel);
+            document.addEventListener('keydown', handleKeyDown, true);
+            window.addEventListener('blur', handleBlur);
         });
     }
 
@@ -5903,9 +5982,12 @@ export class Editor {
 
     private initializeKeyBindings() {
         window.addEventListener('keydown',  async(event) => {
+            if (this.isGameView && document.getElementById('game-view')?.contains(document.activeElement)) return;
             const activeElement = document.activeElement as HTMLElement | null;
             const isTextEditing = activeElement?.matches('input, textarea, select, [contenteditable="true"], [role="textbox"]') === true;
-            if (isTextEditing) return;
+            // While the running Game view owns input, gameplay keys must not
+            // leak into authoring commands such as W/E/R tool selection.
+            if (!editorOwnsKeyboardInput({ isTextEditing, isPlaying: this.isPlaying, isGameView: this.isGameView })) return;
 
             if (event.key === 'Control' && !EditorSettings.snapEnabled) {
                 this.temporarySnapActive = true;
@@ -7572,6 +7654,11 @@ export class Editor {
                 tabGame.classList.add('active-tab');
                 tabScene.classList.remove('active-tab');
                 if (viewGame) viewGame.style.display = 'flex';
+                if (viewGame) {
+                    viewGame.tabIndex = 0;
+                    viewGame.setAttribute('aria-label', 'Game view. Keyboard and mouse input is routed to the running game.');
+                    viewGame.onpointerdown = () => viewGame.focus({ preventScroll: true });
+                }
                 if (viewScene) viewScene.style.display = 'none';
                 if (viewportContent) viewportContent.style.display = 'flex';
                 if (viewportDockContentHost) viewportDockContentHost.style.display = 'none';
@@ -7863,7 +7950,7 @@ export class Editor {
         this.selectionHelpers.forEach(helper => helper.update());
 
         // Keyboard Shortcuts
-        if (Input.getKeyDown('KeyF')) this.focusOnSelectionOrScene();
+        if (!this.isGameView && Input.getKeyDown('KeyF')) this.focusOnSelectionOrScene();
         if (Input.getButtonDown('Submit')) { /* Handle Enter if needed */ }
 
         Input.lateUpdate();

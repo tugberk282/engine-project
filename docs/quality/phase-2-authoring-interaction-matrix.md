@@ -91,6 +91,7 @@ Legend: `P` pointer path, `K` keyboard path, `F` focus/accessibility obligation,
 - `test/editor-interaction.test.cjs`: rendered development-Electron path against prebuilt `dist`; covers only create/select/Inspector visibility/add component/File menu, deletes its result directory, and is therefore `rendered-partial`, not packaged evidence.
 - `test/editor-keyboard-accessibility.test.cjs`, `test/project-browser-keyboard.test.cjs`, and `test/console-window-contract.test.cjs`: source-pattern contracts only.
 - `test/scene-view-navigation.test.mjs` and `test/viewport-sizing.test.mjs`: unit-level math/controller evidence only.
+- `npm run test:phase2-packaged-keyboard`: retained packaged-Windows qualification lane for TUG-112. It launches the unpacked executable from isolated project/user-data roots, delivers authoring keys through Electron's native input API, and retains per-step assertions, package/executable identity, screenshots, accessibility-tree snapshots, and relaunch state. Its current bounded path covers nested create/rename, rename and context-menu Escape, shortcut suppression while typing, Console selection/clear, save, and restart; it does not by itself promote the broader Phase 2 rows to `rendered-pass`.
 - Legacy `verify_phase*.cjs` scripts are non-authoritative because many assertions are unconditional or source-presence checks.
 
 Phase 2 remains open until every matrix row is `rendered-pass` or an explicitly accepted product-scope limitation replaces the obligation. A summary count cannot override a failed P0 row.

@@ -6,6 +6,17 @@ const { runPackagedSandboxMatrix } = require('./packaged-play-sandbox-adversaria
 
 const root = path.resolve(__dirname, '..');
 
+function verifyAuthenticode(file) {
+  if (process.env.TUGBERK_REQUIRE_AUTHENTICODE !== '1') return;
+  const escaped = file.replaceAll("'", "''");
+  const result = require('node:child_process').spawnSync('powershell.exe', [
+    '-NoLogo', '-NoProfile', '-NonInteractive', '-Command',
+    `$signature = Get-AuthenticodeSignature -LiteralPath '${escaped}'; if ($signature.Status -ne 'Valid') { throw ('Invalid Authenticode signature for {0}: {1} {2}' -f $signature.Path, $signature.Status, $signature.StatusMessage) }; if (-not $signature.SignerCertificate) { throw 'Authenticode signer certificate is missing' }; Write-Output ('Valid Authenticode: {0}' -f $signature.Path)`,
+  ], { encoding: 'utf8', windowsHide: true });
+  assert.equal(result.status, 0, result.stderr || result.stdout || `Authenticode verification failed for ${file}`);
+  process.stdout.write(result.stdout);
+}
+
 function findInstaller(directory) {
   const candidates = fs.readdirSync(directory, { withFileTypes: true })
     .filter((entry) => entry.isFile() && /\.exe$/i.test(entry.name) && /setup/i.test(entry.name))
@@ -21,6 +32,7 @@ async function main() {
   }
   const artifactDirectory = process.argv[2] ? path.resolve(process.argv[2]) : path.join(root, 'release');
   const installer = findInstaller(artifactDirectory);
+  verifyAuthenticode(installer);
   const workDirectory = fs.mkdtempSync(path.join(getScratchRoot(), 'tugberk-installer-'));
   const installDirectory = path.join(workDirectory, 'installed');
 
@@ -32,6 +44,7 @@ async function main() {
   });
 
   const executable = findExecutable(installDirectory);
+  verifyAuthenticode(path.join(installDirectory, 'resources', 'app.asar.unpacked', 'electron', 'resources', 'win32-x64', 'tugberk-play-sandbox.exe'));
   await smokeExecutable(executable, {
     workDirectory: path.join(workDirectory, 'smoke'),
     timeoutMs: 90_000,

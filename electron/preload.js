@@ -9,7 +9,7 @@ const PROTOCOL_COMMANDS = new Set([
     'dialog.openProject', 'dialog.createProject', 'project.open', 'project.getTrust',
     'project.requestTrust', 'project.revokeTrust', 'recentProjects.load',
     'recentProjects.save', 'telemetry.record', 'runtime.start', 'runtime.pause',
-    'runtime.resume', 'runtime.tick', 'runtime.step', 'runtime.stop'
+    'runtime.resume', 'runtime.tick', 'runtime.step', 'runtime.stop', 'build.start', 'build.cancel'
 ]);
 const PROTOCOL_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const isRecord = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -180,6 +180,11 @@ const tugberkV1 = Object.freeze({
             ipcRenderer.removeListener('tugberk:v1:asset-scan-progress', progressListener);
             signal?.removeEventListener('abort', cancel);
         });
+    },
+    onBuildProgress: (callback) => {
+        const listener = (_event, buildId, progress) => callback(buildId, progress);
+        ipcRenderer.on('tugberk:v1:build-progress', listener);
+        return () => ipcRenderer.removeListener('tugberk:v1:build-progress', listener);
     }
 });
 

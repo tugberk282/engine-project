@@ -25,7 +25,9 @@ const COMMANDS = Object.freeze({
     RUNTIME_RESUME: 'runtime.resume',
     RUNTIME_TICK: 'runtime.tick',
     RUNTIME_STEP: 'runtime.step',
-    RUNTIME_STOP: 'runtime.stop'
+    RUNTIME_STOP: 'runtime.stop',
+    BUILD_START: 'build.start',
+    BUILD_CANCEL: 'build.cancel'
 });
 const COMMAND_SET = new Set(Object.values(COMMANDS));
 const ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
@@ -127,6 +129,22 @@ function isAssetTransactionPayload(payload) {
 
 function validatePayload(command, payload) {
     if (!isRecord(payload)) return false;
+    if (command === COMMANDS.BUILD_START) {
+        return hasExactKeys(payload, ['buildId', 'version', 'projectRoot', 'projectRevision', 'outputPath', 'target', 'scenes'])
+            && ID_PATTERN.test(payload.buildId || '')
+            && payload.version === 1
+            && typeof payload.projectRoot === 'string'
+            && typeof payload.outputPath === 'string'
+            && /^[a-f0-9]{64}$/.test(payload.projectRevision || '')
+            && payload.target === 'win-x64'
+            && Array.isArray(payload.scenes)
+            && payload.scenes.length > 0
+            && payload.scenes.length <= 1024
+            && payload.scenes.every(isSafeRelativePath);
+    }
+    if (command === COMMANDS.BUILD_CANCEL) {
+        return hasExactKeys(payload, ['buildId']) && ID_PATTERN.test(payload.buildId || '');
+    }
     if (command === COMMANDS.RUNTIME_START) {
         return hasExactKeys(payload, ['snapshot'])
             && typeof payload.snapshot === 'string'

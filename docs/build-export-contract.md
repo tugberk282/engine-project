@@ -26,3 +26,20 @@ logic. Relocating the complete output directory preserves launch behavior.
 deterministic player frames, a fresh Windows executable launch, stale-revision
 and path rejection, cancellation, cleanup, and absence of partial published
 artifacts.
+
+## Editor and shared-runtime integration
+
+File > Build Settings reads `project.json`, presents its authored scene list,
+obtains an output directory through the desktop picker, and submits a validated
+`build.start` envelope. The ordered selection is non-empty and bounded; every
+selected path must be declared by the project, and unselected scene documents
+are excluded. Electron main confines the project root to the renderer's active
+project capability, owns the worker, reports progress, and aborts work on explicit
+cancellation, renderer loss, or shutdown. Typed failures stay visible in the
+Build Settings window.
+
+The packaged player hosts the same generic `runtime.worker.js` contract as Play
+Mode. It maps keyboard input to configured axes/actions, advances deterministic
+movement, collision, and trigger state, and displays configured gameplay status
+and score. The retained executable smoke drives configured input and asserts
+movement, collision, trigger transition, and UI output without editor services.

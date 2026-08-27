@@ -6,6 +6,8 @@ export type BuildRequest = Readonly<{
     projectRevision: string;
     outputPath: string;
     target: BuildTarget;
+    scenes: string[];
+    buildId: string;
 }>;
 
 export type BuildProgress = Readonly<{
@@ -23,6 +25,7 @@ export type BuildResult = Readonly<{
 
 type BuildProtocol = {
     request(command: string, payload: Record<string, unknown>): Promise<unknown>;
+    onBuildProgress?: (callback: (buildId: string, progress: BuildProgress) => void) => () => void;
 };
 
 /** Renderer adapter. Execution, paths, workers and publication remain in main. */
@@ -48,6 +51,10 @@ export class BuildSettings {
 
     public async cancel(buildId: string): Promise<void> {
         await this.protocol.request('build.cancel', { buildId });
+    }
+
+    public onProgress(callback: (buildId: string, progress: BuildProgress) => void): () => void {
+        return this.protocol.onBuildProgress?.(callback) ?? (() => {});
     }
 
     public static save(): void {

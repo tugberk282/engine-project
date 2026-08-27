@@ -47,6 +47,7 @@
                         <div class="dropdown-item" id="menu-open-scene">Open Scene</div>
                         <div class="dropdown-item" id="menu-save-scene">Save Scene</div>
                         <div class="dropdown-item" id="menu-save-scene-as">Save Scene As...</div>
+                        <div class="dropdown-item" id="menu-build-settings">Build Settings...</div>
                         <hr>
                         <div class="dropdown-item" id="menu-exit">Exit</div>
                     </div>
@@ -308,10 +309,10 @@
             <div id="assets-panel" class="panel">
                 <div class="panel-header panel-header-main" id="bottom-panel-header">
                         <div id="bottom-tabs" class="panel-tab-strip">
-                        <span id="tab-assets" class="tab active-tab"
+                        <span id="tab-assets" class="tab active-tab" role="tab" aria-selected="true" tabindex="0"
                             ><span class="tab-label">Project</span><button id="tab-close-assets" class="tab-close" type="button" aria-label="Close Project">x</button></span>
-                        <span id="tab-console" class="tab"><span class="tab-label">Console</span><button id="tab-close-console" class="tab-close" type="button" aria-label="Close Console">x</button></span>
-                        <span id="tab-render" class="tab"><span class="tab-label">Render Settings</span><button id="tab-close-render" class="tab-close" type="button" aria-label="Close Render Settings">x</button></span>
+                        <span id="tab-console" class="tab" role="tab" aria-selected="false" tabindex="-1"><span class="tab-label">Console</span><button id="tab-close-console" class="tab-close" type="button" aria-label="Close Console">x</button></span>
+                        <span id="tab-render" class="tab" role="tab" aria-selected="false" tabindex="-1"><span class="tab-label">Render Settings</span><button id="tab-close-render" class="tab-close" type="button" aria-label="Close Render Settings">x</button></span>
                     </div>
                 </div>
                 <div id="assets-content" class="panel-content">

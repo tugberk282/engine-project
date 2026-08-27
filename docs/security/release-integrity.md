@@ -13,6 +13,17 @@ Tugberk Engine treats the Node build graph and CI actions as release inputs.
 - Packaging must use `--publish never` in verification. Publishing and signing are
   separate release-authorized operations and require protected credentials.
 
+The manual `signed-windows-release.yml` lane is the only signed-artifact qualification
+path. It downloads LLVM-MinGW 20250613 by immutable URL and verifies its SHA-256 before
+building. The `windows-code-signing` GitHub environment must require release-owner review
+and expose only non-secret Azure resource identifiers as environment variables. Azure
+authentication uses GitHub OIDC; do not add a client secret, PFX, certificate password,
+or signing key to repository variables, secrets, workflow environment, logs, or artifacts.
+Grant the federated identity only the Artifact Signing Certificate Profile Signer role for
+the selected profile. The lane signs the helper before packaging, rewrites its integrity
+manifest, signs the NSIS envelope, and requires Windows trust-chain validation for both
+files before executing the installed sandbox matrix.
+
 The full development graph can temporarily contain high advisories when upstream
 packaging tools have no fixed release. Such exceptions must not be hidden with
 audit suppression. Record the dependency path, preconditions, and upstream fix,

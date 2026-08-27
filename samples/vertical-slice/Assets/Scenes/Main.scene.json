@@ -61,11 +61,22 @@
     },
     {
       "children": [],
-      "components": [{ "type": "Camera", "data": { "isMain": true } }],
+      "components": [
+        { "type": "Camera", "data": { "isMain": true } },
+        { "type": "GameplayCamera", "data": { "mode": "follow", "offset": [0, 7, 12] } }
+      ],
       "enabled": true,
       "id": "object-main-camera",
       "name": "Main Camera",
       "transform": { "position": [3, 7, 12], "rotation": [-0.4, 0, 0], "scale": [1, 1, 1] }
+    },
+    {
+      "children": [],
+      "components": [{ "type": "GameplayUI", "data": { "scorePerCollectible": 100, "showGoal": true, "showStatus": true } }],
+      "enabled": true,
+      "id": "object-gameplay-ui",
+      "name": "Goal and Status HUD",
+      "transform": { "position": [0, 0, 0], "rotation": [0, 0, 0], "scale": [1, 1, 1] }
     }
   ],
   "name": "Movement Goal",

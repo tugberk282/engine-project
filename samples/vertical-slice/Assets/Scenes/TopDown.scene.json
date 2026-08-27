@@ -3,6 +3,25 @@
   "formatVersion": 1,
   "gameObjects": [
     {
+      "id": "topdown-camera",
+      "name": "Fixed Overview Camera",
+      "enabled": true,
+      "children": [],
+      "transform": { "position": [2, 10, 5], "rotation": [-1.1, 0, 0], "scale": [1, 1, 1] },
+      "components": [
+        { "type": "Camera", "data": { "isMain": true } },
+        { "type": "GameplayCamera", "data": { "mode": "fixed" } }
+      ]
+    },
+    {
+      "id": "topdown-ui",
+      "name": "Score Goal and Status HUD",
+      "enabled": true,
+      "children": [],
+      "transform": { "position": [0, 0, 0], "rotation": [0, 0, 0], "scale": [1, 1, 1] },
+      "components": [{ "type": "GameplayUI", "data": { "scorePerCollectible": 250, "showGoal": true, "showStatus": true } }]
+    },
+    {
       "id": "topdown-player",
       "name": "Top-down Player",
       "tag": "Player",

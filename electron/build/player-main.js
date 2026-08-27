@@ -32,7 +32,7 @@ function readBuild() {
     }
     const scenePath = path.resolve(buildRoot, 'content', manifest.entryScene);
     if (!scenePath.startsWith(`${contentRoot}${path.sep}`)) throw new Error('Entry scene escapes build content');
-    return { manifest, scene: JSON.parse(fs.readFileSync(scenePath, 'utf8')) };
+    return { manifest, scene: JSON.parse(fs.readFileSync(scenePath, 'utf8')), smoke: process.env.TUGBERK_PLAYER_SMOKE === '1' };
 }
 
 ipcMain.handle('player:bootstrap', () => readBuild());

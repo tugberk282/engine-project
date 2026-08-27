@@ -60,10 +60,31 @@ test('canonical sample builds reproducibly and player runs deterministic frames'
             child.once('error', reject);
             child.once('exit', (code) => { clearTimeout(timeout); code === 0 ? resolve() : reject(new Error(`Player exited ${code}`)); });
         });
-        assert.deepEqual(JSON.parse(fs.readFileSync(smokeOutput, 'utf8')), {
-            ok: true, sceneId: 'scene-vertical-slice-main', objectCount: runA.objectCount
+        const smoke = JSON.parse(fs.readFileSync(smokeOutput, 'utf8'));
+        assert.equal(smoke.ok, true);
+        assert.equal(smoke.sceneId, 'scene-vertical-slice-main');
+        assert.equal(smoke.objectCount, runA.objectCount);
+        assert.deepEqual(smoke.checks, {
+            configuredInput: true, movement: true, collision: true, trigger: true, ui: true
         });
     }
+});
+
+test('selected authored scenes define packaged content and entry scene', async (t) => {
+    const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'tugberk-build-scenes-'));
+    t.after(() => fs.promises.rm(root, { recursive: true, force: true }));
+    const projectRoot = path.join(root, 'project');
+    await fs.promises.cp(path.join(__dirname, '..', 'samples', 'vertical-slice'), projectRoot, { recursive: true });
+    const service = new BuildService();
+    t.after(() => service.shutdown());
+    const selected = { ...request(projectRoot, path.join(root, 'output')), scenes: ['Assets/Scenes/TopDown.scene.json'] };
+    const result = await service.build(selected);
+    assert.equal(result.manifest.entryScene, 'Assets/Scenes/TopDown.scene.json');
+    assert.equal(fs.existsSync(path.join(root, 'output', 'content', 'Assets', 'Scenes', 'Main.scene.json')), false,
+        'unselected authored scenes are excluded from packaged content');
+    await assert.rejects(service.build({ ...request(projectRoot, path.join(root, 'bad')), scenes: ['Assets/Scenes/Unknown.scene.json'] }),
+        { code: 'SCENE_NOT_IN_PROJECT' });
+    assert.equal(fs.existsSync(path.join(root, 'bad')), false);
 });
 
 test('stale revision and malicious output fail without partial publication', async (t) => {

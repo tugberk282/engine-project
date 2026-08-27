@@ -6,6 +6,7 @@
 import { Scene } from './Scene';
 import { SceneManager } from './SceneManager';
 import { RuntimeBridge, RuntimeFailure, RuntimeFrame, RuntimeState } from './RuntimeBridge';
+import { Input } from './Input';
 
 export type PlayMode = 'edit' | 'play' | 'paused';
 export type PlayStep = 'frame' | 'physics' | 'full';
@@ -166,7 +167,7 @@ export class PlayModeManager {
      */
     private updateFrame(delta: number): void {
         this.deltaTime = delta;
-        this.runtime.tick(delta);
+        this.runtime.tick(delta, Input.snapshot());
 
         // Call frame callbacks
         this.onFrameCallbacks.forEach(cb => cb(delta));

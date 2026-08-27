@@ -1,128 +1,87 @@
+import { BuildProgress, BuildSettings } from '../engine/BuildSettings';
 import { DesktopFileSystem } from '../platform/DesktopFileSystem';
 import { PathUtils } from '../platform/PathUtils';
 import { EditorWindow } from './EditorWindow';
 
+type SceneSelection = { path: string; included: boolean };
+
 export class BuildSettingsWindow extends EditorWindow {
-    private scenes: { path: string, included: boolean }[] = [];
-    private fs: DesktopFileSystem;
+    private scenes: SceneSelection[] = [];
+    private readonly fs = new DesktopFileSystem();
+    private readonly builds = new BuildSettings();
+    private activeBuildId: string | null = null;
+    private status = 'Loading project scenes…';
 
-    constructor(parent: HTMLElement) {
-        super(parent, "Build Settings");
-        this.fs = new DesktopFileSystem();
-        this.refreshScenes();
-    }
+    constructor(parent: HTMLElement) { super(parent, 'Build Settings'); void this.refreshScenes(); }
+    public refresh(): void { this.onGUI(); }
 
-    public refresh(): void {
-        this.onGUI();
+    private projectRoot(): string {
+        const assetsRoot = (window as any).Editor?.instance?.rootPath;
+        if (!assetsRoot) throw new Error('Open a project before building.');
+        return PathUtils.dirname(assetsRoot);
     }
 
     public async refreshScenes(): Promise<void> {
-        const rootPath = (window as any).Editor?.instance?.rootPath ?? 'Assets';
-        const assetsPath = rootPath;
-        if (!await this.fs.exists(assetsPath)) {
-            this.scenes = [];
-            return;
-        }
-
-        const findScenes =  async(dir: string) => {
-            let results: string[] = [];
-            const list = await this.fs.readdir(dir);
-            for (let file of list) {
-                file = PathUtils.join(dir, file);
-                const stat = await this.fs.stat(file);
-                if (stat && stat.isDirectory()) {
-                    results = results.concat(await findScenes(file));
-                } else {
-                    if (file.endsWith('.scene')) results.push(file);
-                }
-            }
-            return results;
-        };
-
-        const sceneFiles = await findScenes(assetsPath);
-        const projectRoot = PathUtils.dirname(rootPath);
-
-        this.scenes = sceneFiles.map(fullPath => {
-            const relativePath = PathUtils.relative(projectRoot, fullPath);
-            return { path: relativePath, included: true };
-        });
-
+        try {
+            const manifest = JSON.parse(await this.fs.readFile(PathUtils.join(this.projectRoot(), 'project.json'), 'utf8') as string);
+            const prior = new Map(this.scenes.map((scene) => [scene.path, scene.included]));
+            this.scenes = (manifest.scenes ?? []).map((scene: { path: string }) => ({
+                path: scene.path.replace(/\\/g, '/'), included: prior.get(scene.path) ?? true
+            }));
+            this.status = this.scenes.length ? 'Ready to build.' : 'No authored scenes are listed in project.json.';
+        } catch (error) { this.scenes = []; this.status = this.errorMessage(error); }
         this.refresh();
     }
 
-    public onGUI(): void {
-        const content = this.getContentArea();
-        content.innerHTML = '';
-        content.style.padding = '10px';
-        content.style.display = 'flex';
-        content.style.flexDirection = 'column';
-        content.style.gap = '10px';
-
-        const title = document.createElement('div');
-        title.innerText = 'Scenes In Build';
-        title.style.fontWeight = 'bold';
-        title.style.fontSize = '12px';
-        content.appendChild(title);
-
-        const listContainer = document.createElement('div');
-        listContainer.style.flex = '1';
-        listContainer.style.background = 'var(--unity-bg-input)';
-        listContainer.style.border = '1px solid var(--unity-border)';
-        listContainer.style.overflowY = 'auto';
-        listContainer.style.padding = '5px';
-        content.appendChild(listContainer);
-
-        this.scenes.forEach((scene, index) => {
-            const item = document.createElement('div');
-            item.style.display = 'flex';
-            item.style.alignItems = 'center';
-            item.style.gap = '8px';
-            item.style.padding = '2px 5px';
-            item.style.fontSize = '11px';
-            item.style.borderBottom = '1px solid var(--unity-border-light)';
-
-            const checkbox = document.createElement('input');
-            checkbox.type = 'checkbox';
-            checkbox.checked = scene.included;
-            checkbox.onchange = () => scene.included = checkbox.checked;
-
-            const name = document.createElement('span');
-            name.innerText = scene.path;
-            name.style.flex = '1';
-
-            const indexLbl = document.createElement('span');
-            indexLbl.innerText = index.toString();
-            indexLbl.style.color = 'var(--unity-text-dim)';
-            indexLbl.style.width = '20px';
-
-            item.appendChild(checkbox);
-            item.appendChild(name);
-            item.appendChild(indexLbl);
-            listContainer.appendChild(item);
+    private async startBuild(outputPath: string): Promise<void> {
+        const scenes = this.scenes.filter((scene) => scene.included).map((scene) => scene.path);
+        if (!scenes.length) throw new Error('Select at least one scene.');
+        const projectRoot = this.projectRoot();
+        const projectText = await this.fs.readFile(PathUtils.join(projectRoot, 'project.json'), 'utf8') as string;
+        const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(projectText));
+        const projectRevision = [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, '0')).join('');
+        const buildId = `build-${Date.now().toString(36)}-${crypto.randomUUID().slice(0, 8)}`;
+        this.activeBuildId = buildId; this.status = 'Starting build…'; this.refresh();
+        const unsubscribe = this.builds.onProgress((id: string, progress: BuildProgress) => {
+            if (id === buildId) { this.status = `${progress.stage} (${progress.stageIndex + 1}/${progress.stageCount})`; this.refresh(); }
         });
+        try {
+            const result = await this.builds.build({ version: 1, buildId, projectRoot, projectRevision, outputPath, target: 'win-x64', scenes });
+            this.status = `Build complete: ${result.outputPath}`;
+            await (window as any).electronAPI?.revealInFolder?.(result.outputPath);
+        } catch (error) { this.status = this.errorMessage(error); }
+        finally { unsubscribe(); this.activeBuildId = null; this.refresh(); }
+    }
 
-        const footer = document.createElement('div');
-        footer.style.display = 'flex';
-        footer.style.justifyContent = 'flex-end';
-        footer.style.gap = '8px';
-        content.appendChild(footer);
+    private errorMessage(error: unknown): string {
+        const value = error as { code?: string; message?: string };
+        return `${value.code ? `${value.code}: ` : ''}${value.message || 'Build failed.'}`;
+    }
 
-        const refreshBtn = document.createElement('button');
-        refreshBtn.innerText = 'Refresh';
-        refreshBtn.className = 'unity-button';
-        refreshBtn.onclick = () => this.refreshScenes();
-        footer.appendChild(refreshBtn);
-
-        const buildBtn = document.createElement('button');
-        buildBtn.innerText = 'Build (Mock)';
-        buildBtn.className = 'unity-button';
-        buildBtn.style.padding = '5px 20px';
-        buildBtn.style.background = '#4CAF50';
-        buildBtn.style.color = 'white';
-        buildBtn.onclick = () => {
-            console.log("Building game with scenes:", this.scenes.filter(s => s.included));
-            alert("Build complete (mock). Check console for details.");
+    public onGUI(): void {
+        const content = this.getContentArea(); content.innerHTML = '';
+        content.style.cssText = 'padding:12px;display:flex;flex-direction:column;gap:10px;min-width:520px;min-height:360px';
+        const title = document.createElement('strong'); title.innerText = 'Scenes In Build'; content.appendChild(title);
+        const list = document.createElement('div'); list.style.cssText = 'flex:1;overflow:auto;border:1px solid var(--unity-border);padding:6px';
+        this.scenes.forEach((scene, index) => {
+            const row = document.createElement('label'); row.style.cssText = 'display:flex;gap:8px;padding:4px';
+            const checkbox = document.createElement('input'); checkbox.type = 'checkbox'; checkbox.checked = scene.included;
+            checkbox.disabled = !!this.activeBuildId; checkbox.onchange = () => { scene.included = checkbox.checked; };
+            row.append(checkbox, document.createTextNode(`${index}. ${scene.path}`)); list.appendChild(row);
+        });
+        content.appendChild(list);
+        const status = document.createElement('div'); status.setAttribute('role', 'status'); status.innerText = this.status; content.appendChild(status);
+        const actions = document.createElement('div'); actions.style.cssText = 'display:flex;justify-content:flex-end;gap:8px';
+        const refresh = document.createElement('button'); refresh.innerText = 'Refresh'; refresh.disabled = !!this.activeBuildId;
+        refresh.onclick = () => void this.refreshScenes();
+        const build = document.createElement('button'); build.innerText = this.activeBuildId ? 'Cancel Build' : 'Build Windows Player';
+        build.disabled = !this.activeBuildId && !this.scenes.some((scene) => scene.included);
+        build.onclick = async () => {
+            if (this.activeBuildId) { await this.builds.cancel(this.activeBuildId).catch(() => {}); return; }
+            const result = await (window as any).electronAPI?.showOpenDialog?.({ title: 'Select Windows build output folder', properties: ['openDirectory', 'createDirectory'] });
+            if (!result || result.canceled || !result.filePaths?.[0]) return;
+            await this.startBuild(PathUtils.join(result.filePaths[0], `${BuildSettings.productName || 'Tugberk Game'}-Windows`));
         };
-        footer.appendChild(buildBtn);
+        actions.append(refresh, build); content.appendChild(actions);
     }
 }

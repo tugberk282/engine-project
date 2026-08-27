@@ -21,6 +21,8 @@ const { DiagnosticStore } = require('./diagnostics/diagnostic-store');
 const { ShutdownCoordinator } = require('./lifecycle/shutdown-coordinator');
 const { StartupRecovery } = require('./lifecycle/startup-recovery');
 const { RuntimeSupervisor } = require('./runtime/runtime-supervisor');
+const { BuildService } = require('./build/build-service');
+const { runPhase2KeyboardHarness } = require('./quality/phase2-keyboard-harness');
 
 const projectCapabilities = new ProjectCapabilities();
 const confinedFileSystem = new ConfinedFileSystem();
@@ -56,11 +58,14 @@ const shutdownCoordinator = new ShutdownCoordinator({
 const runtimeSupervisor = new RuntimeSupervisor({
     onDiagnostic: (event) => diagnostics.record({ processRole: 'runtime', ...event })
 });
+const buildService = new BuildService();
+const editorBuilds = new Map();
 const executionBroker = new TrustGatedExecutionBroker({
     trustStore: { get: (projectPath) => getProjectTrustStore().get(projectPath) }
 });
 shutdownCoordinator.register('protocol-grants', async () => protocolGrants.revokeAll());
 shutdownCoordinator.register('play-runtime', async () => runtimeSupervisor.shutdown());
+shutdownCoordinator.register('build-service', async () => buildService.shutdown());
 shutdownCoordinator.register('project-execution', async () => executionBroker.shutdown());
 shutdownCoordinator.register('startup-marker', async () => startupRecovery.markClean());
 diagnostics.record({
@@ -306,6 +311,32 @@ async function executeProtocolCommand(event, request) {
             return runtimeSupervisor.step(request.payload.deltaTime);
         case COMMANDS.RUNTIME_STOP:
             return runtimeSupervisor.stop();
+        case COMMANDS.BUILD_START: {
+            const { buildId, ...buildRequest } = request.payload;
+            buildRequest.projectRoot = projectCapabilities.requireRoot(buildRequest.projectRoot);
+            if (editorBuilds.has(buildId)) throw Object.assign(new Error('Build identifier is already active'), { code: 'BUILD_ALREADY_ACTIVE' });
+            const controller = new AbortController();
+            editorBuilds.set(buildId, { ownerId: event.sender.id, controller });
+            const abortOnDestroyed = () => controller.abort();
+            event.sender.once('destroyed', abortOnDestroyed);
+            try {
+                return await buildService.build(buildRequest, {
+                    signal: controller.signal,
+                    onProgress: (progress) => {
+                        if (!event.sender.isDestroyed()) event.sender.send('tugberk:v1:build-progress', buildId, progress);
+                    }
+                });
+            } finally {
+                event.sender.removeListener('destroyed', abortOnDestroyed);
+                editorBuilds.delete(buildId);
+            }
+        }
+        case COMMANDS.BUILD_CANCEL: {
+            const active = editorBuilds.get(request.payload.buildId);
+            if (!active || active.ownerId !== event.sender.id) throw Object.assign(new Error('Build is not active'), { code: 'BUILD_NOT_ACTIVE' });
+            active.controller.abort();
+            return true;
+        }
         default:
             throw Object.assign(new Error('Unknown command'), { code: 'UNKNOWN_COMMAND' });
     }
@@ -1597,9 +1628,11 @@ const createWindow = async () => {
             console.log(`[renderer:${level}] ${message} (${sourceId}:${line})`);
         });
         setTimeout(() => {
-            const runner = process.env.ENGINE_PHASE1_HARNESS_PHASE
-                ? runPhase1PersistenceHarness
-                : runSmokeTest;
+            const runner = process.env.ENGINE_PHASE2_KEYBOARD_PHASE
+                ? runPhase2KeyboardHarness
+                : process.env.ENGINE_PHASE1_HARNESS_PHASE
+                    ? runPhase1PersistenceHarness
+                    : runSmokeTest;
             runner(mainWindow).catch((error) => {
                 console.error('Smoke test failed to execute:', error);
                 app.exit(1);
