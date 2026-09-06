@@ -147,6 +147,46 @@ Priority is based on unlocking a trustworthy create-to-player workflow, not on m
 
 ## 7. Phased implementation sequence and gates
 
+## 7A. 2026-09-06 implementation audit and execution order
+
+The repository has a substantial foundation, but a feature is not considered complete
+just because a class or contract test exists. The following list is the current
+engineering backlog, ordered by its effect on making small games from the desktop app.
+
+| Order | Area | Current state | Closure evidence |
+|---|---|---|---|
+| 1 | Project launch and project browser | Services and trust boundaries exist; the complete first-launch/create/open/reopen flow is not retained as packaged evidence. | A packaged Windows run creates a project, opens it, reopens it after restart, and reports invalid folders without losing the recent list. |
+| 2 | Scene authoring | Scene, GameObject, Transform, component commands, hierarchy and Inspector models exist; broad pointer authoring and mutation coverage remain partial. | A user creates Cube, Camera, Light, empty and UI objects, reparents and deletes them, adds/removes components, and sees each result in the Scene view and Inspector. |
+| 3 | Scene view and transform interaction | Three.js renderer, grid, gizmo and camera controller exist; complete selection, raycast, drag, snapping and framing behavior is not fully qualified. | Mouse and keyboard can select, move, rotate, scale, frame and undo objects with visible results at different viewport sizes. |
+| 4 | Runtime gameplay core | Play-mode snapshot/worker, input, physics primitives, camera and sample scripts exist; general-purpose gameplay behavior and runtime/editor separation need broader proof. | A saved authored scene runs, accepts keyboard/mouse input, applies gravity/collision, updates a camera and exits without changing edit state. |
+| 5 | Runtime UI and events | Canvas, RectTransform, controls, EventSystem and GraphicRaycaster exist; a complete authored UI event path is not yet a release gate. | A button, toggle, slider, input field, dropdown and scroll view are authored, rendered, focusable and invoke a script in play mode. |
+| 6 | Asset and prefab workflow | GUID database/importers and prefab serialization exist; import, reference repair, prefab instance overrides and revert/apply need end-to-end proof. | Assets can be imported, renamed/moved, referenced, instantiated as prefabs, overridden, applied/reverted and reopened without broken GUIDs. |
+| 7 | Save, undo and recovery | Serialization, dirty state, commands and recovery paths are implemented; the complete UI decision and restart matrix remains partial. | Save, Save As, undo/redo, cancelled close, crash recovery and stale-write conflict preserve the last valid scene and clearly expose decisions. |
+| 8 | Build and distribution | Build worker, manifest integrity and Windows sandbox foundations exist; packaged player, clean-machine install and standalone gameplay need qualification. | A clean machine installs the editor, exports a Windows player from selected scenes, launches it, and rejects tampered or unsafe content. |
+| 9 | Diagnostics and quality gates | Many contract and headless tests exist; CI must retain artifacts and fail on actual packaged regressions rather than source-only checks. | Every completed item has a reproducible test, log/artifact identity and a clear failure message; no known quality gate is silently skipped. |
+
+Execution rule: close one row only after its evidence is retained, then immediately
+continue with the next dependency-ready row. Current implementation starts at row 1
+and row 2 together because project launch is required to observe real authoring.
+
+### Immediate gaps found during the 2026-09-06 scan
+
+- Packaged first-launch project creation and reopen are not proven in the current tree.
+- Scene authoring has broad command code, but a single packaged workflow covering Cube,
+  Camera, Light, UI object, component add/edit, reparent, delete and undo is missing.
+- Runtime sample coverage proves selected vertical/top-down cases, not a general
+  authored gameplay loop with script-driven events and multiple scene types.
+- C# support is currently a sample/watch pipeline and is not a production compiler or
+  runtime API compatibility layer.
+- Editor and Inspector remain very large coupled modules, which increases regression
+  risk and makes rendered qualification more important than source assertions.
+- Build output is functional but still emits a large editor chunk warning and needs a
+  clean-machine packaged-player gate.
+
+The practical target is therefore a reliable small-game engine first: 3D scene
+authoring, reusable components, input, physics, camera, UI events, persistence and a
+Windows player. Full Unity package/API/platform parity remains a later expansion.
+
 ### Phase 0 — Reproducible baseline
 
 Dependencies: none.
