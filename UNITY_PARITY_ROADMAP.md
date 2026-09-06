@@ -173,8 +173,11 @@ and row 2 together because project launch is required to observe real authoring.
 
 Validation update: the focused project lifecycle, editor authoring contract,
 undo/runtime, input and vertical-slice suite passed 51/51 on 2026-09-06 after the
-authoring entry-point correction. This confirms the model and service foundations;
-it does not close the packaged interaction gate.
+authoring entry-point correction. The source-built Electron smoke then passed twice
+at 43/43 checks on 2026-09-06 from revision `f146174`, with a clean build and no
+qualification-owned Electron process left behind. The packaged keyboard gate also
+passed twice. These results confirm launch and keyboard foundations; they do not close
+pointer Scene view authoring or standalone-player qualification.
 
 - Packaged first-launch project creation and reopen are not proven in the current tree.
 - Scene authoring has broad command code, but a single packaged workflow covering Cube,
