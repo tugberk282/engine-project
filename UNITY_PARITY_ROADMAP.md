@@ -171,6 +171,11 @@ and row 2 together because project launch is required to observe real authoring.
 
 ### Immediate gaps found during the 2026-09-06 scan
 
+Validation update: the focused project lifecycle, editor authoring contract,
+undo/runtime, input and vertical-slice suite passed 51/51 on 2026-09-06 after the
+authoring entry-point correction. This confirms the model and service foundations;
+it does not close the packaged interaction gate.
+
 - Packaged first-launch project creation and reopen are not proven in the current tree.
 - Scene authoring has broad command code, but a single packaged workflow covering Cube,
   Camera, Light, UI object, component add/edit, reparent, delete and undo is missing.
