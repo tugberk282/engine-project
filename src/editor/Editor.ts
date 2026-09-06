@@ -6566,7 +6566,8 @@ export class Editor {
         go.object3D.updateMatrixWorld(true);
     }
 
-    private createEmptyGameObject(parent?: any, worldPosition?: THREE.Vector3, prefabApplyTargetSource?: GameObject | null) {
+    /** Entry point shared by the Hierarchy create menu and editor shortcuts. */
+    public createEmptyGameObject(parent?: any, worldPosition?: THREE.Vector3, prefabApplyTargetSource?: GameObject | null) {
         const go = new GameObject("New GameObject");
         this.applySpawnPosition(go, worldPosition, parent ?? null);
         const cmd = new CreateGameObjectCommand(go, this.scene, parent ?? null);
@@ -6576,7 +6577,8 @@ export class Editor {
         this.hierarchyWindow.refresh();
     }
 
-    private createPrimitive(type: string, parent?: any, worldPosition?: THREE.Vector3) {
+    /** Entry point shared by the Hierarchy create menu and top-level menus. */
+    public createPrimitive(type: string, parent?: any, worldPosition?: THREE.Vector3) {
         const go = new GameObject(type);
         if (type === 'Cube') {
             const meshFilter = go.addComponent(MeshFilter);
