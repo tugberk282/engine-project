@@ -1162,9 +1162,14 @@ export class ProjectWindow {
         const nextSelectionPath = await this.resolveSelectionPathAfterRefresh(refreshResult, options?.focusAssetPath, options?.preserveSelection);
 
         if (nextSelectionPath && await this.fs.exists(nextSelectionPath)) {
-            this.selectedAssetPath = nextSelectionPath;
-            const isDirectory = (await this.fs.stat(nextSelectionPath)).isDirectory();
-            this.currentPath = isDirectory ? nextSelectionPath : PathUtils.dirname(nextSelectionPath);
+            const selectionStat = await this.fs.stat(nextSelectionPath);
+            if (selectionStat) {
+                this.selectedAssetPath = nextSelectionPath;
+                const isDirectory = selectionStat.isDirectory();
+                this.currentPath = isDirectory ? nextSelectionPath : PathUtils.dirname(nextSelectionPath);
+            } else {
+                this.selectedAssetPath = null;
+            }
         } else if (options?.focusAssetPath === null || (this.selectedAssetPath && !await this.fs.exists(this.selectedAssetPath))) {
             this.selectedAssetPath = null;
         }
@@ -1179,8 +1184,14 @@ export class ProjectWindow {
 
         if (this.selectedAssetPath && await this.fs.exists(this.selectedAssetPath)) {
             const assetName = PathUtils.basename(this.selectedAssetPath);
-            const isFolder = (await this.fs.stat(this.selectedAssetPath)).isDirectory();
-            this.editor.selectProjectAsset(await this.buildAssetSelection(this.selectedAssetPath, assetName, isFolder));
+            const selectionStat = await this.fs.stat(this.selectedAssetPath);
+            if (selectionStat) {
+                const isFolder = selectionStat.isDirectory();
+                this.editor.selectProjectAsset(await this.buildAssetSelection(this.selectedAssetPath, assetName, isFolder));
+            } else {
+                this.selectedAssetPath = null;
+                this.editor.selectProjectAsset(null);
+            }
         }
 
         return refreshResult;

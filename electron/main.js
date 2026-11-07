@@ -379,6 +379,14 @@ async function runSmokeTest(mainWindow) {
     const result = await mainWindow.webContents.executeJavaScript(`
         (async () => {
             const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+            const waitUntil = async (predicate, timeoutMs = 5000, intervalMs = 25) => {
+                const deadline = Date.now() + timeoutMs;
+                while (Date.now() < deadline) {
+                    if (predicate()) return true;
+                    await wait(intervalMs);
+                }
+                return !!predicate();
+            };
             const failures = [];
             const checks = [];
             const record = (name, pass, details) => {
@@ -1336,7 +1344,11 @@ async function runSmokeTest(mainWindow) {
             if (deepPrefabNode) {
                 editor.selectGameObject(deepPrefabNode, false);
                 editor.inspectorWindow?.refresh?.();
-                await wait(300);
+                await waitUntil(() => {
+                    const status = document.querySelector('#prefab-source-status')?.textContent ?? '';
+                    const applyButton = document.querySelector('#prefab-apply');
+                    return /connected/i.test(status) && applyButton?.disabled === false;
+                });
             }
             const connectedSourceStatus = document.querySelector('#prefab-source-status');
             const connectedApplyButton = document.querySelector('#prefab-apply');

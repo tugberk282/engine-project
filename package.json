@@ -74,12 +74,12 @@
   },
   "devDependencies": {
     "chokidar": "^3.6.0",
-    "concurrently": "10.0.4",
+    "concurrently": "10.0.7",
     "cross-env": "^10.1.0",
-    "electron": "43.2.0",
+    "electron": "43.8.7",
     "electron-builder": "26.15.3",
     "typescript": "^5.2.2",
-    "vite": "8.1.5",
+    "vite": "8.3.6",
     "wait-on": "9.1.0"
   },
   "dependencies": {
