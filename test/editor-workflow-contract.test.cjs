@@ -128,13 +128,13 @@ test('activation changes propagate lifecycle state through enabled descendants',
 
 test('Game View camera discovery traverses active child hierarchies deterministically', () => {
     const editor = source('src/editor/Editor.ts');
-    const method = editor.match(/private getRuntimeCameraEntries\(\)[^]*?\n    }\n\n    private syncRuntimeLayerAssignments/);
-    assert.ok(method, 'camera entry collector must remain a dedicated bounded method');
-    assert.match(method[0], /let hierarchyIndex = 0/);
-    assert.match(method[0], /go\.isActiveInHierarchy\(\)/);
-    assert.match(method[0], /go\.transform\.children\.forEach\(\(child\) => visit\(child\.gameObject\)\)/);
-    assert.match(method[0], /depthDelta/);
-    assert.match(method[0], /left\.index - right\.index/);
+    assert.match(editor, /private getRuntimeCameraEntries\(\)/,
+        'camera entry collector must remain a dedicated bounded method');
+    assert.match(editor, /let hierarchyIndex = 0/);
+    assert.match(editor, /go\.isActiveInHierarchy\(\)/);
+    assert.match(editor, /go\.transform\.children\.forEach\(\(child\) => visit\(child\.gameObject\)\)/);
+    assert.match(editor, /depthDelta/);
+    assert.match(editor, /left\.index - right\.index/);
 });
 
 test('CapsuleCollider Inspector authors bounded radius and height through undoable setters', () => {

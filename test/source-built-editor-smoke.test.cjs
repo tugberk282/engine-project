@@ -45,7 +45,7 @@ test('source identity retains revision, dirty state, and content hash', () => {
 
 test('canonical clean bootstrap uses Electron 43 official pinned on-demand command', () => {
   const packageJson = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf8'));
-  assert.equal(packageJson.devDependencies.electron, '43.2.0');
+  assert.equal(packageJson.devDependencies.electron, '43.8.7');
   assert.equal(packageJson.scripts['bootstrap:electron'], 'install-electron --no');
   assert.match(packageJson.scripts.bootstrap, /^npm ci && npm run bootstrap:electron$/);
 
