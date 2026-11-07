@@ -213,6 +213,28 @@ test('renderer destruction cleanup never reads the destroyed webContents object'
     assert.doesNotThrow(() => loaded.window.webContents.destroy());
 });
 
+test('fs-exists treats a missing granted path as false without weakening confinement', async (t) => {
+    const scratch = fs.mkdtempSync(path.join(process.env.PAPERCLIP_RUN_SCRATCH_DIR || os.tmpdir(), 'tugberk-exists-'));
+    t.after(() => fs.rmSync(scratch, { recursive: true, force: true }));
+    const loaded = await loadMain({ selectedProject: scratch });
+    const invokeEvent = { sender: { id: 73, isDestroyed: () => false } };
+    const existsHandler = loaded.handles.get('fs-exists');
+
+    await loaded.handles.get('show-open-dialog')(invokeEvent, { properties: ['openDirectory'] });
+    assert.equal(await existsHandler(invokeEvent, path.join(scratch, 'Assets', 'missing.prefab')), false);
+    await assert.rejects(
+        existsHandler(invokeEvent, path.join(path.dirname(scratch), 'outside.prefab')),
+        /outside an approved project root/
+    );
+});
+
+test('fs-exists source handles Windows disappearance races without swallowing authorization failures', () => {
+    const main = fs.readFileSync(path.join(root, 'electron', 'main.js'), 'utf8');
+    const handler = main.match(/ipcMain\.handle\('fs-exists'[\s\S]*?^}\);/m)?.[0] ?? '';
+    assert.match(handler, /error\?\.code === 'ENOENT' \|\| error\?\.code === 'EBADF'/);
+    assert.match(handler, /throw error/);
+});
+
 test('preload exports only the reviewed API and maps every method to an allowlisted channel', async () => {
     const { api, calls } = loadPreload();
     assert.deepEqual(Object.keys(api).sort(), [

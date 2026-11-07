@@ -1,24 +1,7 @@
 import { EditorWindow } from './EditorWindow';
 import { GameObject } from '../engine/GameObject';
 import { escapeHtml } from './Security';
-import { Scene } from '../engine/Scene';
-import { Camera } from '../engine/components/Camera';
-import { Light, LightType } from '../engine/components/Light';
-import { MeshRenderer } from '../engine/components/MeshRenderer';
-import { MeshFilter } from '../engine/components/MeshFilter';
-import { ParticleSystem } from '../engine/components/ParticleSystem';
-import { AudioSource } from '../engine/components/AudioSource';
-import { Canvas } from '../engine/components/Canvas';
-import { RectTransform } from '../engine/components/RectTransform';
-import { UIImage } from '../engine/components/UIImage';
-import { UIText } from '../engine/components/UIText';
-import { UIButton } from '../engine/components/UIButton';
-import { UIInputField } from '../engine/components/UIInputField';
-import { UIDropdown } from '../engine/components/UIDropdown';
-import { UIToggle } from '../engine/components/UIToggle';
-import { UISlider } from '../engine/components/UISlider';
-import { UIScrollbar } from '../engine/components/UIScrollbar';
-import { UIScrollRect } from '../engine/components/UIScrollRect';
+import type { Scene } from '../engine/Scene';
 import { PathUtils } from '../platform/PathUtils';
 import { CommandHistory, GroupCommand } from './Command';
 import { ScriptRegistry } from '../engine/ScriptRegistry';
@@ -472,7 +455,7 @@ export class HierarchyWindow extends EditorWindow {
             this.clearDropTarget(container);
         };
 
-        container.ondrop = (e) => {
+        container.ondrop = async (e) => {
             e.preventDefault();
             e.stopPropagation();
             this.cancelActiveDrag(false);
@@ -1132,10 +1115,7 @@ export class HierarchyWindow extends EditorWindow {
                 if (runEditorCreate((editorInstance) => editorInstance.createPrimitive?.(type, parentTransform))) {
                     return;
                 }
-                const go = this.createPrimitive(type);
-                CommandHistory.execute(new CreateGameObjectCommand(go, this.scene, parentGO?.transform));
-                this.onSelect(go);
-                this.refreshList();
+                void this.createFallbackPrimitive(type, parentGO);
             });
         });
 
@@ -1145,59 +1125,35 @@ export class HierarchyWindow extends EditorWindow {
             if (runEditorCreate((editorInstance) => editorInstance.createPrimitive?.('Camera', parentTransform))) {
                 return;
             }
-            const go = new GameObject('Camera');
-            go.addComponent(Camera);
-            CommandHistory.execute(new CreateGameObjectCommand(go, this.scene, parentGO?.transform));
-            this.onSelect(go);
-            this.refreshList();
+            void this.createFallbackObject('Camera', parentGO);
         });
 
         this.addMenuItem(menu, 'Directional Light', () => {
             if (runEditorCreate((editorInstance) => editorInstance.createDirectionalLight?.(parentTransform))) {
                 return;
             }
-            const go = new GameObject('Directional Light');
-            const light = go.addComponent(Light);
-            light.setLightType(LightType.Directional);
-            CommandHistory.execute(new CreateGameObjectCommand(go, this.scene, parentGO?.transform));
-            this.onSelect(go);
-            this.refreshList();
+            void this.createFallbackObject('Directional Light', parentGO);
         });
 
         this.addMenuItem(menu, 'Point Light', () => {
             if (runEditorCreate((editorInstance) => editorInstance.createPointLight?.(parentTransform))) {
                 return;
             }
-            const go = new GameObject('Point Light');
-            const light = go.addComponent(Light);
-            light.setLightType(LightType.Point);
-            CommandHistory.execute(new CreateGameObjectCommand(go, this.scene, parentGO?.transform));
-            this.onSelect(go);
-            this.refreshList();
+            void this.createFallbackObject('Point Light', parentGO);
         });
 
         this.addMenuItem(menu, 'Spot Light', () => {
             if (runEditorCreate((editorInstance) => editorInstance.createSpotLight?.(parentTransform))) {
                 return;
             }
-            const go = new GameObject('Spot Light');
-            const light = go.addComponent(Light);
-            light.setLightType(LightType.Spot);
-            light.setSpotAngle(30);
-            CommandHistory.execute(new CreateGameObjectCommand(go, this.scene, parentGO?.transform));
-            this.onSelect(go);
-            this.refreshList();
+            void this.createFallbackObject('Spot Light', parentGO);
         });
 
         this.addMenuItem(menu, 'Audio Source', () => {
             if (runEditorCreate((editorInstance) => editorInstance.createAudioSourceObject?.(parentTransform))) {
                 return;
             }
-            const go = new GameObject('Audio Source');
-            go.addComponent(AudioSource);
-            CommandHistory.execute(new CreateGameObjectCommand(go, this.scene, parentGO?.transform));
-            this.onSelect(go);
-            this.refreshList();
+            void this.createFallbackObject('Audio Source', parentGO);
         });
 
         this.addMenuSeparator(menu);
@@ -1211,11 +1167,7 @@ export class HierarchyWindow extends EditorWindow {
                 this.refreshList();
                 return;
             }
-            const go = new GameObject('Canvas');
-            go.addComponent(Canvas);
-            CommandHistory.execute(new CreateGameObjectCommand(go, this.scene, parentGO?.transform));
-            this.onSelect(go);
-            this.refreshList();
+            void this.createFallbackObject('Canvas', parentGO);
         });
 
         this.addMenuItem(menu, 'UI Image', () => {
@@ -1227,12 +1179,7 @@ export class HierarchyWindow extends EditorWindow {
                 this.refreshList();
                 return;
             }
-            const go = new GameObject('Image');
-            go.addComponent(RectTransform);
-            go.addComponent(UIImage);
-            CommandHistory.execute(new CreateGameObjectCommand(go, this.scene, parentGO?.transform));
-            this.onSelect(go);
-            this.refreshList();
+            void this.createFallbackObject('Image', parentGO);
         });
 
         this.addMenuItem(menu, 'UI Text', () => {
@@ -1244,12 +1191,7 @@ export class HierarchyWindow extends EditorWindow {
                 this.refreshList();
                 return;
             }
-            const go = new GameObject('Text');
-            go.addComponent(RectTransform);
-            go.addComponent(UIText);
-            CommandHistory.execute(new CreateGameObjectCommand(go, this.scene, parentGO?.transform));
-            this.onSelect(go);
-            this.refreshList();
+            void this.createFallbackObject('Text', parentGO);
         });
 
         this.addMenuItem(menu, 'UI Button', () => {
@@ -1261,12 +1203,7 @@ export class HierarchyWindow extends EditorWindow {
                 this.refreshList();
                 return;
             }
-            const go = new GameObject('Button');
-            go.addComponent(RectTransform);
-            go.addComponent(UIButton);
-            CommandHistory.execute(new CreateGameObjectCommand(go, this.scene, parentGO?.transform));
-            this.onSelect(go);
-            this.refreshList();
+            void this.createFallbackObject('Button', parentGO);
         });
 
         this.addMenuItem(menu, 'UI Input Field', () => {
@@ -1278,12 +1215,7 @@ export class HierarchyWindow extends EditorWindow {
                 this.refreshList();
                 return;
             }
-            const go = new GameObject('Input Field');
-            go.addComponent(RectTransform);
-            go.addComponent(UIInputField);
-            CommandHistory.execute(new CreateGameObjectCommand(go, this.scene, parentGO?.transform));
-            this.onSelect(go);
-            this.refreshList();
+            void this.createFallbackObject('Input Field', parentGO);
         });
 
         this.addMenuItem(menu, 'UI Dropdown', () => {
@@ -1295,12 +1227,7 @@ export class HierarchyWindow extends EditorWindow {
                 this.refreshList();
                 return;
             }
-            const go = new GameObject('Dropdown');
-            go.addComponent(RectTransform);
-            go.addComponent(UIDropdown);
-            CommandHistory.execute(new CreateGameObjectCommand(go, this.scene, parentGO?.transform));
-            this.onSelect(go);
-            this.refreshList();
+            void this.createFallbackObject('Dropdown', parentGO);
         });
 
         this.addMenuItem(menu, 'UI Toggle', () => {
@@ -1312,12 +1239,7 @@ export class HierarchyWindow extends EditorWindow {
                 this.refreshList();
                 return;
             }
-            const go = new GameObject('Toggle');
-            go.addComponent(RectTransform);
-            go.addComponent(UIToggle);
-            CommandHistory.execute(new CreateGameObjectCommand(go, this.scene, parentGO?.transform));
-            this.onSelect(go);
-            this.refreshList();
+            void this.createFallbackObject('Toggle', parentGO);
         });
 
         this.addMenuItem(menu, 'UI Slider', () => {
@@ -1329,12 +1251,7 @@ export class HierarchyWindow extends EditorWindow {
                 this.refreshList();
                 return;
             }
-            const go = new GameObject('Slider');
-            go.addComponent(RectTransform);
-            go.addComponent(UISlider);
-            CommandHistory.execute(new CreateGameObjectCommand(go, this.scene, parentGO?.transform));
-            this.onSelect(go);
-            this.refreshList();
+            void this.createFallbackObject('Slider', parentGO);
         });
 
         this.addMenuItem(menu, 'UI Scrollbar', () => {
@@ -1346,12 +1263,7 @@ export class HierarchyWindow extends EditorWindow {
                 this.refreshList();
                 return;
             }
-            const go = new GameObject('Scrollbar');
-            go.addComponent(RectTransform);
-            go.addComponent(UIScrollbar);
-            CommandHistory.execute(new CreateGameObjectCommand(go, this.scene, parentGO?.transform));
-            this.onSelect(go);
-            this.refreshList();
+            void this.createFallbackObject('Scrollbar', parentGO);
         });
 
         this.addMenuItem(menu, 'UI Scroll View', () => {
@@ -1363,31 +1275,27 @@ export class HierarchyWindow extends EditorWindow {
                 this.refreshList();
                 return;
             }
-            const go = new GameObject('Scroll View');
-            go.addComponent(RectTransform);
-            go.addComponent(UIScrollRect);
-            CommandHistory.execute(new CreateGameObjectCommand(go, this.scene, parentGO?.transform));
-            this.onSelect(go);
-            this.refreshList();
+            void this.createFallbackObject('Scroll View', parentGO);
         });
 
         document.body.appendChild(menu);
         setTimeout(() => document.addEventListener('click', () => menu.remove(), { once: true }), 0);
     }
 
-    private createPrimitive(type: string): GameObject {
-        const go = new GameObject(type);
-        const mf = go.addComponent(MeshFilter);
-        go.addComponent(MeshRenderer);
+    private async createFallbackPrimitive(type: string, parentGO: GameObject | null): Promise<void> {
+        const { createPrimitive } = await import('./HierarchyFallback');
+        const go = createPrimitive(type);
+        CommandHistory.execute(new CreateGameObjectCommand(go, this.scene, parentGO?.transform));
+        this.onSelect(go);
+        this.refreshList();
+    }
 
-        if (type === 'Cube') mf.setPrimitiveType('Cube');
-        else if (type === 'Sphere') mf.setPrimitiveType('Sphere');
-        else if (type === 'Capsule') mf.setPrimitiveType('Capsule');
-        else if (type === 'Cylinder') mf.setPrimitiveType('Cylinder');
-        else if (type === 'Plane') mf.setPrimitiveType('Plane');
-        else if (type === 'Quad') mf.setPrimitiveType('Quad');
-
-        return go;
+    private async createFallbackObject(type: import('./HierarchyFallback').FallbackComponentType, parentGO: GameObject | null): Promise<void> {
+        const { createFallbackObject } = await import('./HierarchyFallback');
+        const go = createFallbackObject(type);
+        CommandHistory.execute(new CreateGameObjectCommand(go, this.scene, parentGO?.transform));
+        this.onSelect(go);
+        this.refreshList();
     }
 
     private deserializeGO(data: any): GameObject | null {
@@ -1474,21 +1382,22 @@ export class HierarchyWindow extends EditorWindow {
     }
 
     private getIcon(go: GameObject): string {
-        if (go.getComponent(Camera)) return '[Cam]';
-        if (go.getComponent(Light)) return '[Lit]';
-        if (go.getComponent(MeshRenderer)) return '[Mesh]';
-        if (go.getComponent(ParticleSystem)) return '[FX]';
-        if (go.getComponent(AudioSource)) return '[Aud]';
-        if (go.getComponent(Canvas)) return '[UI]';
-        if (go.getComponent(UIImage)) return '[Img]';
-        if (go.getComponent(UIText)) return '[Txt]';
-        if (go.getComponent(UIButton)) return '[Btn]';
-        if (go.getComponent(UIInputField)) return '[Inp]';
-        if (go.getComponent(UIDropdown)) return '[Drp]';
-        if (go.getComponent(UIToggle)) return '[Tgl]';
-        if (go.getComponent(UISlider)) return '[Sld]';
-        if (go.getComponent(UIScrollbar)) return '[Scr]';
-        if (go.getComponent(UIScrollRect)) return '[View]';
+        const componentNames = new Set(go.components.map((component) => component.constructor.name));
+        if (componentNames.has('Camera')) return '[Cam]';
+        if (componentNames.has('Light')) return '[Lit]';
+        if (componentNames.has('MeshRenderer')) return '[Mesh]';
+        if (componentNames.has('ParticleSystem')) return '[FX]';
+        if (componentNames.has('AudioSource')) return '[Aud]';
+        if (componentNames.has('Canvas')) return '[UI]';
+        if (componentNames.has('UIImage')) return '[Img]';
+        if (componentNames.has('UIText')) return '[Txt]';
+        if (componentNames.has('UIButton')) return '[Btn]';
+        if (componentNames.has('UIInputField')) return '[Inp]';
+        if (componentNames.has('UIDropdown')) return '[Drp]';
+        if (componentNames.has('UIToggle')) return '[Tgl]';
+        if (componentNames.has('UISlider')) return '[Sld]';
+        if (componentNames.has('UIScrollbar')) return '[Scr]';
+        if (componentNames.has('UIScrollRect')) return '[View]';
         return '[GO]';
     }
 }

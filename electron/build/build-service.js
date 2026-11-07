@@ -7,6 +7,25 @@ const { fork } = require('node:child_process');
 const { randomUUID } = require('node:crypto');
 const { BuildError, assertBuildRequest, serializeError } = require('./build-contract');
 
+const TRANSIENT_RENAME_ERROR_CODES = new Set(['EACCES', 'EBUSY', 'EPERM']);
+
+async function renameWithRetry(sourcePath, targetPath, {
+    rename = fs.promises.rename,
+    wait = (delayMs) => new Promise((resolve) => setTimeout(resolve, delayMs)),
+    maxAttempts = 8,
+    baseDelayMs = 25
+} = {}) {
+    for (let attempt = 1; ; attempt += 1) {
+        try {
+            await rename(sourcePath, targetPath);
+            return;
+        } catch (error) {
+            if (!TRANSIENT_RENAME_ERROR_CODES.has(error?.code) || attempt >= maxAttempts) throw error;
+            await wait(baseDelayMs * attempt);
+        }
+    }
+}
+
 class BuildService {
     constructor({ workerPath = path.join(__dirname, 'build-worker.js'), timeoutMs = 120_000, maxLogEntries = 500 } = {}) {
         this.workerPath = workerPath;
@@ -30,7 +49,12 @@ class BuildService {
         signal?.addEventListener('abort', cancel, { once: true });
         try {
             await fs.promises.rm(publishTemp, { recursive: true, force: true });
-            child = fork(this.workerPath, [], { stdio: ['ignore', 'ignore', 'ignore', 'ipc'] });
+            child = fork(this.workerPath, [], {
+                stdio: ['ignore', 'ignore', 'ignore', 'ipc'],
+                // When the editor is hosted by Electron, fork inherits electron.exe.
+                // Force its child into Node mode so it executes the build worker.
+                env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' }
+            });
             this.active.set(buildId, child);
             const result = await new Promise((resolve, reject) => {
                 let settled = false;
@@ -65,25 +89,31 @@ class BuildService {
                 if (signal?.aborted) cancel();
             });
             await fs.promises.mkdir(path.dirname(request.outputPath), { recursive: true });
-            await fs.promises.rename(workspacePath, publishTemp);
+            await renameWithRetry(workspacePath, publishTemp);
             let movedPrevious = false;
             try {
-                await fs.promises.rename(request.outputPath, previousOutput);
+                await renameWithRetry(request.outputPath, previousOutput);
                 movedPrevious = true;
             } catch (error) {
                 if (error.code !== 'ENOENT') throw error;
             }
             try {
-                await fs.promises.rename(publishTemp, request.outputPath);
+                await renameWithRetry(publishTemp, request.outputPath);
                 if (movedPrevious) await fs.promises.rm(previousOutput, { recursive: true, force: true });
             } catch (error) {
-                if (movedPrevious) await fs.promises.rename(previousOutput, request.outputPath).catch(() => {});
+                if (movedPrevious) await renameWithRetry(previousOutput, request.outputPath).catch(() => {});
                 throw error;
             }
             return Object.freeze({ buildId, manifest: result, outputPath: request.outputPath, logs: Object.freeze([...logs]) });
         } catch (error) {
             await fs.promises.rm(publishTemp, { recursive: true, force: true }).catch(() => {});
-            throw error instanceof BuildError ? error : new BuildError(serializeError(error).code, error.message);
+            if (error instanceof BuildError) throw error;
+            const serialized = serializeError(error);
+            throw new BuildError(
+                'BUILD_PUBLICATION_FAILED',
+                'The Windows player could not be published to the selected output folder.',
+                { cause: serialized.code }
+            );
         } finally {
             signal?.removeEventListener('abort', cancel);
             clearTimeout(timeout);
@@ -103,4 +133,4 @@ class BuildService {
     }
 }
 
-module.exports = Object.freeze({ BuildService });
+module.exports = Object.freeze({ BuildService, renameWithRetry });

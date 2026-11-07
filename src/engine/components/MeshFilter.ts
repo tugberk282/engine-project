@@ -40,7 +40,7 @@ export class MeshFilter extends Component {
                 this._geometry = new THREE.CapsuleGeometry(0.5, 1, 8, 16);
                 break;
             case 'Cylinder':
-                this._geometry = new THREE.CylinderGeometry(0.5, 0.5, 1, 32);
+                this._geometry = new THREE.CylinderGeometry(0.5, 0.5, 2, 32);
                 break;
             case 'Plane':
                 this._geometry = new THREE.PlaneGeometry(10, 10);

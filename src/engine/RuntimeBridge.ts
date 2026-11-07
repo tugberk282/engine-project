@@ -7,6 +7,7 @@ export interface RuntimeFailure {
 
 export interface RuntimeTransformState {
     id: string;
+    active?: boolean;
     position: [number, number, number];
     rotation: [number, number, number];
     scale: [number, number, number];
@@ -20,6 +21,9 @@ export interface RuntimeFrame {
     updateCount: number;
     transforms: RuntimeTransformState[];
     gameplay?: Record<string, unknown> | null;
+    lastUiEvent?: string | null;
+    lastUiEventPayload?: unknown;
+    uiText?: Array<{ id: string; text: string }>;
 }
 
 export interface RuntimeBridgeOptions {
@@ -57,8 +61,14 @@ export class RuntimeBridge {
         if (this.state === 'running') void this.request('runtime.tick', { deltaTime, input });
     }
 
-    public step(deltaTime: number): void {
-        void this.stepOnce(deltaTime);
+    public step(deltaTime: number, input: Record<string, number | boolean> = {}): void {
+        void this.stepOnce(deltaTime, input);
+    }
+
+    public uiEvent(name: string, value?: unknown): void {
+        if (typeof name === 'string' && name.length > 0 && name.length <= 128) {
+            void this.request('runtime.uiEvent', { name, value });
+        }
     }
 
     public restart(snapshot: string): void {
@@ -128,9 +138,13 @@ export class RuntimeBridge {
         }
     }
 
-    private async stepOnce(deltaTime: number): Promise<void> {
+    private async stepOnce(deltaTime: number, input: Record<string, number | boolean>): Promise<void> {
         if (this.state === 'running') await this.request('runtime.pause', {});
-        if (this.state === 'paused') await this.request('runtime.step', { deltaTime });
+        if (this.state === 'paused') {
+            // Step is a real simulation frame, so it must observe the same input
+            // snapshot as an unpaused tick (for example, a single-frame jump).
+            await this.request('runtime.step', { deltaTime, input });
+        }
     }
 
     private setState(state: RuntimeState): void {

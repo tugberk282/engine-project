@@ -89,15 +89,9 @@ export class Prefab {
      * Load prefab from JSON
      */
     public static fromJSON(json: string): Prefab {
-        try {
-            const parsed = JSON.parse(json);
-            const normalized = normalizePrefabData(parsed);
-            return this.createFromData(normalized.name, normalized.data, normalized.version, normalized.prefabId);
-        } catch (error) {
-            console.error('Failed to parse prefab JSON. Falling back to empty prefab root.', error);
-            const fallback = normalizePrefabData(null);
-            return this.createFromData(fallback.name, fallback.data, fallback.version, fallback.prefabId);
-        }
+        const parsed = JSON.parse(json);
+        const normalized = normalizePrefabData(parsed);
+        return this.createFromData(normalized.name, normalized.data, normalized.version, normalized.prefabId);
     }
 
     private static createFromData(name: string, data: SerializedGameObjectData, schemaVersion: string, prefabId: string): Prefab {
@@ -222,15 +216,31 @@ export class PrefabManager {
         this.prefabs.set(name, prefab);
 
         // Save to Filesystem if available
-        if (this.desktopFileSystem) {
+        if (this.desktopFileSystem.isAvailable()) {
             const assetsPath = this.getAssetsPath();
             if (!await this.desktopFileSystem.exists(assetsPath)) await this.desktopFileSystem.mkdir(assetsPath);
 
             const filePath = PathUtils.join(assetsPath, `${name}.prefab`);
             prefab.sourcePath = filePath;
             await this.desktopFileSystem.writeFile(filePath, prefab.toJSON());
+            const meta = await AssetDatabase.getInstance().updateMeta(filePath, (current) => {
+                current.importer = { name: 'PrefabImporter', version: 1, settings: current.importer.settings };
+            });
+            if (meta) {
+                // Keep the authored root linked to the asset just created. The link is
+                // required for inspector overrides and apply/revert to survive reloads.
+                gameObject.prefabSource = name;
+                gameObject.sourceAssetPath = filePath;
+                gameObject.sourceAssetGuid = meta.guid;
+                gameObject.sourceAssetType = 'prefab';
+
+                const linkedPrefab = new Prefab(name, gameObject);
+                linkedPrefab.sourcePath = filePath;
+                this.prefabs.set(name, linkedPrefab);
+                await this.desktopFileSystem.writeFile(filePath, linkedPrefab.toJSON(), 'utf8');
+            }
             console.log(`Saved prefab to ${filePath}`);
-        } else {
+        } else if (typeof localStorage !== 'undefined') {
             // Fallback to localStorage
             localStorage.setItem(`prefab_${name}`, prefab.toJSON());
         }
@@ -243,7 +253,27 @@ export class PrefabManager {
         const prefab = new Prefab(prefabName, gameObject);
         prefab.sourcePath = targetPath;
         this.prefabs.set(prefabName, prefab);
+        if (!this.desktopFileSystem.isAvailable()) {
+            if (typeof localStorage !== 'undefined') {
+                localStorage.setItem(`prefab_${prefabName}`, prefab.toJSON());
+            }
+            gameObject.prefabSource = prefabName;
+            gameObject.sourceAssetPath = null;
+            gameObject.sourceAssetType = 'prefab';
+            return null;
+        }
+        const parentPath = PathUtils.dirname(targetPath);
+        if (parentPath && !await this.desktopFileSystem.exists(parentPath)) {
+            await this.desktopFileSystem.mkdir(parentPath, { recursive: true });
+        }
         await this.desktopFileSystem.writeFile(targetPath, prefab.toJSON(), 'utf8');
+        const meta = await AssetDatabase.getInstance().updateMeta(targetPath, (current) => {
+            current.importer = { name: 'PrefabImporter', version: 1, settings: current.importer.settings };
+        });
+        gameObject.prefabSource = prefabName;
+        gameObject.sourceAssetPath = targetPath;
+        gameObject.sourceAssetType = 'prefab';
+        gameObject.sourceAssetGuid = meta?.guid ?? AssetDatabase.getInstance().getGuid(targetPath) ?? gameObject.sourceAssetGuid;
         return targetPath;
     }
 
@@ -254,7 +284,7 @@ export class PrefabManager {
         }
 
         // Try Filesystem if available
-        if (this.desktopFileSystem) {
+        if (this.desktopFileSystem.isAvailable()) {
             const assetsPath = this.getAssetsPath();
             const filePath = PathUtils.join(assetsPath, `${name}.prefab`);
 
@@ -272,11 +302,17 @@ export class PrefabManager {
         }
 
         // Fallback to localStorage
-        const json = localStorage.getItem(`prefab_${name}`);
-        if (json) {
-            const prefab = Prefab.fromJSON(json);
-            this.prefabs.set(name, prefab);
-            return prefab;
+        if (typeof localStorage !== 'undefined') {
+            const json = localStorage.getItem(`prefab_${name}`);
+            if (json) {
+                try {
+                    const prefab = Prefab.fromJSON(json);
+                    this.prefabs.set(name, prefab);
+                    return prefab;
+                } catch (err) {
+                    console.error(`Failed to load local prefab '${name}'`, err);
+                }
+            }
         }
 
         return null;
@@ -337,7 +373,7 @@ export class PrefabManager {
             gameObject.transform.scale.fromArray(normalizedData.transform.scale);
         }
 
-        const toDestroy = gameObject.components.filter(c => c.constructor.name !== 'Transform');
+        const toDestroy = gameObject.components.filter((component) => component !== gameObject.transform);
         toDestroy.forEach(c => gameObject.removeComponent(c));
 
         normalizedData.components.forEach((compData: SerializedComponentData) => {
@@ -441,7 +477,7 @@ export class PrefabManager {
         const names: Set<string> = new Set();
 
         // Get from Filesystem
-        if (this.desktopFileSystem) {
+        if (this.desktopFileSystem.isAvailable()) {
             const assetsPath = this.getAssetsPath();
             if (await this.desktopFileSystem.exists(assetsPath)) {
                 const files = await this.desktopFileSystem.readdir(assetsPath);
@@ -454,10 +490,12 @@ export class PrefabManager {
         }
 
         // Get from localStorage
-        for (let i = 0; i < localStorage.length; i++) {
-            const key = localStorage.key(i);
-            if (key && key.startsWith('prefab_')) {
-                names.add(key.replace('prefab_', ''));
+        if (typeof localStorage !== 'undefined') {
+            for (let i = 0; i < localStorage.length; i++) {
+                const key = localStorage.key(i);
+                if (key && key.startsWith('prefab_')) {
+                    names.add(key.replace('prefab_', ''));
+                }
             }
         }
 
@@ -467,7 +505,7 @@ export class PrefabManager {
     public static async deletePrefab(name: string): Promise<void> {
         this.prefabs.delete(name);
 
-        if (this.desktopFileSystem) {
+        if (this.desktopFileSystem.isAvailable()) {
             const assetsPath = this.getAssetsPath();
             const filePath = PathUtils.join(assetsPath, `${name}.prefab`);
             if (await this.desktopFileSystem.exists(filePath)) {
@@ -479,7 +517,7 @@ export class PrefabManager {
             }
         }
 
-        localStorage.removeItem(`prefab_${name}`);
+        if (typeof localStorage !== 'undefined') localStorage.removeItem(`prefab_${name}`);
     }
 
     public static async revertToPrefab(gameObject: GameObject, prefabRootOverride: GameObject | null = null): Promise<void> {
@@ -527,7 +565,7 @@ export class PrefabManager {
     public static async revertComponentToPrefab(gameObject: GameObject, component: any, prefabRootOverride: GameObject | null = null): Promise<void> {
         const prefabData = await this.getPrefabNodeDataForGameObject(gameObject, prefabRootOverride);
         if (!prefabData) return;
-        const typeName = component.constructor.name;
+        const typeName = ScriptRegistry.getComponentName(component);
 
         if (typeName === 'Transform' || typeName === 'RectTransform') {
             gameObject.transform.position.fromArray(prefabData.transform.position);
@@ -553,7 +591,7 @@ export class PrefabManager {
         const prefabData = await this.getPrefabNodeDataForGameObject(gameObject, prefabRootOverride);
         if (!prefabData?.components) return;
 
-        const existing = gameObject.components.find((component) => component.constructor.name === componentType);
+        const existing = gameObject.components.find((component) => ScriptRegistry.getComponentName(component) === componentType);
         if (existing) return;
 
         const compData = prefabData.components.find((component: any) => component.type === componentType);
@@ -704,10 +742,23 @@ export class PrefabManager {
             ? prefabRootOverride
             : this.getPrefabOwningRoot(gameObject);
         if (!prefabRoot) return null;
-        const prefab = prefabRoot.sourceAssetPath
-            ? await this.loadPrefabFromPath(prefabRoot.sourceAssetPath)
+        const resolvedSourcePath = this.resolvePrefabSourcePath(prefabRoot);
+        const prefab = resolvedSourcePath
+            ? await this.loadPrefabFromPath(resolvedSourcePath)
             : await this.loadPrefab(prefabRoot.prefabSource!);
         return prefab ? (prefab as any).data : null;
+    }
+
+    public static resolvePrefabSourcePath(prefabRoot: GameObject): string | null {
+        const guidPath = prefabRoot.sourceAssetGuid
+            ? AssetDatabase.getInstance().getPath(prefabRoot.sourceAssetGuid)
+            : null;
+        if (guidPath) {
+            prefabRoot.sourceAssetPath = guidPath;
+            prefabRoot.sourceAssetType = 'prefab';
+            return guidPath;
+        }
+        return prefabRoot.sourceAssetPath;
     }
 
     public static async getPrefabNodeDataForGameObject(gameObject: GameObject, prefabRootOverride: GameObject | null = null): Promise<any | null> {
@@ -738,7 +789,7 @@ export class PrefabManager {
         return this.findCurrentChildByPath(root, childPath);
     }
 
-    private static async resolveComponentPayloadForInstance(
+    public static async resolveComponentPayloadForInstance(
         gameObject: GameObject,
         data: unknown,
         prefabRootOverride: GameObject | null = null
@@ -754,7 +805,7 @@ export class PrefabManager {
         return {};
     }
 
-    private static async buildInstancePrefabReferenceMap(
+    public static async buildInstancePrefabReferenceMap(
         gameObject: GameObject,
         prefabRootOverride: GameObject | null = null
     ): Promise<Map<string, GameObject>> {
@@ -806,8 +857,9 @@ export class PrefabManager {
             : this.getPrefabOwningRoot(gameObject);
         if (!prefabRoot) return;
 
-        const prefab = prefabRoot.sourceAssetPath
-            ? await this.loadPrefabFromPath(prefabRoot.sourceAssetPath)
+        const resolvedSourcePath = this.resolvePrefabSourcePath(prefabRoot);
+        const prefab = resolvedSourcePath
+            ? await this.loadPrefabFromPath(resolvedSourcePath)
             : await this.loadPrefab(prefabRoot.prefabSource!);
         if (!prefab) return;
 
@@ -823,10 +875,18 @@ export class PrefabManager {
         this.prefabs.set(prefab.name, prefab);
         if (prefab.sourcePath) {
             await this.desktopFileSystem.writeFile(prefab.sourcePath, prefab.toJSON(), 'utf8');
+            await AssetDatabase.getInstance().updateMeta(prefab.sourcePath, (current) => {
+                current.importer = { name: 'PrefabImporter', version: 1, settings: current.importer.settings };
+            });
             return;
         }
 
-        localStorage.setItem(`prefab_${prefab.name}`, prefab.toJSON());
+        if (typeof localStorage !== 'undefined') {
+            localStorage.setItem(`prefab_${prefab.name}`, prefab.toJSON());
+            return;
+        }
+
+        throw new Error(`Cannot persist prefab '${prefab.name}': no desktop filesystem or browser storage is available`);
     }
 
     private static findPrefabChildDataByPath(prefabData: any, childPath: string): any | null {

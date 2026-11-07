@@ -15,6 +15,7 @@ import { GameObject } from '../engine/GameObject';
 import { Camera, type CameraClearFlags } from '../engine/components/Camera';
 import { Light, LightType } from '../engine/components/Light';
 import { AudioSource } from '../engine/components/AudioSource';
+import { AudioListener } from '../engine/components/AudioListener';
 import { Canvas } from '../engine/components/Canvas';
 import { EventSystem } from '../engine/components/EventSystem';
 import { GraphicRaycaster } from '../engine/components/GraphicRaycaster';
@@ -38,6 +39,7 @@ import { Component } from '../engine/Component';
 import { PlayModeManager } from '../engine/PlayModeManager';
 import { EditorCameraController } from '../engine/components/EditorCameraController';
 import { ScriptRegistry } from '../engine/ScriptRegistry';
+import { registerBuiltinComponents } from '../engine/BuiltinComponentRegistration';
 import { Prefab, PrefabManager } from '../engine/Prefab';
 import { CommandHistory, DuplicateGameObjectCommand, GroupCommand, type Command } from './Command';
 import { AddComponentCommand, CreateGameObjectCommand, DeleteGameObjectCommand, ReparentGameObjectCommand } from './LifecycleCommands';
@@ -234,9 +236,11 @@ export class Editor {
         // Initialize Core Systems first
         this.clock = new THREE.Clock();
         ProjectSettings.load();
+        Input.configureProjectAxes(ProjectSettings.inputAxes.entries());
         this.scene = SceneManager.getInstance().newScene();
         EditorSettings.load();
         Input.initialize();
+        registerBuiltinComponents();
         ScriptRegistry.initialize();
         this.desktopBridge = new DesktopBridge();
         this.fs = new DesktopFileSystem();
@@ -6409,7 +6413,7 @@ export class Editor {
         const previousSelection = this.captureSelectionSnapshot();
         const previousSourceJson = await this.readTextFileIfExists(sourcePath);
 
-        const didMutate = mutate();
+        const didMutate = await mutate();
 
         const nextSnapshot = this.scene.toJSON();
         const nextPath = SceneManager.getInstance().getActiveScenePath();
@@ -6427,7 +6431,7 @@ export class Editor {
             return;
         }
 
-        CommandHistory.execute({
+        await CommandHistory.execute({
             name,
             execute:  async() => {
                 await this.restorePrefabSourceSnapshot(sourcePath, nextSourceJson);
@@ -6613,6 +6617,7 @@ export class Editor {
             mr.mesh.geometry = new THREE.PlaneGeometry(1, 1);
         } else if (type === 'Camera') {
             go.addComponent(Camera);
+            go.addComponent(AudioListener);
         } else if (type === 'Light') {
             const light = go.addComponent(Light);
             light.setLightType(LightType.Directional);
@@ -7921,7 +7926,7 @@ export class Editor {
 
         const deltaTime = this.clock.getDelta();
         this.updatePerformanceMetrics(deltaTime);
-        Input.update(deltaTime);
+        this.updateInputFrame(deltaTime);
 
         if (this.isPlaying && (!this.isPaused || this.stepRequest)) {
             this.playMode.update();
@@ -7964,6 +7969,10 @@ export class Editor {
             this.updateStatsOverlay();
             this.statsTimer = 0;
         }
+    }
+
+    private updateInputFrame(deltaTime: number): void {
+        Input.update(Math.max(0, Number.isFinite(deltaTime) ? deltaTime : 0));
     }
 
     private statsOverlay: HTMLElement | null = null;
@@ -8438,6 +8447,119 @@ export class Editor {
         };
     }
 
+    public async getPrefabSourceStatus(gameObject: GameObject): Promise<{
+        state: 'connected' | 'missing' | 'invalid';
+        sourcePath: string | null;
+        message: string;
+    }> {
+        const prefabRoot = this.getPrefabApplyTargetRoot(gameObject);
+        if (!prefabRoot) {
+            return { state: 'missing', sourcePath: null, message: 'Prefab source identity is missing.' };
+        }
+
+        const sourcePath = PrefabManager.resolvePrefabSourcePath(prefabRoot);
+        if (!sourcePath || !await this.fs.exists(sourcePath)) {
+            return {
+                state: 'missing',
+                sourcePath,
+                message: sourcePath
+                    ? `Prefab source is missing: ${PathUtils.basename(sourcePath)}`
+                    : 'Prefab source path is missing.'
+            };
+        }
+
+        const prefab = await PrefabManager.loadPrefabFromPath(sourcePath);
+        return prefab
+            ? { state: 'connected', sourcePath, message: `Connected: ${PathUtils.basename(sourcePath)}` }
+            : { state: 'invalid', sourcePath, message: `Prefab source is invalid: ${PathUtils.basename(sourcePath)}` };
+    }
+
+    public async repairPrefabSource(gameObject: GameObject): Promise<boolean> {
+        const prefabRoot = this.getPrefabApplyTargetRoot(gameObject);
+        if (!prefabRoot) return false;
+
+        const result = await this.electronAPI?.showOpenDialog?.({
+            title: 'Repair Prefab Source',
+            defaultPath: this.rootPath || undefined,
+            filters: [{ name: 'Prefab Assets', extensions: ['prefab'] }],
+            properties: ['openFile']
+        });
+        const selectedPath = typeof result?.filePath === 'string' && result.filePath.length > 0
+            ? result.filePath
+            : (Array.isArray(result?.filePaths) && result.filePaths.length > 0 ? result.filePaths[0] : null);
+        if (result?.canceled || !selectedPath) return false;
+
+        const relativePath = PathUtils.relative(this.rootPath, selectedPath).replace(/\\/g, '/');
+        const isInsideAssets = relativePath !== '..'
+            && !relativePath.startsWith('../')
+            && !/^[A-Za-z]:/.test(relativePath)
+            && PathUtils.extname(selectedPath).toLowerCase() === '.prefab';
+        if (!isInsideAssets) {
+            console.error('Prefab repair requires a .prefab asset inside the current project Assets folder.');
+            return false;
+        }
+
+        const prefab = await PrefabManager.loadPrefabFromPath(selectedPath);
+        if (!prefab) {
+            console.error(`Cannot repair prefab source from invalid asset '${selectedPath}'.`);
+            return false;
+        }
+
+        const sourceGuid = AssetDatabase.getInstance().getGuid(selectedPath) ?? null;
+        this.executeSceneMutationCommand(`Repair Prefab Source (${prefabRoot.name})`, () => {
+            prefabRoot.prefabSource = PathUtils.basename(selectedPath, '.prefab');
+            prefabRoot.sourceAssetPath = selectedPath;
+            prefabRoot.sourceAssetGuid = sourceGuid;
+            prefabRoot.sourceAssetType = 'prefab';
+            return true;
+        });
+        this.hierarchyWindow.refresh();
+        this.inspectorWindow.refresh();
+        return true;
+    }
+
+    public unpackPrefabInstance(gameObject: GameObject, completely = false): void {
+        const prefabRoot = this.getPrefabApplyTargetRoot(gameObject);
+        if (!prefabRoot) return;
+
+        this.executeSceneMutationCommand(
+            completely ? `Unpack Prefab Completely (${prefabRoot.name})` : `Unpack Prefab (${prefabRoot.name})`,
+            () => {
+                const clearLink = (target: GameObject): void => {
+                    target.prefabSource = null;
+                    target.sourceAssetPath = null;
+                    target.sourceAssetGuid = null;
+                    target.sourceAssetType = null;
+                    target.overrides.clear();
+                };
+                const walk = (target: GameObject, isRoot: boolean): void => {
+                    if (!isRoot && !completely && PrefabManager.getPrefabOwnershipChain(target)[0] === target) {
+                        return;
+                    }
+                    clearLink(target);
+                    target.transform.children.forEach((child) => walk(child.gameObject, false));
+                };
+                walk(prefabRoot, true);
+
+                const subtreeIds = new Set<string>();
+                const collectIds = (target: GameObject): void => {
+                    subtreeIds.add(target.id);
+                    target.transform.children.forEach((child) => collectIds(child.gameObject));
+                };
+                collectIds(prefabRoot);
+                for (const [selectionId, rootId] of this.prefabApplyTargetRootIds) {
+                    if (subtreeIds.has(selectionId) || rootId === prefabRoot.id) {
+                        this.prefabApplyTargetRootIds.delete(selectionId);
+                    }
+                }
+                this.persistPrefabApplyTargetRootPreferences();
+                return true;
+            }
+        );
+        this.hierarchyWindow.refresh();
+        this.inspectorWindow.refresh();
+    }
+
     public async isPropertyOverridden(target: any, propertyKey: string): Promise<boolean> {
         const gameObject = target instanceof GameObject ? target : target?.gameObject;
         const prefabRoot = gameObject ? this.getPrefabApplyTargetRoot(gameObject) : null;
@@ -8465,7 +8587,7 @@ export class Editor {
             return false;
         }
 
-        const componentData = await this.getPrefabComponentData(gameObject, target.constructor?.name, prefabRoot);
+        const componentData = await this.getPrefabComponentData(gameObject, ScriptRegistry.getComponentName(target), prefabRoot);
         if (!componentData) return true;
 
         const serializedTarget = target.serialize?.().data ?? {};
@@ -8481,12 +8603,13 @@ export class Editor {
         if (!prefabData) return 'default';
 
         if (component === gameObject.transform) {
-            return ['position', 'rotation', 'scale'].some( async(key) => await this.isPropertyOverridden(component, key))
-                ? 'overridden'
-                : 'default';
+            for (const key of ['position', 'rotation', 'scale'] as const) {
+                if (await this.isPropertyOverridden(component, key)) return 'overridden';
+            }
+            return 'default';
         }
 
-        const componentData = await this.getPrefabComponentData(gameObject, component.constructor?.name, prefabRoot);
+        const componentData = await this.getPrefabComponentData(gameObject, ScriptRegistry.getComponentName(component), prefabRoot);
         if (!componentData) return 'added';
 
         const serializedTarget = component.serialize?.().data ?? {};
@@ -8505,26 +8628,26 @@ export class Editor {
         let addedComponents = 0;
         let removedComponents = 0;
 
-        ['name', 'tag', 'layer', 'isStatic', 'enabled'].forEach( async(key) => {
+        for (const key of ['name', 'tag', 'layer', 'isStatic', 'enabled'] as const) {
             if (await this.isPropertyOverridden(gameObject, key)) total += 1;
-        });
+        }
 
-        ['position', 'rotation', 'scale'].forEach( async(key) => {
+        for (const key of ['position', 'rotation', 'scale'] as const) {
             if (await this.isPropertyOverridden(gameObject.transform, key)) total += 1;
-        });
+        }
 
-        gameObject.components.forEach( async(component) => {
-            if (component === gameObject.transform) return;
+        for (const component of gameObject.components) {
+            if (component === gameObject.transform) continue;
             const status = await this.getPrefabComponentStatus(component);
-            if (status === 'default') return;
+            if (status === 'default') continue;
             total += 1;
             if (status === 'added') addedComponents += 1;
-        });
+        }
 
         const prefabData = await this.getPrefabSourceData(gameObject, prefabRoot);
         if (prefabData?.components) {
             prefabData.components.forEach((componentData: any) => {
-                const exists = gameObject.components.some((component) => component.constructor.name === componentData.type);
+                const exists = gameObject.components.some((component) => ScriptRegistry.getComponentName(component) === componentData.type);
                 if (!exists) {
                     total += 1;
                     removedComponents += 1;
@@ -8544,7 +8667,7 @@ export class Editor {
 
         const contextInfo = this.getPrefabContextInfo(gameObject);
         const entries: Array<Record<string, any>> = [];
-        ['name', 'tag', 'layer', 'isStatic', 'enabled'].forEach( async(key) => {
+        for (const key of ['name', 'tag', 'layer', 'isStatic', 'enabled'] as const) {
             if (await this.isPropertyOverridden(gameObject, key)) {
                 entries.push({
                     key: `go:${key}`,
@@ -8555,9 +8678,9 @@ export class Editor {
                     targetNodeLabel: contextInfo?.nodeLabel ?? gameObject.name
                 });
             }
-        });
+        }
 
-        ['position', 'rotation', 'scale'].forEach( async(key) => {
+        for (const key of ['position', 'rotation', 'scale'] as const) {
             if (await this.isPropertyOverridden(gameObject.transform, key)) {
                 entries.push({
                     key: `transform:${key}`,
@@ -8568,27 +8691,27 @@ export class Editor {
                     targetNodeLabel: contextInfo?.nodeLabel ?? gameObject.name
                 });
             }
-        });
+        }
 
-        gameObject.components.forEach( async(component) => {
-            if (component === gameObject.transform) return;
+        for (const component of gameObject.components) {
+            if (component === gameObject.transform) continue;
             const status = await this.getPrefabComponentStatus(component);
-            if (status === 'default') return;
+            if (status === 'default') continue;
 
             entries.push({
                 key: `component:${component.id}`,
-                label: component.constructor.name,
+                label: ScriptRegistry.getComponentName(component),
                 kind: status === 'added' ? 'component-added' : 'component-overridden',
                 component,
                 targetAssetLabel: contextInfo?.assetLabel ?? null,
                 targetNodeLabel: contextInfo?.nodeLabel ?? gameObject.name
             });
-        });
+        }
 
         const prefabData = await this.getPrefabSourceData(gameObject, prefabRoot);
         if (prefabData?.components) {
             prefabData.components.forEach((componentData: any) => {
-                const exists = gameObject.components.some((component) => component.constructor.name === componentData.type);
+                const exists = gameObject.components.some((component) => ScriptRegistry.getComponentName(component) === componentData.type);
                 if (!exists) {
                     entries.push({
                         key: `missing:${componentData.type}`,
@@ -8717,9 +8840,9 @@ export class Editor {
                 const entries = await this.getBulkPrefabOverrideEntries(gameObject, sourceEntries);
                 let didMutate = false;
 
-                entries.forEach( async(entry) => {
+                for (const entry of entries) {
                     didMutate = await this.executePrefabOverrideAction(gameObject, entry, mode) || didMutate;
-                });
+                }
 
                 await this.finalizePrefabOverrideMutation(gameObject, mode, didMutate);
                 return didMutate;
@@ -8733,9 +8856,9 @@ export class Editor {
                 const entries = await this.getBulkPrefabOverrideEntries(gameObject, sourceEntries);
                 let didMutate = false;
 
-                entries.forEach( async(entry) => {
+                for (const entry of entries) {
                     didMutate = await this.executePrefabOverrideAction(gameObject, entry, mode) || didMutate;
-                });
+                }
 
                 await this.finalizePrefabOverrideMutation(gameObject, mode, didMutate);
                 return didMutate;
@@ -8746,9 +8869,9 @@ export class Editor {
         const entries = await this.getBulkPrefabOverrideEntries(gameObject, sourceEntries);
         let didMutate = false;
 
-        entries.forEach( async(entry) => {
+        for (const entry of entries) {
             didMutate = await this.executePrefabOverrideAction(gameObject, entry, mode) || didMutate;
-        });
+        }
 
         await this.finalizePrefabOverrideMutation(gameObject, mode, didMutate);
     }
@@ -8846,7 +8969,7 @@ export class Editor {
             await this.executePrefabBackedSceneMutationCommand(`Apply Prefab ${prefabRoot.name}`, prefabRoot.sourceAssetPath,  async() => {
                 const targetPath = await this.projectWindow.savePrefabInstanceToSource(prefabRoot);
                 if (!targetPath) return false;
-                this.syncPrefabInstancesFromSource(targetPath);
+                await this.syncPrefabInstancesFromSource(targetPath);
                 await this.projectWindow.refreshAssetRuntime(targetPath);
                 this.hierarchyWindow.refresh();
                 this.inspectorWindow.refresh();
@@ -8857,7 +8980,7 @@ export class Editor {
 
         const targetPath = await this.projectWindow.savePrefabInstanceToSource(prefabRoot);
         if (!targetPath) return;
-        this.syncPrefabInstancesFromSource(targetPath);
+        await this.syncPrefabInstancesFromSource(targetPath);
         await this.projectWindow.refreshAssetRuntime(targetPath);
         this.hierarchyWindow.refresh();
         this.inspectorWindow.refresh();
@@ -8999,6 +9122,10 @@ export class Editor {
 
     public isRuntimeUIInputEnabled(): boolean {
         return this.isPlaying && this.isGameView;
+    }
+
+    public getRuntimeInputSnapshot(): Record<string, number | boolean> {
+        return Input.snapshot();
     }
 
     public resolveCanvasRenderCamera(preferredGameObject?: GameObject | null): THREE.Camera | null {
@@ -9274,17 +9401,7 @@ export class Editor {
     }
 
     private getRuntimeCamerasInStackOrder(): Camera[] {
-        const depthOrdered = this.getRuntimeCamerasInDepthOrder();
-        const sortedEntries = depthOrdered
-            .map((camera) => {
-                const go = camera.gameObject;
-                return {
-                    go,
-                    index: this.scene.gameObjects.indexOf(go),
-                    camera
-                };
-            })
-            .filter((entry) => entry.index >= 0);
+        const sortedEntries = this.getRuntimeCameraEntries();
 
         const baseEntries = sortedEntries.filter((entry) =>
             entry.camera.renderType !== 'Overlay'
@@ -9320,21 +9437,23 @@ export class Editor {
         return ordered;
     }
 
-    private getRuntimeCamerasInDepthOrder(): Camera[] {
+    private getRuntimeCameraEntries(): Array<{ go: GameObject; index: number; camera: Camera }> {
         const runtimeEntries: Array<{ go: GameObject; index: number; camera: Camera }> = [];
-        this.scene.gameObjects.forEach((go, index) => {
+        let hierarchyIndex = 0;
+        const visit = (go: GameObject): void => {
+            const index = hierarchyIndex++;
             const camera = go.getComponent(Camera);
-            if (!camera || !camera.camera || !go.enabled || !camera.enabled) return;
-            runtimeEntries.push({ go, index, camera });
+            if (camera?.camera && go.isActiveInHierarchy() && camera.enabled) {
+                runtimeEntries.push({ go, index, camera });
+            }
+            go.transform.children.forEach((child) => visit(child.gameObject));
+        };
+        this.scene.gameObjects.forEach(visit);
+        return runtimeEntries.sort((left, right) => {
+            const depthDelta = (left.camera.depth ?? 0) - (right.camera.depth ?? 0);
+            if (depthDelta !== 0) return depthDelta;
+            return left.index - right.index;
         });
-
-        return runtimeEntries
-            .sort((left, right) => {
-                const depthDelta = (left.camera.depth ?? 0) - (right.camera.depth ?? 0);
-                if (depthDelta !== 0) return depthDelta;
-                return left.index - right.index;
-            })
-            .map((entry) => entry.camera);
     }
 
     private syncRuntimeLayerAssignments(): void {
@@ -9577,7 +9696,7 @@ export class Editor {
         if (mode === 'apply') {
             const prefabRoot = this.getPrefabApplyTargetRoot(gameObject);
             if (prefabRoot?.sourceAssetPath) {
-                this.syncPrefabInstancesFromSource(prefabRoot.sourceAssetPath);
+                await this.syncPrefabInstancesFromSource(prefabRoot.sourceAssetPath);
                 await this.projectWindow.refreshAssetRuntime(prefabRoot.sourceAssetPath);
             }
         }
@@ -9658,13 +9777,13 @@ export class Editor {
         return entries;
     }
 
-    private syncPrefabInstancesFromSource(sourcePath: string) {
-        this.scene.gameObjects.forEach( async(candidate) => {
-            if (candidate.sourceAssetType !== 'prefab') return;
-            if (!candidate.sourceAssetPath) return;
-            if (candidate.sourceAssetPath !== sourcePath) return;
+    private async syncPrefabInstancesFromSource(sourcePath: string): Promise<void> {
+        for (const candidate of this.scene.gameObjects) {
+            if (candidate.sourceAssetType !== 'prefab') continue;
+            if (!candidate.sourceAssetPath) continue;
+            if (candidate.sourceAssetPath !== sourcePath) continue;
             await PrefabManager.revertToPrefab(candidate);
-        });
+        }
     }
 
     private initializeThemeMenu() {

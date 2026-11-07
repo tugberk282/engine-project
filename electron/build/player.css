@@ -1,0 +1,11 @@
+html, body, #game { margin: 0; width: 100%; height: 100%; overflow: hidden; background: #111; color: #fff; font: 16px sans-serif; }
+#game { position: relative; }
+#game > canvas { display: block; width: 100%; height: 100%; }
+#player-hud { position: absolute; inset: 0; padding: 16px; pointer-events: none; }
+#player-hud > div { pointer-events: none; }
+#player-ui-controls { position: absolute; inset: 0; pointer-events: none; }
+#player-ui-controls label { display: block; box-sizing: border-box; color: #fff; text-shadow: 0 1px 2px #000; }
+#player-ui-controls input, #player-ui-controls select, #player-ui-controls button { pointer-events: auto; box-sizing: border-box; max-width: 100%; }
+#player-hud h1 { font-size: 18px; }
+#player-hud h1, #player-hud p { margin: 8px 0; }
+#player-hud button { pointer-events: auto; margin: 4px 6px 0 0; padding: 6px 10px; }

@@ -72,7 +72,10 @@
     },
     {
       "children": [],
-      "components": [{ "type": "GameplayUI", "data": { "scorePerCollectible": 100, "showGoal": true, "showStatus": true } }],
+      "components": [
+        { "type": "GameplayUI", "data": { "scorePerCollectible": 100, "showGoal": true, "showStatus": true, "buttons": [{ "label": "Restart", "event": "Restart" }, { "label": "Next Scene", "event": "NextScene" }] } },
+        { "type": "UIEventAction", "data": { "eventName": "NextScene", "action": "LoadScene", "scenePath": "Assets/Scenes/JumpPractice.scene.json" } }
+      ],
       "enabled": true,
       "id": "object-gameplay-ui",
       "name": "Goal and Status HUD",

@@ -214,6 +214,7 @@ export class InspectorWindow extends EditorWindow {
                     <span style="font-size: 9px; color: var(--unity-text-dim);">Target Node: ${escapeHtml(prefabContext.nodeLabel)}</span>
                     <span style="font-size: 9px; color: var(--unity-text-dim);">Context Root: ${escapeHtml(prefabContext.contextRootLabel)}</span>
                     <span style="font-size: 9px; color: var(--unity-text-dim);">${statusText}</span>
+                    <span id="prefab-source-status" role="status" aria-live="polite" style="font-size: 9px; color: var(--unity-text-dim);">Source: checking...</span>
                     ${isContextRoot ? '' : `<span style="font-size: 9px; color: #d8c07a;">Child selection in ${escapeHtml(prefabContext.contextRootLabel)}. Use item-level Apply or jump to the root.</span>`}
                     ${prefabContext.isApplyTargetContextRoot ? '' : `<span style="font-size: 9px; color: #d8c07a;">Apply target switched to outer owner.</span>`}
                 </div>
@@ -222,6 +223,9 @@ export class InspectorWindow extends EditorWindow {
                     ${isContextRoot ? '' : `<button class="unity-button" style="font-size: 9px; padding: 1px 6px;" id="prefab-root">Root</button>`}
                     <button class="unity-button" style="font-size: 9px; padding: 1px 6px;" id="prefab-apply">${topApplyLabel}</button>
                     <button class="unity-button" style="font-size: 9px; padding: 1px 6px;" id="prefab-revert">${topRevertLabel}</button>
+                    <button class="unity-button" style="font-size: 9px; padding: 1px 6px; display: none;" id="prefab-repair">Repair</button>
+                    <button class="unity-button" style="font-size: 9px; padding: 1px 6px;" id="prefab-unpack">Unpack</button>
+                    <button class="unity-button" style="font-size: 9px; padding: 1px 6px;" id="prefab-unpack-completely">Unpack Completely</button>
                 </div>
             `;
             content.insertBefore(prefabBar, header);
@@ -264,6 +268,41 @@ export class InspectorWindow extends EditorWindow {
             revertBtn.title = isApplyTargetSelection
                 ? 'Revert this prefab root from its source'
                 : 'Revert the selected subtree from the chosen target prefab';
+
+            const repairBtn = prefabBar.querySelector('#prefab-repair') as HTMLButtonElement;
+            const unpackBtn = prefabBar.querySelector('#prefab-unpack') as HTMLButtonElement;
+            const unpackCompletelyBtn = prefabBar.querySelector('#prefab-unpack-completely') as HTMLButtonElement;
+            const sourceStatus = prefabBar.querySelector('#prefab-source-status') as HTMLSpanElement;
+            repairBtn.onclick = async () => {
+                repairBtn.disabled = true;
+                await editor?.repairPrefabSource?.(go);
+                if (this.selection === go) this.refresh();
+            };
+            repairBtn.title = 'Reconnect this instance to a valid prefab asset inside the current project';
+            unpackBtn.onclick = () => editor?.unpackPrefabInstance?.(go, false);
+            unpackBtn.title = 'Remove this prefab connection while preserving nested prefab connections';
+            unpackCompletelyBtn.onclick = () => editor?.unpackPrefabInstance?.(go, true);
+            unpackCompletelyBtn.title = 'Remove this prefab connection and every nested prefab connection below it';
+
+            openBtn.disabled = true;
+            applyBtn.disabled = true;
+            revertBtn.disabled = true;
+            void editor?.getPrefabSourceStatus?.(go).then((status: Record<string, any>) => {
+                if (this.selection !== go || !prefabBar.isConnected) return;
+                const connected = status?.state === 'connected';
+                sourceStatus.innerText = status?.message ?? 'Prefab source status is unavailable.';
+                sourceStatus.style.color = connected ? '#78c98d' : '#e3a35f';
+                openBtn.disabled = !connected;
+                applyBtn.disabled = !connected;
+                revertBtn.disabled = !connected;
+                repairBtn.style.display = connected ? 'none' : '';
+            }).catch((error: unknown) => {
+                if (this.selection !== go || !prefabBar.isConnected) return;
+                sourceStatus.innerText = 'Prefab source status could not be checked.';
+                sourceStatus.style.color = '#e36a6a';
+                repairBtn.style.display = '';
+                console.error('Failed to inspect prefab source', error);
+            });
 
             const targetSelectorRow = document.createElement('div');
             targetSelectorRow.style.display = 'flex';
@@ -828,6 +867,8 @@ export class InspectorWindow extends EditorWindow {
                     this.inspectors.createGraphicRaycasterInspector(sectionContent, comp);
                 } else if (compName === 'EventSystem') {
                     this.inspectors.createEventSystemInspector(sectionContent, comp);
+                } else if (compName === 'UIEventAction') {
+                    this.inspectors.createUIEventActionInspector(sectionContent, comp);
                 } else if (compName === 'UIImage') {
                     this.inspectors.createUIImageInspector(sectionContent, comp);
                 } else if (compName === 'UIButton') {
@@ -872,7 +913,7 @@ export class InspectorWindow extends EditorWindow {
                     this.inspectors.createMeshRendererInspector(sectionContent, comp);
                 } else if (compName === 'RigidBody') {
                     this.inspectors.createRigidBodyInspector(sectionContent, comp);
-                } else if (compName === 'BoxCollider' || compName === 'SphereCollider') {
+                } else if (compName === 'BoxCollider' || compName === 'SphereCollider' || compName === 'CapsuleCollider') {
                     this.inspectors.createColliderInspector(sectionContent, comp);
                 } else {
                     this.inspectors.createAutoInspector(sectionContent, comp);

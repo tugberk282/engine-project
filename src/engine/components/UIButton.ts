@@ -13,6 +13,7 @@ export class UIButton extends Selectable {
     @serialize public highlightedColor: string = '#5a5a5a';
     @serialize public pressedColor: string = '#2f6ea1';
     @serialize public disabledColor: string = '#2b2b2b';
+    @serialize public eventName: string = '';
 
     private element: HTMLButtonElement | null = null;
     private canvas: Canvas | null = null;
@@ -119,6 +120,7 @@ export class UIButton extends Selectable {
         if (!this.isInteractable()) return;
         console.log(`Button '${this.label}' clicked!`);
         this.onClick();
+        this.dispatchRuntimeEvent();
     }
 
     public onSubmit(): void {
@@ -135,6 +137,7 @@ export class UIButton extends Selectable {
         });
         this.updateVisuals();
         this.onClick();
+        this.dispatchRuntimeEvent();
         this.onPointerUp({
             position: { x: 0, y: 0 },
             delta: { x: 0, y: 0 },
@@ -146,6 +149,12 @@ export class UIButton extends Selectable {
             eligibleForClick: true
         });
         this.updateVisuals();
+    }
+
+    private dispatchRuntimeEvent(): void {
+        const name = this.eventName.trim();
+        if (!name || typeof window === 'undefined') return;
+        window.dispatchEvent(new CustomEvent('tugberk-ui-event', { detail: { name } }));
     }
 
     private syncRaycasterRegistration(): void {

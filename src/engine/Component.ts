@@ -28,7 +28,7 @@ export class Component {
 
     public serialize(): any {
         const data: any = {
-            type: this.constructor.name,
+            type: (this.constructor as any).__componentTypeName ?? this.constructor.name,
             data: {}
         };
 
@@ -128,7 +128,7 @@ export class Component {
         if (value instanceof Component) {
             return {
                 __ref: value.gameObject.id,
-                __comp: value.constructor.name,
+                __comp: (value.constructor as any).__componentTypeName ?? value.constructor.name,
                 __type: 'Component'
             };
         }

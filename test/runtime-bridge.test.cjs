@@ -74,3 +74,346 @@ test('stale session commands cannot mutate a replacement session', () => {
     assert.equal(runtime.events.length, before);
     assert.equal(runtime.send('tick', { deltaTime: 0.02 }, 'session-2').frame, 1);
 });
+
+test('authored UI events are session-scoped and work without a gameplay controller', () => {
+    const runtime = createRuntime();
+    const started = runtime.send('start', { snapshot: JSON.stringify({ formatVersion: 1, gameObjects: [] }) });
+    assert.equal(started.lastUiEvent, null);
+    const clicked = runtime.send('uiEvent', { name: 'StartGame', value: { index: 2, value: 'Hard' } });
+    assert.equal(clicked.state, 'running');
+    assert.equal(clicked.lastUiEvent, 'StartGame');
+    assert.deepEqual(clicked.lastUiEventPayload, { index: 2, value: 'Hard' });
+    assert.equal(clicked.gameplay, null);
+    const stopped = runtime.send('stop');
+    assert.equal(stopped.lastUiEvent, null);
+    assert.equal(stopped.lastUiEventPayload, null);
+});
+
+test('invalid UI event names fail with a bounded error', () => {
+    const runtime = createRuntime();
+    runtime.send('start', { snapshot: '{}' });
+    assert.equal(runtime.send('uiEvent', { name: '' }).error.code, 'INVALID_UI_EVENT');
+});
+
+test('Restart authored UI event resets gameplay state and reactivates triggers', () => {
+    const runtime = createRuntime();
+    const snapshot = {
+        formatVersion: 1,
+        gameObjects: [
+            { id: 'player', transform: { position: [0, 2, 0], scale: [1, 1, 1] }, components: [
+                { type: 'PlayerController', data: { fixedStep: 0.02 } },
+                { type: 'CapsuleCollider', data: { radius: 0.5, height: 2 } }
+            ] },
+            { id: 'floor', transform: { position: [0, -0.5, 0], scale: [10, 1, 10] }, components: [
+                { type: 'BoxCollider', data: { size: [10, 1, 10] } }
+            ] }
+        ]
+    };
+    runtime.send('start', { snapshot: JSON.stringify(snapshot) });
+    runtime.send('tick', { deltaTime: 0.02, input: { Horizontal: 1 } });
+    const restarted = runtime.send('uiEvent', { name: 'Restart' });
+    assert.deepEqual(Array.from(restarted.gameplay.player.position), [0, 2, 0]);
+    assert.equal(restarted.gameplay.collectedCount, 0);
+    assert.equal(restarted.gameplay.status, 'playing');
+    assert.equal(restarted.lastUiEvent, 'Restart');
+});
+
+test('standalone player controller grounds on an authored capsule collider', () => {
+    const runtime = createRuntime();
+    const snapshot = {
+        formatVersion: 1,
+        gameObjects: [
+            { id: 'player', transform: { position: [0, 3, 0], scale: [1, 1, 1] }, components: [
+                { type: 'PlayerController', data: { fixedStep: 0.02 } },
+                { type: 'CapsuleCollider', data: { radius: 0.5, height: 2 } }
+            ] },
+            { id: 'capsule-platform', transform: { position: [0, -0.5, 0], scale: [2, 1, 2] }, components: [
+                { type: 'CapsuleCollider', data: { radius: 0.5, height: 2, center: [0, 0.25, 0] } }
+            ] }
+        ]
+    };
+    runtime.send('start', { snapshot: JSON.stringify(snapshot) });
+    let state;
+    for (let index = 0; index < 140; index += 1) state = runtime.send('tick', { deltaTime: 0.02 });
+    assert.equal(state.gameplay.player.grounded, true);
+    assert.equal(state.gameplay.player.position[1], 1.75);
+});
+
+test('authored UIEventAction changes object activation in play runtime', () => {
+    const runtime = createRuntime();
+    const snapshot = {
+        formatVersion: 1,
+        gameObjects: [{
+            id: 'panel', enabled: true,
+            transform: { position: [0, 0, 0], rotation: [0, 0, 0], scale: [1, 1, 1] },
+            components: [{ type: 'UIEventAction', data: { eventName: 'ClosePanel', action: 'SetActive', active: false } }]
+        }]
+    };
+    runtime.send('start', { snapshot: JSON.stringify(snapshot) });
+    const changed = runtime.send('uiEvent', { name: 'ClosePanel' });
+    assert.equal(changed.state, 'running');
+    assert.equal(changed.lastUiEvent, 'ClosePanel');
+    assert.equal(changed.transforms.find((entry) => entry.id === 'panel').active, false);
+});
+
+test('authored UIEventAction can move an object in play runtime', () => {
+    const runtime = createRuntime();
+    const snapshot = {
+        formatVersion: 1,
+        gameObjects: [{
+            id: 'door',
+            transform: { position: [0, 0, 0], rotation: [0, 0, 0], scale: [1, 1, 1] },
+            components: [{ type: 'UIEventAction', data: { eventName: 'OpenDoor', action: 'SetPosition', position: [3, 2, 1] } }]
+        }]
+    };
+    runtime.send('start', { snapshot: JSON.stringify(snapshot) });
+    const changed = runtime.send('uiEvent', { name: 'OpenDoor' });
+    assert.deepEqual(changed.transforms.find((entry) => entry.id === 'door').position, [3, 2, 1]);
+});
+
+test('authored UIEventAction updates authored UI text state', () => {
+    const runtime = createRuntime();
+    const snapshot = {
+        formatVersion: 1,
+        gameObjects: [{
+            id: 'message',
+            transform: { position: [0, 0, 0], rotation: [0, 0, 0], scale: [1, 1, 1] },
+            components: [
+                { type: 'UIText', data: { text: 'Closed' } },
+                { type: 'UIEventAction', data: { eventName: 'OpenDoor', action: 'SetText', text: 'State: {value}', useEventValue: true } }
+            ]
+        }]
+    };
+    runtime.send('start', { snapshot: JSON.stringify(snapshot) });
+    const changed = runtime.send('uiEvent', { name: 'OpenDoor', value: 'Open' });
+    assert.equal(changed.uiText.length, 1);
+    assert.equal(changed.uiText[0].id, 'message:UIText');
+    assert.equal(changed.uiText[0].text, 'State: Open');
+});
+
+test('authored UIEventAction can rotate an object in play runtime', () => {
+    const runtime = createRuntime();
+    const snapshot = {
+        formatVersion: 1,
+        gameObjects: [{
+            id: 'door',
+            transform: { position: [0, 0, 0], rotation: [0, 0, 0], scale: [1, 1, 1] },
+            components: [{ type: 'UIEventAction', data: { eventName: 'OpenDoor', action: 'SetRotation', rotation: [0, 1.5, 0] } }]
+        }]
+    };
+    runtime.send('start', { snapshot: JSON.stringify(snapshot) });
+    const changed = runtime.send('uiEvent', { name: 'OpenDoor' });
+    assert.deepEqual(changed.transforms.find((entry) => entry.id === 'door').rotation, [0, 1.5, 0]);
+});
+
+test('authored UIEventAction can scale an object in play runtime', () => {
+    const runtime = createRuntime();
+    const snapshot = {
+        formatVersion: 1,
+        gameObjects: [{
+            id: 'target',
+            transform: { position: [0, 0, 0], rotation: [0, 0, 0], scale: [1, 1, 1] },
+            components: [{ type: 'UIEventAction', data: { eventName: 'Grow', action: 'SetScale', scale: [2, 1, 0.5] } }]
+        }]
+    };
+    runtime.send('start', { snapshot: JSON.stringify(snapshot) });
+    const changed = runtime.send('uiEvent', { name: 'Grow' });
+    assert.deepEqual(changed.transforms.find((entry) => entry.id === 'target').scale, [2, 1, 0.5]);
+});
+
+test('authored UIEventAction can target another object', () => {
+    const runtime = createRuntime();
+    const snapshot = {
+        formatVersion: 1,
+        gameObjects: [
+            { id: 'button', transform: { position: [0, 0, 0], rotation: [0, 0, 0], scale: [1, 1, 1] }, components: [{ type: 'UIEventAction', data: { eventName: 'Open', action: 'SetActive', active: false, targetObjectId: 'panel' } }] },
+            { id: 'panel', transform: { position: [0, 0, 0], rotation: [0, 0, 0], scale: [1, 1, 1] }, components: [] }
+        ]
+    };
+    runtime.send('start', { snapshot: JSON.stringify(snapshot) });
+    const changed = runtime.send('uiEvent', { name: 'Open' });
+    assert.equal(changed.transforms.find((entry) => entry.id === 'button').active, undefined);
+    assert.equal(changed.transforms.find((entry) => entry.id === 'panel').active, false);
+});
+
+test('authored UIEventAction can set a rigidbody velocity', () => {
+    const runtime = createRuntime();
+    const snapshot = {
+        formatVersion: 1,
+        gameObjects: [{
+            id: 'ball',
+            transform: { position: [0, 0, 0], rotation: [0, 0, 0], scale: [1, 1, 1] },
+            components: [
+                { type: 'RigidBody', data: { velocity: [0, 0, 0], useGravity: false } },
+                { type: 'UIEventAction', data: { eventName: 'Launch', action: 'SetVelocity', velocity: [4, 0, 0] } }
+            ]
+        }]
+    };
+    runtime.send('start', { snapshot: JSON.stringify(snapshot) });
+    runtime.send('uiEvent', { name: 'Launch' });
+    const moved = runtime.send('tick', { deltaTime: 0.02 });
+    assert.ok(moved.transforms.find((entry) => entry.id === 'ball').position[0] > 0);
+});
+
+test('LoadScene UIEventAction is host-owned and does not mutate its GameObject', () => {
+    const runtime = createRuntime();
+    runtime.send('start', { snapshot: JSON.stringify({
+        formatVersion: 1,
+        gameObjects: [{
+            id: 'loader', enabled: true, transform: {}, components: [{
+                type: 'UIEventAction', data: {
+                    eventName: 'NextLevel', action: 'LoadScene', active: false,
+                    scenePath: 'Assets/Scenes/Level2.scene.json'
+                }
+            }]
+        }]
+    }) });
+    const state = runtime.send('uiEvent', { name: 'NextLevel' });
+    assert.equal(state.lastUiEvent, 'NextLevel');
+    assert.equal(state.transforms[0].active, undefined);
+});
+
+test('standalone runtime publishes authored non-player transform updates', () => {
+    const runtime = createRuntime();
+    const snapshot = {
+        formatVersion: 1,
+        gameObjects: [{
+            id: 'rotor',
+            transform: { position: [1, 2, 3], rotation: [0, 0, 0], scale: [1, 1, 1] },
+            components: [{ type: 'AutoRotate', data: { axis: [0, 1, 0], speed: 90 } }]
+        }]
+    };
+    const started = runtime.send('start', { snapshot: JSON.stringify(snapshot) });
+    assert.deepEqual(JSON.parse(JSON.stringify(started.transforms[0])), {
+        id: 'rotor', position: [1, 2, 3], rotation: [0, 0, 0], scale: [1, 1, 1]
+    });
+    const advanced = runtime.send('tick', { deltaTime: 0.05 });
+    assert.equal(advanced.transforms[0].rotation[1], Math.PI / 40);
+});
+
+test('standalone runtime honors disabled components and disabled parent subtrees', () => {
+    const runtime = createRuntime();
+    const snapshot = {
+        formatVersion: 1,
+        gameObjects: [
+            {
+                id: 'disabled-root',
+                enabled: false,
+                transform: { position: [0, 0, 0], rotation: [0, 0, 0], scale: [1, 1, 1] },
+                components: [{ type: 'AutoRotate', data: { speed: 90 } }],
+                children: [{
+                    id: 'disabled-child',
+                    transform: { position: [0, 0, 0], rotation: [0, 0, 0], scale: [1, 1, 1] },
+                    components: [{ type: 'AutoRotate', data: { speed: 90 } }]
+                }]
+            },
+            {
+                id: 'disabled-component',
+                transform: { position: [0, 0, 0], rotation: [0, 0, 0], scale: [1, 1, 1] },
+                components: [{ type: 'AutoRotate', data: { enabled: false, speed: 90 } }]
+            }
+        ]
+    };
+    runtime.send('start', { snapshot: JSON.stringify(snapshot) });
+    const advanced = runtime.send('tick', { deltaTime: 0.05 });
+    assert.deepEqual(Array.from(advanced.transforms, (object) => object.rotation[1]), [0, 0, 0]);
+});
+
+test('standalone rigidbody preserves velocity between frames', () => {
+    const runtime = createRuntime();
+    const snapshot = {
+        formatVersion: 1,
+        gameObjects: [{
+            id: 'body',
+            transform: { position: [0, 2, 0], rotation: [0, 0, 0], scale: [1, 1, 1] },
+            components: [{ type: 'RigidBody', data: { velocity: [0, 0, 0], drag: 0 } }]
+        }]
+    };
+    runtime.send('start', { snapshot: JSON.stringify(snapshot) });
+    const first = runtime.send('tick', { deltaTime: 0.1 });
+    const second = runtime.send('tick', { deltaTime: 0.1 });
+    assert.ok(second.transforms[0].position[1] < first.transforms[0].position[1]);
+});
+
+test('standalone RigidBody matches authored drag and frozen position axes', () => {
+    const runtime = createRuntime();
+    const snapshot = {
+        formatVersion: 1,
+        gameObjects: [{
+            id: 'body', transform: { position: [1, 2, 3], rotation: [0, 0, 0], scale: [1, 1, 1] }, components: [{
+                type: 'RigidBody', data: {
+                    mass: 1, useGravity: false, velocity: [4, 3, 2], drag: 1,
+                    freezePositionX: true
+                }
+            }]
+        }]
+    };
+    runtime.send('start', { snapshot: JSON.stringify(snapshot) });
+    const first = runtime.send('tick', { deltaTime: 0.02 });
+    const second = runtime.send('tick', { deltaTime: 0.02 });
+    assert.deepEqual(Array.from(first.transforms[0].position), [1, 2.06, 3.04]);
+    assert.deepEqual(Array.from(second.transforms[0].position, value => Number(value.toFixed(6))), [1, 2.1188, 3.0792]);
+});
+
+test('standalone generic RigidBody resolves capsule contacts and collision layers', () => {
+    const createSnapshot = (filterLayers) => {
+        const matrix = new Array(32).fill(0xFFFFFFFF);
+        if (filterLayers) {
+            matrix[0] &= ~(1 << 1);
+            matrix[1] &= ~(1 << 0);
+        }
+        return {
+            formatVersion: 1,
+            layerCollisionMatrix: matrix,
+            gameObjects: [
+                { id: 'body', layer: 1, transform: { position: [0, 3, 0], scale: [1, 1, 1] }, components: [
+                    { type: 'RigidBody', data: { mass: 1, useGravity: true, velocity: [0, 0, 0] } },
+                    { type: 'BoxCollider', data: { size: [1, 1, 1] } }
+                ] },
+                { id: 'platform', layer: 0, transform: { position: [0, -0.5, 0], scale: [2, 1, 2] }, components: [
+                    { type: 'CapsuleCollider', data: { radius: 0.5, height: 2, center: [0, 0.25, 0] } }
+                ] }
+            ]
+        };
+    };
+    const colliding = createRuntime();
+    colliding.send('start', { snapshot: JSON.stringify(createSnapshot(false)) });
+    let collidingState;
+    for (let index = 0; index < 140; index += 1) collidingState = colliding.send('tick', { deltaTime: 0.02 });
+    assert.equal(collidingState.transforms.find(({ id }) => id === 'body').position[1], 1.25);
+
+    const filtered = createRuntime();
+    filtered.send('start', { snapshot: JSON.stringify(createSnapshot(true)) });
+    let filteredState;
+    for (let index = 0; index < 140; index += 1) filteredState = filtered.send('tick', { deltaTime: 0.02 });
+    assert.ok(filteredState.transforms.find(({ id }) => id === 'body').position[1] < 0);
+});
+
+test('standalone generic physics is invariant to equivalent frame chunking', () => {
+    const snapshot = JSON.stringify({
+        formatVersion: 1,
+        gameObjects: [{
+            id: 'body', transform: { position: [0, 2, 0], scale: [1, 1, 1] }, components: [{
+                type: 'RigidBody', data: { mass: 1, useGravity: true, velocity: [1, 0, 0], drag: 0.25 }
+            }]
+        }]
+    });
+    const coarse = createRuntime();
+    coarse.send('start', { snapshot });
+    const coarseState = coarse.send('tick', { deltaTime: 0.1 });
+
+    const fine = createRuntime();
+    fine.send('start', { snapshot });
+    let fineState;
+    for (let index = 0; index < 5; index += 1) fineState = fine.send('tick', { deltaTime: 0.02 });
+
+    const rounded = state => Array.from(state.transforms[0].position, value => Number(value.toFixed(8)));
+    assert.deepEqual(rounded(coarseState), rounded(fineState));
+
+    const accumulated = createRuntime();
+    accumulated.send('start', { snapshot });
+    const beforeStep = accumulated.send('tick', { deltaTime: 0.01 });
+    const afterStep = accumulated.send('tick', { deltaTime: 0.01 });
+    assert.deepEqual(Array.from(beforeStep.transforms[0].position), [0, 2, 0]);
+    assert.notDeepEqual(Array.from(afterStep.transforms[0].position), [0, 2, 0]);
+});

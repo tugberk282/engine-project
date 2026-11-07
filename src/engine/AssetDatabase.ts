@@ -139,7 +139,7 @@ export class AssetDatabase {
             maxDepth: AssetDatabase.MAX_SCAN_DEPTH,
             maxEntries: AssetDatabase.MAX_SCAN_ENTRIES
         });
-        this.rebuildDependencyGraph();
+        await this.rebuildDependencyGraph();
 
         const added: string[] = [];
         const removed: string[] = [];
@@ -427,7 +427,18 @@ export class AssetDatabase {
 
     private async writeMeta(assetPath: string, meta: AssetMeta) {
         const metaPath = `${assetPath}.meta`;
-        await this.fs.writeFile(metaPath, `${JSON.stringify(meta, null, 2)}\n`, 'utf8');
+        const temporaryPath = `${metaPath}.${crypto.randomUUID()}.tmp`;
+        try {
+            await this.fs.writeFile(temporaryPath, `${JSON.stringify(meta, null, 2)}\n`, 'utf8');
+            await this.fs.rename(temporaryPath, metaPath);
+        } catch (error) {
+            try {
+                if (await this.fs.exists(temporaryPath)) await this.fs.unlink(temporaryPath);
+            } catch {
+                // Preserve the original write error if cleanup is unavailable.
+            }
+            throw error;
+        }
     }
 
     private async readMeta(metaPath: string): Promise<MetaReadResult> {
@@ -619,17 +630,17 @@ export class AssetDatabase {
         return 'unknown';
     }
 
-    private rebuildDependencyGraph(): void {
+    private async rebuildDependencyGraph(): Promise<void> {
         this.dependencyGuidsBySourceGuid.clear();
         this.referencerGuidsByTargetGuid.clear();
 
-        this.pathToGuid.forEach( async(sourceGuid, sourcePath) => {
+        for (const [sourcePath, sourceGuid] of this.pathToGuid.entries()) {
             const meta = this.pathToMeta.get(sourcePath);
-            if (!meta) return;
+            if (!meta) continue;
 
             const referencedGuids = await this.collectReferencedGuids(sourcePath, meta.assetType);
             referencedGuids.delete(sourceGuid);
-            if (referencedGuids.size === 0) return;
+            if (referencedGuids.size === 0) continue;
 
             this.dependencyGuidsBySourceGuid.set(sourceGuid, referencedGuids);
             referencedGuids.forEach((targetGuid) => {
@@ -638,7 +649,7 @@ export class AssetDatabase {
                 }
                 this.referencerGuidsByTargetGuid.get(targetGuid)!.add(sourceGuid);
             });
-        });
+        }
     }
 
     private async collectReferencedGuids(assetPath: string, assetType: AssetType): Promise<Set<string>> {

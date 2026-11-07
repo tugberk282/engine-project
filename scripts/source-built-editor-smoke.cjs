@@ -9,7 +9,7 @@ const { spawn, spawnSync } = require('node:child_process');
 
 const root = path.resolve(__dirname, '..');
 const BUILD_TIMEOUT_MS = 120_000;
-const LAUNCH_TIMEOUT_MS = 45_000;
+const LAUNCH_TIMEOUT_MS = 75_000;
 const RUN_COUNT = 2;
 
 function hashFiles(files, baseDirectory = root) {

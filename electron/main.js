@@ -2,6 +2,13 @@ const { app, BrowserWindow, ipcMain, dialog, shell } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const { randomUUID } = require('node:crypto');
+
+// CI and smoke hosts may not expose a usable Chromium GPU process. Keep the
+// normal desktop renderer hardware-accelerated, but make the explicit smoke
+// lane deterministic with software compositing.
+if (process.env.ENGINE_SMOKE_TEST === '1') {
+    app.commandLine.appendSwitch('disable-gpu');
+}
 const { atomicWriteJson, atomicWriteText, contentHash } = require('./architecture/persistence');
 const { ProjectCapabilities, normalizeWriteData } = require('./security/project-capabilities');
 const { ConfinedFileSystem } = require('./security/confined-filesystem');
@@ -306,30 +313,34 @@ async function executeProtocolCommand(event, request) {
         case COMMANDS.RUNTIME_RESUME:
             return runtimeSupervisor.resume();
         case COMMANDS.RUNTIME_TICK:
-            return runtimeSupervisor.tick(request.payload.deltaTime);
+            return runtimeSupervisor.tick(request.payload.deltaTime, request.payload.input);
         case COMMANDS.RUNTIME_STEP:
-            return runtimeSupervisor.step(request.payload.deltaTime);
+            return runtimeSupervisor.step(request.payload.deltaTime, request.payload.input);
+        case COMMANDS.RUNTIME_UI_EVENT:
+            return runtimeSupervisor.uiEvent(request.payload.name, request.payload.value);
         case COMMANDS.RUNTIME_STOP:
             return runtimeSupervisor.stop();
         case COMMANDS.BUILD_START: {
-            const { buildId, ...buildRequest } = request.payload;
-            buildRequest.projectRoot = projectCapabilities.requireRoot(buildRequest.projectRoot);
-            if (editorBuilds.has(buildId)) throw Object.assign(new Error('Build identifier is already active'), { code: 'BUILD_ALREADY_ACTIVE' });
-            const controller = new AbortController();
-            editorBuilds.set(buildId, { ownerId: event.sender.id, controller });
-            const abortOnDestroyed = () => controller.abort();
-            event.sender.once('destroyed', abortOnDestroyed);
             try {
-                return await buildService.build(buildRequest, {
-                    signal: controller.signal,
-                    onProgress: (progress) => {
-                        if (!event.sender.isDestroyed()) event.sender.send('tugberk:v1:build-progress', buildId, progress);
-                    }
-                });
-            } finally {
-                event.sender.removeListener('destroyed', abortOnDestroyed);
-                editorBuilds.delete(buildId);
-            }
+                const { buildId, ...buildRequest } = request.payload;
+                buildRequest.projectRoot = projectCapabilities.requireRoot(buildRequest.projectRoot);
+                if (editorBuilds.has(buildId)) throw Object.assign(new Error('Build identifier is already active'), { code: 'BUILD_ALREADY_ACTIVE' });
+                const controller = new AbortController();
+                editorBuilds.set(buildId, { ownerId: event.sender.id, controller });
+                const abortOnDestroyed = () => controller.abort();
+                event.sender.once('destroyed', abortOnDestroyed);
+                try {
+                    return await buildService.build(buildRequest, {
+                        signal: controller.signal,
+                        onProgress: (progress) => {
+                            if (!event.sender.isDestroyed()) event.sender.send('tugberk:v1:build-progress', buildId, progress);
+                        }
+                    });
+                } finally {
+                    event.sender.removeListener('destroyed', abortOnDestroyed);
+                    editorBuilds.delete(buildId);
+                }
+            } catch (error) { throw error; }
         }
         case COMMANDS.BUILD_CANCEL: {
             const active = editorBuilds.get(request.payload.buildId);
@@ -353,6 +364,7 @@ async function runSmokeTest(mainWindow) {
         || path.join(process.cwd(), 'smoke-test-result.json');
     const expectLauncherFailure = process.env.ENGINE_SMOKE_EXPECT_LAUNCHER_FAILURE === '1';
     const expectPlayableRuntime = process.env.ENGINE_PLAYABLE_RUNTIME_SMOKE === '1';
+    const expectBuildSettings = process.env.ENGINE_BUILD_SETTINGS_SMOKE === '1';
     const expectPlayableRuntimeCrash = process.env.ENGINE_PLAYABLE_RUNTIME_CRASH_SMOKE === '1';
     const expectedSceneTransaction = process.env.ENGINE_SMOKE_EXPECT_SCENE_TRANSACTION || null;
     if (!expectLauncherFailure && process.env.ENGINE_AUTO_OPEN_PROJECT_PATH) {
@@ -400,6 +412,22 @@ async function runSmokeTest(mainWindow) {
                 };
                 objects.forEach((entry, index) => visit(entry, null, index));
                 return identity;
+            };
+            const prefabLinkIdentity = (scene) => {
+                const parsed = JSON.parse(scene.toJSON());
+                const links = [];
+                const visit = (entry) => {
+                    links.push({
+                        id: entry.id,
+                        prefabSource: entry.prefabSource ?? null,
+                        sourceAssetPath: entry.sourceAssetPath ?? null,
+                        sourceAssetGuid: entry.sourceAssetGuid ?? null,
+                        sourceAssetType: entry.sourceAssetType ?? null
+                    });
+                    (Array.isArray(entry.children) ? entry.children : []).forEach(visit);
+                };
+                (Array.isArray(parsed.gameObjects) ? parsed.gameObjects : []).forEach(visit);
+                return links;
             };
 
             const getEditor = () => window.Editor?.instance ?? null;
@@ -464,12 +492,76 @@ async function runSmokeTest(mainWindow) {
                 record('saved scene transaction survives editor relaunch with stable IDs and order',
                     JSON.stringify(actualIdentity) === JSON.stringify(expected.identity),
                     'Expected ' + expected.identity.length + ' serialized objects after relaunch; found ' + actualIdentity.length);
+                const actualPrefabLinks = prefabLinkIdentity(editor.scene);
+                record('saved prefab Repair and Unpack state survives editor relaunch',
+                    JSON.stringify(actualPrefabLinks) === JSON.stringify(expected.prefabLinks),
+                    'Expected persisted prefab source identities to match after relaunch');
+                record('editor relaunch starts with a fresh undo history',
+                    commandRevision(editor) === 0 && window.Editor?.isCommandPending?.() === false,
+                    'commandRevision=' + commandRevision(editor));
                 return {
                     ok: failures.length === 0,
                     failures,
                     checks,
-                    snapshot: { identity: actualIdentity }
+                    snapshot: { identity: actualIdentity, prefabLinks: actualPrefabLinks }
                 };
+            }
+
+            if (${JSON.stringify(expectBuildSettings)}) {
+                const clickBuild = async () => {
+                    document.getElementById('build-settings-build')?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+                    await wait(50);
+                };
+                document.getElementById('menu-build-settings')?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+                for (let attempt = 0; attempt < 100 && !document.getElementById('build-settings-build'); attempt += 1) await wait(50);
+                const statusText = () => document.getElementById('build-settings-status')?.textContent?.trim() ?? '';
+                const buildButton = () => document.getElementById('build-settings-build');
+                const initialStatus = statusText();
+                record('Build Settings loads authored project scenes',
+                    initialStatus === 'Ready to build.' && buildButton()?.disabled === false,
+                    JSON.stringify({ initialStatus, disabled: buildButton()?.disabled }));
+
+                await clickBuild();
+                record('cancelling the output picker leaves Build Settings idle',
+                    statusText() === initialStatus && buildButton()?.textContent === 'Build Windows Player',
+                    JSON.stringify({ status: statusText(), button: buildButton()?.textContent }));
+
+                let sawProgress = false;
+                const progressObserver = new MutationObserver(() => {
+                    sawProgress ||= /^(validate|resolve|import|bundle|package) \\(/.test(statusText());
+                });
+                progressObserver.observe(document.body, { childList: true, subtree: true, characterData: true });
+                await clickBuild();
+                const successDeadline = Date.now() + 20_000;
+                while (Date.now() < successDeadline) {
+                    const status = statusText();
+                    sawProgress ||= /^(validate|resolve|import|bundle|package) \\(/.test(status);
+                    if (status.startsWith('Build complete')) break;
+                    await wait(50);
+                }
+                progressObserver.disconnect();
+                const successStatus = statusText();
+                console.info('[BuildSettingsSmoke] success status:', successStatus);
+                record('rendered Build Settings completes a real Windows player build',
+                    successStatus.startsWith('Build complete') && buildButton()?.textContent === 'Build Windows Player',
+                    successStatus);
+                record('rendered Build Settings exposes bounded build progress', sawProgress, successStatus);
+
+                await clickBuild();
+                const failureDeadline = Date.now() + 10_000;
+                while (Date.now() < failureDeadline) {
+                    const status = statusText();
+                    if (status && !status.startsWith('Build complete') && !status.startsWith('Starting build')
+                        && !/^(validate|resolve|import|bundle|package) \\(/.test(status)) break;
+                    await wait(50);
+                }
+                const failureStatus = statusText();
+                console.info('[BuildSettingsSmoke] failure status:', failureStatus);
+                record('rendered Build Settings surfaces backend publication failure and recovers',
+                    failureStatus.length > 0 && !failureStatus.startsWith('Build complete')
+                        && buildButton()?.textContent === 'Build Windows Player' && buildButton()?.disabled === false,
+                    failureStatus);
+                return { ok: failures.length === 0, failures, checks, snapshot: { initialStatus, successStatus, failureStatus } };
             }
 
             if (${JSON.stringify(expectPlayableRuntime)}) {
@@ -478,6 +570,7 @@ async function runSmokeTest(mainWindow) {
                     await wait(delay);
                 };
                 const movingCube = editor.scene.findGameObjectByID('moving-cube');
+                const inputPlayer = editor.scene.findGameObjectByID('input-player');
                 const originalBytes = editor.scene.toJSON();
                 const initial = movingCube ? {
                     y: movingCube.transform.position.y,
@@ -485,6 +578,8 @@ async function runSmokeTest(mainWindow) {
                 } : null;
                 record('retained playable scene loads an authored object', !!movingCube,
                     movingCube ? movingCube.name : 'moving-cube was not loaded');
+                record('retained playable scene loads an input-controlled player', !!inputPlayer,
+                    inputPlayer ? inputPlayer.name : 'input-player was not loaded');
                 if (${JSON.stringify(expectPlayableRuntimeCrash)}) {
                     await click('play-btn', 900);
                     const consoleText = document.getElementById('console-content')?.innerText ?? '';
@@ -500,6 +595,7 @@ async function runSmokeTest(mainWindow) {
                         snapshot: { consoleText: consoleText.slice(-500), editorPresent: !!window.Editor?.instance }
                     };
                 }
+                await click('tab-game', 50);
                 await click('play-btn', 100);
                 for (let attempt = 0; attempt < 30; attempt += 1) {
                     if (movingCube && movingCube.transform.rotation.y > (initial?.rotationY ?? 0)
@@ -514,6 +610,73 @@ async function runSmokeTest(mainWindow) {
                 record('child runtime visibly advances authored Update and fixed-step state',
                     !!initial && !!afterPlay && afterPlay.rotationY > initial.rotationY && afterPlay.y < initial.y,
                     JSON.stringify({ initial, afterPlay }));
+                const inputStartX = inputPlayer?.transform.position.x ?? null;
+                const gameView = document.getElementById('game-view');
+                gameView?.focus({ preventScroll: true });
+                gameView?.dispatchEvent(new KeyboardEvent('keydown', {
+                    key: 'd', code: 'KeyD', bubbles: true, cancelable: true
+                }));
+                editor.updateInputFrame?.(1 / 30);
+                const keyboardSnapshot = editor.getRuntimeInputSnapshot?.() ?? {};
+                record('Game View captures the configured physical keyboard axis',
+                    Number(keyboardSnapshot.Horizontal) > 0,
+                    JSON.stringify(keyboardSnapshot));
+                for (let attempt = 0; attempt < 30; attempt += 1) {
+                    editor.updateInputFrame?.(1 / 30);
+                    editor.playMode?.update();
+                    await wait(50);
+                    if (inputStartX !== null && (inputPlayer?.transform.position.x ?? inputStartX) > inputStartX + 0.01) break;
+                }
+                gameView?.dispatchEvent(new KeyboardEvent('keyup', {
+                    key: 'd', code: 'KeyD', bubbles: true, cancelable: true
+                }));
+                const inputEndX = inputPlayer?.transform.position.x ?? null;
+                record('Game View keyboard input reaches the child runtime and moves the player',
+                    inputStartX !== null && inputEndX !== null && inputEndX > inputStartX + 0.01,
+                    JSON.stringify({ inputStartX, inputEndX, isGameView: editor.isGameView }));
+                const lookStartY = inputPlayer?.transform.rotation.y ?? null;
+                const lookEvent = new MouseEvent('mousemove', {
+                    bubbles: true, cancelable: true, clientX: 100, clientY: 100
+                });
+                Object.defineProperty(lookEvent, 'movementX', { value: 24 });
+                Object.defineProperty(lookEvent, 'movementY', { value: -6 });
+                gameView?.dispatchEvent(lookEvent);
+                const lookSnapshot = editor.getRuntimeInputSnapshot?.() ?? {};
+                record('Game View captures mouse look deltas in the runtime snapshot',
+                    Number(lookSnapshot.LookX) === 24 && Number(lookSnapshot.LookY) === -6,
+                    JSON.stringify(lookSnapshot));
+                editor.playMode?.update();
+                await wait(250);
+                const lookEndY = inputPlayer?.transform.rotation.y ?? null;
+                record('Game View mouse look reaches the child runtime and rotates the player',
+                    lookStartY !== null && lookEndY !== null && lookEndY < lookStartY,
+                    JSON.stringify({ lookStartY, lookEndY }));
+                const jumpStartY = inputPlayer?.transform.position.y ?? null;
+                gameView?.dispatchEvent(new KeyboardEvent('keydown', {
+                    key: ' ', code: 'Space', bubbles: true, cancelable: true
+                }));
+                editor.updateInputFrame?.(1 / 30);
+                const jumpPressedSnapshot = editor.getRuntimeInputSnapshot?.() ?? {};
+                record('Game View captures the configured Jump press',
+                    jumpPressedSnapshot.Jump === true,
+                    JSON.stringify(jumpPressedSnapshot));
+                for (let attempt = 0; attempt < 30; attempt += 1) {
+                    editor.updateInputFrame?.(1 / 30);
+                    editor.playMode?.update();
+                    await wait(50);
+                    if (jumpStartY !== null && (inputPlayer?.transform.position.y ?? jumpStartY) > jumpStartY + 0.01) break;
+                }
+                gameView?.dispatchEvent(new KeyboardEvent('keyup', {
+                    key: ' ', code: 'Space', bubbles: true, cancelable: true
+                }));
+                const jumpReleasedSnapshot = editor.getRuntimeInputSnapshot?.() ?? {};
+                const jumpEndY = inputPlayer?.transform.position.y ?? null;
+                record('Game View Jump reaches grounded child-runtime physics',
+                    jumpStartY !== null && jumpEndY !== null && jumpEndY > jumpStartY + 0.01,
+                    JSON.stringify({ jumpStartY, jumpEndY }));
+                record('Game View releases Jump after keyup',
+                    jumpReleasedSnapshot.Jump === false,
+                    JSON.stringify(jumpReleasedSnapshot));
                 await click('pause-btn', 100);
                 const pausedRotation = movingCube?.transform.rotation.y ?? null;
                 await wait(250);
@@ -532,7 +695,7 @@ async function runSmokeTest(mainWindow) {
                     ok: failures.length === 0,
                     failures,
                     checks,
-                    snapshot: { initial, afterPlay, pausedRotation, restoredByteLength: restoredBytes.length }
+                    snapshot: { initial, afterPlay, keyboardSnapshot, inputStartX, inputEndX, lookSnapshot, lookStartY, lookEndY, jumpPressedSnapshot, jumpReleasedSnapshot, jumpStartY, jumpEndY, pausedRotation, restoredByteLength: restoredBytes.length }
                 };
             }
 
@@ -875,14 +1038,354 @@ async function runSmokeTest(mainWindow) {
                 record('component added to cube', componentAdded, componentAdded ? componentName + ' added' : 'component count did not change');
             }
 
+            // Exercise the real renderer prefab path before the asset transaction
+            // checks below. This catches source-link and instantiate regressions
+            // that service-only tests cannot observe.
+            const prefabSmokeName = '__RenderedPrefabSmoke';
+            const prefabSceneCountBefore = editor.scene.gameObjects.length;
+            await editor.projectWindow?.savePrefabToFile(prefabSmokeName, createdCube);
+            await wait(250);
+            const prefabAssetPath = (await editor.projectWindow?.getAllFilesRecursive(editor.rootPath))
+                ?.find((entry) => entry.name === prefabSmokeName + '.prefab')?.fullPath ?? null;
+            const prefabMeta = prefabAssetPath && await window.electronAPI.fsExists(prefabAssetPath + '.meta')
+                ? JSON.parse(await window.electronAPI.fsReadFile(prefabAssetPath + '.meta', 'utf8'))
+                : null;
+            record('rendered prefab save publishes a GUID-backed asset',
+                !!prefabAssetPath && !!prefabMeta?.guid && createdCube?.sourceAssetType === 'prefab'
+                    && createdCube.sourceAssetPath === prefabAssetPath
+                    && createdCube.sourceAssetGuid === prefabMeta.guid,
+                JSON.stringify({ prefabAssetPath, sourceAssetType: createdCube?.sourceAssetType, sourceAssetGuid: createdCube?.sourceAssetGuid, metaGuid: prefabMeta?.guid }));
+
             await editor.projectWindow?.refresh?.();
-            await wait(100);
+            await wait(150);
+            const prefabItem = Array.from(document.querySelectorAll('.project-asset-grid .asset-item'))
+                .find((item) => item.dataset.assetPath === prefabAssetPath);
+            prefabItem?.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
+            await wait(250);
+            const prefabInstances = editor.scene.gameObjects.filter((go) =>
+                go !== createdCube && go.sourceAssetType === 'prefab' && go.sourceAssetGuid === prefabMeta?.guid);
+            record('rendered prefab asset instantiates with its source identity',
+                !!prefabItem && editor.scene.gameObjects.length > prefabSceneCountBefore
+                    && prefabInstances.length >= 1,
+                JSON.stringify({ prefabItem: !!prefabItem, before: prefabSceneCountBefore, after: editor.scene.gameObjects.length, instances: prefabInstances.length }));
+
+            const prefabInstance = prefabInstances[0] ?? null;
+            const appliedPrefabX = 4.25;
+            if (prefabInstance && prefabAssetPath) {
+                prefabInstance.transform.position.x = appliedPrefabX;
+                await editor.applyPrefabInstanceToSource(prefabInstance);
+                await wait(250);
+            }
+            const appliedPrefabJson = prefabAssetPath && await window.electronAPI.fsExists(prefabAssetPath)
+                ? JSON.parse(await window.electronAPI.fsReadFile(prefabAssetPath, 'utf8'))
+                : null;
+            const persistedPrefabX = appliedPrefabJson?.data?.transform?.position?.[0] ?? null;
+            record('rendered prefab root transform applies to the source asset',
+                !!prefabInstance && persistedPrefabX === appliedPrefabX,
+                JSON.stringify({ appliedPrefabX, persistedPrefabX }));
+
+            const revertedPrefabX = -3.5;
+            if (prefabInstance) {
+                prefabInstance.transform.position.x = revertedPrefabX;
+                editor.revertPrefabSelectionToTarget(prefabInstance);
+                for (let attempt = 0; attempt < 40 && editor.isCommandPending?.(); attempt += 1) await wait(50);
+                await wait(150);
+            }
+            record('rendered prefab root transform reverts to the source asset',
+                !!prefabInstance && prefabInstance.transform.position.x === appliedPrefabX,
+                JSON.stringify({ expected: appliedPrefabX, actual: prefabInstance?.transform.position.x ?? null }));
+
+            let nestedPrefabChild = prefabInstance?.transform.children?.[0]?.gameObject ?? null;
+            const nestedPrefabName = '__RenderedNestedPrefabSmoke';
+            if (nestedPrefabChild) {
+                await editor.projectWindow?.savePrefabToFile(nestedPrefabName, nestedPrefabChild);
+                await wait(200);
+                // Persist the nested source link inside the parent prefab asset.
+                await editor.applyPrefabInstanceToSource(prefabInstance);
+                await wait(200);
+            }
+            const nestedPrefabPath = (await editor.projectWindow?.getAllFilesRecursive(editor.rootPath))
+                ?.find((entry) => entry.name === nestedPrefabName + '.prefab')?.fullPath ?? null;
+            const nestedPrefabMeta = nestedPrefabPath && await window.electronAPI.fsExists(nestedPrefabPath + '.meta')
+                ? JSON.parse(await window.electronAPI.fsReadFile(nestedPrefabPath + '.meta', 'utf8'))
+                : null;
+            record('rendered nested prefab source link is persisted',
+                !!nestedPrefabChild && !!nestedPrefabPath && nestedPrefabChild.sourceAssetType === 'prefab'
+                    && nestedPrefabChild.sourceAssetGuid === nestedPrefabMeta?.guid,
+                JSON.stringify({ nestedPrefabPath, sourceAssetGuid: nestedPrefabChild?.sourceAssetGuid, metaGuid: nestedPrefabMeta?.guid }));
+
+            if (nestedPrefabChild && nestedPrefabPath) {
+                nestedPrefabChild.sourceAssetPath = nestedPrefabPath + '.stale';
+                await editor.getPrefabOverrideSummary(nestedPrefabChild);
+            }
+            record('nested prefab stale source path reconnects by GUID',
+                !!nestedPrefabChild && !!nestedPrefabPath && nestedPrefabChild.sourceAssetPath === nestedPrefabPath,
+                JSON.stringify({ expected: nestedPrefabPath, actual: nestedPrefabChild?.sourceAssetPath ?? null }));
+
+            const nestedAppliedX = 2.75;
+            if (nestedPrefabChild && nestedPrefabPath) {
+                nestedPrefabChild.transform.position.x = nestedAppliedX;
+                await editor.applyAllPrefabOverrides(nestedPrefabChild, 'apply');
+                await wait(250);
+            }
+            const nestedAppliedJson = nestedPrefabPath && await window.electronAPI.fsExists(nestedPrefabPath)
+                ? JSON.parse(await window.electronAPI.fsReadFile(nestedPrefabPath, 'utf8'))
+                : null;
+            record('nested prefab child override applies to the nearest source',
+                !!nestedPrefabChild && nestedAppliedJson?.data?.transform?.position?.[0] === nestedAppliedX,
+                JSON.stringify({ nestedAppliedX, persisted: nestedAppliedJson?.data?.transform?.position?.[0] ?? null }));
+
+            if (nestedPrefabChild) {
+                nestedPrefabChild.transform.position.x = -2.75;
+                editor.revertPrefabSelectionToTarget(nestedPrefabChild);
+                for (let attempt = 0; attempt < 40 && editor.isCommandPending?.(); attempt += 1) await wait(50);
+                await wait(150);
+            }
+            record('nested prefab child override reverts to the nearest source',
+                !!nestedPrefabChild && nestedPrefabChild.transform.position.x === nestedAppliedX,
+                JSON.stringify({ expected: nestedAppliedX, actual: nestedPrefabChild?.transform.position.x ?? null }));
+
+            const structuralComponentSource = editor.scene.gameObjects
+                .flatMap((gameObject) => gameObject.components ?? [])
+                .find((component) => component.serialize?.().type === 'BoxCollider');
+            const structuralComponentType = structuralComponentSource?.serialize?.().type ?? null;
+            let structuralComponent = null;
+            if (nestedPrefabChild && nestedPrefabPath && structuralComponentSource?.constructor) {
+                structuralComponent = nestedPrefabChild.addComponent(structuralComponentSource.constructor, { invokeLifecycle: false });
+                nestedPrefabChild.flushPendingLifecycle(false);
+                await editor.projectWindow?.refreshAssetRuntime?.(nestedPrefabPath);
+                await wait(200);
+            }
+            record('nested prefab descendant added component survives source refresh',
+                !!structuralComponentType && nestedPrefabChild?.components?.some((component) =>
+                    component.serialize?.().type === structuralComponentType),
+                JSON.stringify({ structuralComponentType }));
+
+            if (nestedPrefabChild && structuralComponent && nestedPrefabPath) {
+                await editor.applyAllPrefabOverrides(nestedPrefabChild, 'apply');
+                await wait(250);
+                const appliedStructuralComponent = nestedPrefabChild.components.find((component) =>
+                    component.serialize?.().type === structuralComponentType);
+                if (appliedStructuralComponent) nestedPrefabChild.removeComponent(appliedStructuralComponent);
+                await editor.projectWindow?.refreshAssetRuntime?.(nestedPrefabPath);
+                await wait(200);
+            }
+            record('nested prefab descendant removed component survives source refresh',
+                !!structuralComponentType && !nestedPrefabChild?.components?.some((component) =>
+                    component.serialize?.().type === structuralComponentType),
+                JSON.stringify({ structuralComponentType }));
+
+            let corruptPrefabPreservedInstance = false;
+            if (nestedPrefabChild && nestedPrefabPath) {
+                const validNestedPrefabJson = await window.electronAPI.fsReadFile(nestedPrefabPath, 'utf8');
+                const instanceBeforeCorruptRefresh = JSON.stringify(nestedPrefabChild.serialize());
+                await window.electronAPI.fsWriteFile(nestedPrefabPath, '{ invalid prefab json');
+                await editor.projectWindow?.refreshAssetRuntime?.(nestedPrefabPath);
+                corruptPrefabPreservedInstance = JSON.stringify(nestedPrefabChild.serialize()) === instanceBeforeCorruptRefresh;
+                await window.electronAPI.fsWriteFile(nestedPrefabPath, validNestedPrefabJson);
+                await editor.projectWindow?.refreshAssetRuntime?.(nestedPrefabPath);
+                await wait(200);
+            }
+            record('corrupt prefab refresh preserves linked instance data',
+                corruptPrefabPreservedInstance,
+                'Invalid source bytes must not partially mutate the linked scene instance');
+
+            const findDescendantBySourceGuid = (root, guid) => {
+                if (!root || !guid) return null;
+                if (root.sourceAssetGuid === guid) return root;
+                for (const childTransform of root.transform.children ?? []) {
+                    const match = findDescendantBySourceGuid(childTransform.gameObject, guid);
+                    if (match) return match;
+                }
+                return null;
+            };
+            const serializedHierarchyContainsGuid = (node, guid) => {
+                if (!node || !guid) return false;
+                if (node.sourceAssetGuid === guid) return true;
+                return (node.children ?? []).some((child) => serializedHierarchyContainsGuid(child, guid));
+            };
+
+            const deepPrefabName = '__RenderedDeepPrefabSmoke';
+            let deepPrefabNode = null;
+            if (nestedPrefabChild) {
+                deepPrefabNode = new nestedPrefabChild.constructor('Deep Nested Prefab');
+                editor.scene.addGameObject(deepPrefabNode, { start: false });
+                deepPrefabNode.transform.setParent(nestedPrefabChild.transform, false);
+                await editor.projectWindow?.savePrefabToFile(deepPrefabName, deepPrefabNode);
+                await wait(200);
+            }
+            const deepPrefabPath = (await editor.projectWindow?.getAllFilesRecursive(editor.rootPath))
+                ?.find((entry) => entry.name === deepPrefabName + '.prefab')?.fullPath ?? null;
+            const deepPrefabMeta = deepPrefabPath && await window.electronAPI.fsExists(deepPrefabPath + '.meta')
+                ? JSON.parse(await window.electronAPI.fsReadFile(deepPrefabPath + '.meta', 'utf8'))
+                : null;
+            if (nestedPrefabChild && deepPrefabMeta?.guid) {
+                await editor.applyPrefabInstanceToSource(nestedPrefabChild);
+                await wait(250);
+                let refreshedParent = editor.scene.gameObjects.find((gameObject) =>
+                    gameObject.sourceAssetGuid === prefabMeta?.guid && !gameObject.transform.parent) ?? null;
+                const refreshedNested = findDescendantBySourceGuid(refreshedParent, nestedPrefabMeta?.guid);
+                if (refreshedNested) nestedPrefabChild = refreshedNested;
+                if (refreshedParent) {
+                    await editor.applyPrefabInstanceToSource(refreshedParent);
+                    await wait(250);
+                }
+                refreshedParent = editor.scene.gameObjects.find((gameObject) =>
+                    gameObject.sourceAssetGuid === prefabMeta?.guid && !gameObject.transform.parent) ?? null;
+                deepPrefabNode = findDescendantBySourceGuid(refreshedParent, deepPrefabMeta.guid);
+            }
+            const parentWithDeepJson = prefabAssetPath && await window.electronAPI.fsExists(prefabAssetPath)
+                ? JSON.parse(await window.electronAPI.fsReadFile(prefabAssetPath, 'utf8'))
+                : null;
+            record('three-level nested prefab identity persists in the parent asset',
+                !!deepPrefabNode && !!deepPrefabMeta?.guid
+                    && serializedHierarchyContainsGuid(parentWithDeepJson?.data, deepPrefabMeta.guid),
+                JSON.stringify({ deepPrefabPath, deepGuid: deepPrefabMeta?.guid ?? null }));
+
+            const deepApplyTargets = deepPrefabNode ? editor.getPrefabApplyTargetOptions(deepPrefabNode) : [];
+            record('three-level nested prefab exposes nearest-to-outer apply targets',
+                deepApplyTargets.length >= 3 && deepApplyTargets[0]?.sourcePath === deepPrefabPath,
+                JSON.stringify(deepApplyTargets));
+
+            const deepAppliedX = 6.5;
+            if (deepPrefabNode && deepPrefabPath) {
+                deepPrefabNode.transform.position.x = deepAppliedX;
+                await editor.applyAllPrefabOverrides(deepPrefabNode, 'apply');
+                await wait(250);
+            }
+            const deepAppliedJson = deepPrefabPath && await window.electronAPI.fsExists(deepPrefabPath)
+                ? JSON.parse(await window.electronAPI.fsReadFile(deepPrefabPath, 'utf8'))
+                : null;
+            record('three-level nested override applies only to the nearest source',
+                !!deepPrefabNode && deepAppliedJson?.data?.transform?.position?.[0] === deepAppliedX,
+                JSON.stringify({ expected: deepAppliedX, persisted: deepAppliedJson?.data?.transform?.position?.[0] ?? null }));
+
+            if (deepPrefabNode) {
+                deepPrefabNode.transform.position.x = -deepAppliedX;
+                editor.revertPrefabSelectionToTarget(deepPrefabNode);
+                for (let attempt = 0; attempt < 40 && editor.isCommandPending?.(); attempt += 1) await wait(50);
+                await wait(150);
+            }
+            record('three-level nested override reverts from the nearest source',
+                !!deepPrefabNode && deepPrefabNode.transform.position.x === deepAppliedX,
+                JSON.stringify({ expected: deepAppliedX, actual: deepPrefabNode?.transform.position.x ?? null }));
+
+            const deepPrefabNodeId = deepPrefabNode?.id ?? null;
+            deepPrefabNode = deepPrefabNodeId ? editor.scene.findGameObjectByID(deepPrefabNodeId) : null;
+            if (deepPrefabNode && deepPrefabPath) {
+                deepPrefabNode.sourceAssetGuid = '__missing-prefab-guid';
+                deepPrefabNode.sourceAssetPath = deepPrefabPath + '.missing';
+                editor.selectGameObject(deepPrefabNode, false);
+                editor.inspectorWindow?.refresh?.();
+                await wait(300);
+            }
+            const missingSourceStatus = document.querySelector('#prefab-source-status');
+            const missingApplyButton = document.querySelector('#prefab-apply');
+            const missingRevertButton = document.querySelector('#prefab-revert');
+            const repairButton = document.querySelector('#prefab-repair');
+            record('broken prefab source exposes safe Inspector recovery state',
+                !!deepPrefabNode && !!repairButton
+                    && missingApplyButton?.disabled === true
+                    && missingRevertButton?.disabled === true
+                    && repairButton.style.display !== 'none'
+                    && /missing/i.test(missingSourceStatus?.textContent ?? ''),
+                JSON.stringify({
+                    status: missingSourceStatus?.textContent ?? null,
+                    applyDisabled: missingApplyButton?.disabled ?? null,
+                    revertDisabled: missingRevertButton?.disabled ?? null,
+                    repairDisplay: repairButton?.style?.display ?? null
+                }));
+
+            const originalElectronApi = editor.electronAPI;
+            const repairRevisionBefore = commandRevision(editor);
+            if (repairButton && deepPrefabPath) {
+                editor.electronAPI = {
+                    ...originalElectronApi,
+                    showOpenDialog: async () => ({ canceled: false, filePaths: [deepPrefabPath] })
+                };
+                repairButton.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+                for (let attempt = 0; attempt < 200 && (
+                    window.Editor?.isCommandPending?.()
+                    || document.querySelector('#prefab-repair')?.disabled === true
+                ); attempt += 1) await wait(25);
+                await wait(150);
+                editor.electronAPI = originalElectronApi;
+                deepPrefabNode = deepPrefabNodeId ? editor.scene.findGameObjectByID(deepPrefabNodeId) : null;
+            }
+            const repairRevisionAfter = commandRevision(editor);
+            const repairedSourceGuid = deepPrefabNode?.sourceAssetGuid ?? null;
+            await dispatchHistoryShortcut('z');
+            let repairedUndoNode = deepPrefabNodeId ? editor.scene.findGameObjectByID(deepPrefabNodeId) : null;
+            const repairUndoPass = repairedUndoNode?.sourceAssetGuid === '__missing-prefab-guid';
+            await dispatchHistoryShortcut('y');
+            deepPrefabNode = deepPrefabNodeId ? editor.scene.findGameObjectByID(deepPrefabNodeId) : null;
+            record('rendered prefab Repair is exactly one undo unit',
+                repairedSourceGuid === deepPrefabMeta?.guid
+                    && repairRevisionAfter === repairRevisionBefore + 1
+                    && repairUndoPass
+                    && deepPrefabNode?.sourceAssetGuid === deepPrefabMeta?.guid,
+                JSON.stringify({
+                    expectedGuid: deepPrefabMeta?.guid ?? null,
+                    repairedSourceGuid,
+                    repairUndoGuid: repairedUndoNode?.sourceAssetGuid ?? null,
+                    repairRedoGuid: deepPrefabNode?.sourceAssetGuid ?? null,
+                    revisionBefore: repairRevisionBefore,
+                    revisionAfter: repairRevisionAfter
+                }));
+
+            if (deepPrefabNode) {
+                editor.selectGameObject(deepPrefabNode, false);
+                editor.inspectorWindow?.refresh?.();
+                await wait(300);
+            }
+            const connectedSourceStatus = document.querySelector('#prefab-source-status');
+            const connectedApplyButton = document.querySelector('#prefab-apply');
+            record('repaired prefab source restores connected Inspector actions',
+                /connected/i.test(connectedSourceStatus?.textContent ?? '')
+                    && connectedApplyButton?.disabled === false,
+                JSON.stringify({
+                    status: connectedSourceStatus?.textContent ?? null,
+                    applyDisabled: connectedApplyButton?.disabled ?? null
+                }));
+
+            const unpackRevisionBefore = commandRevision(editor);
+            document.querySelector('#prefab-unpack')?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+            for (let attempt = 0; attempt < 200 && window.Editor?.isCommandPending?.(); attempt += 1) await wait(25);
+            await wait(150);
+            let unpackedNode = deepPrefabNodeId ? editor.scene.findGameObjectByID(deepPrefabNodeId) : null;
+            const unpackRevisionAfter = commandRevision(editor);
+            const unpackPass = !!unpackedNode
+                && unpackedNode.prefabSource === null
+                && unpackedNode.sourceAssetPath === null
+                && unpackedNode.sourceAssetGuid === null
+                && unpackedNode.sourceAssetType === null;
+            await dispatchHistoryShortcut('z');
+            const unpackUndoNode = deepPrefabNodeId ? editor.scene.findGameObjectByID(deepPrefabNodeId) : null;
+            const unpackUndoPass = unpackUndoNode?.sourceAssetGuid === deepPrefabMeta?.guid;
+            await dispatchHistoryShortcut('y');
+            unpackedNode = deepPrefabNodeId ? editor.scene.findGameObjectByID(deepPrefabNodeId) : null;
+            record('rendered prefab Unpack is exactly one undo unit',
+                unpackPass
+                    && unpackRevisionAfter === unpackRevisionBefore + 1
+                    && unpackUndoPass
+                    && unpackedNode?.sourceAssetGuid === null,
+                JSON.stringify({
+                    unpackPass,
+                    undoGuid: unpackUndoNode?.sourceAssetGuid ?? null,
+                    redoGuid: unpackedNode?.sourceAssetGuid ?? null,
+                    revisionBefore: unpackRevisionBefore,
+                    revisionAfter: unpackRevisionAfter
+                }));
+
+            await editor.projectWindow?.refresh?.();
+            await wait(250);
             const assetItems = Array.from(document.querySelectorAll('.project-asset-grid .asset-item'));
-            const assetItem = assetItems.find((item) => /\.[a-z0-9]+$/i.test(item.textContent?.trim() ?? ''))
+            const assetItem = assetItems.find((item) => item.dataset.assetPath === prefabAssetPath)
+                ?? assetItems.find((item) => /\.[a-z0-9]+$/i.test(item.textContent?.trim() ?? ''))
                 ?? assetItems[assetItems.length - 1]
                 ?? null;
-            assetItem?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
-            await wait(100);
+            assetItem?.click();
+            await wait(200);
             record('Project async item selection reaches observable state',
                 !!assetItem && assetItem.getAttribute('aria-selected') === 'true',
                 'Clicking a rendered asset should complete selection after async metadata lookup');
@@ -977,8 +1480,22 @@ async function runSmokeTest(mainWindow) {
                     renameInput.value = renamedName;
                     renameInput.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
                 }
+                // Inline rename performs an awaited impact scan before the
+                // global command becomes pending. Give that phase a bounded
+                // window before observing command completion.
+                await wait(250);
+                for (let attempt = 0; attempt < 120 && editor.isCommandPending?.(); attempt += 1) await wait(50);
+                await editor.projectWindow?.refresh?.();
                 for (let attempt = 0; attempt < 30 && renamedPath && !(await window.electronAPI.fsExists(renamedPath)); attempt += 1) {
                     await wait(100);
+                }
+                // The transaction publishes the file before the renderer's
+                // async refresh callback completes. Wait for the history
+                // checkpoint as well, otherwise this gate can sample the
+                // filesystem between those two completion points.
+                for (let attempt = 0; attempt < 40
+                    && commandRevision(editor) !== revisionBeforeCancel + 1; attempt += 1) {
+                    await wait(50);
                 }
                 window.confirm = renameConfirm;
                 const renameMeta = renamedPath && await window.electronAPI.fsExists(renamedPath + '.meta')
@@ -989,7 +1506,15 @@ async function runSmokeTest(mainWindow) {
                         && await window.electronAPI.fsExists(renamedPath)
                         && renameMeta?.guid === duplicateMeta?.guid
                         && commandRevision(editor) === revisionBeforeCancel + 1,
-                    duplicatedPath + ' -> ' + renamedPath);
+                    JSON.stringify({
+                        from: duplicatedPath,
+                        to: renamedPath,
+                        sourceGone: duplicatedPath ? !(await window.electronAPI.fsExists(duplicatedPath)) : false,
+                        targetExists: renamedPath ? await window.electronAPI.fsExists(renamedPath) : false,
+                        guidPreserved: renameMeta?.guid === duplicateMeta?.guid,
+                        revisionBefore: revisionBeforeCancel,
+                        revisionAfter: commandRevision(editor)
+                    }));
 
                 if (renamedPath) await editor.projectWindow.focusAssetByPath(renamedPath);
                 let renamedItem = null;
@@ -1046,7 +1571,8 @@ async function runSmokeTest(mainWindow) {
 
             const persistedScene = {
                 bytes: editor.scene.toJSON(),
-                identity: sceneIdentity(editor.scene)
+                identity: sceneIdentity(editor.scene),
+                prefabLinks: prefabLinkIdentity(editor.scene)
             };
             const sceneSaved = await editor.saveActiveScene();
             record('rendered scene transaction saves at a clean checkpoint',
@@ -1076,9 +1602,23 @@ async function runSmokeTest(mainWindow) {
     `, true);
     if (runtimeCrashPoll) clearInterval(runtimeCrashPoll);
 
+    if (expectBuildSettings) {
+        const executable = path.join(process.env.ENGINE_BUILD_SETTINGS_SUCCESS_ROOT, 'TugberkEngine Game-Windows', 'Tugberk Player.exe');
+        const pass = fs.existsSync(executable);
+        result.checks.push({ name: 'Build Settings publishes the Windows executable to the selected folder', pass, details: executable });
+        if (!pass) {
+            result.failures.push({ name: 'Build Settings publishes the Windows executable to the selected folder', details: executable });
+            result.ok = false;
+        }
+    }
+
     fs.writeFileSync(outputPath, JSON.stringify(result, null, 2), 'utf8');
     console.log('Smoke test result written to', outputPath);
-    console.log(JSON.stringify(result, null, 2));
+    console.log(JSON.stringify({
+        ok: result.ok,
+        failures: result.failures ?? [],
+        checkCount: result.checks?.length ?? 0
+    }, null, 2));
 
     setTimeout(() => {
         app.exit(result.ok ? 0 : 1);
@@ -1175,7 +1715,24 @@ async function runPhase1PersistenceHarness(mainWindow) {
         discardRecovery(process.env.ENGINE_AUTO_OPEN_PROJECT_PATH);
     }
     if (screenshotPath) {
-        const image = await mainWindow.webContents.capturePage();
+        let image = null;
+        let lastCaptureError = null;
+        for (let attempt = 0; attempt < 8 && !image; attempt += 1) {
+            try {
+                const [width, height] = mainWindow.getContentSize();
+                if (width > 0 && height > 0) {
+                    image = await mainWindow.webContents.capturePage({
+                        x: 0, y: 0, width, height
+                    });
+                }
+            } catch (error) {
+                lastCaptureError = error;
+            }
+            if (!image) await new Promise((resolve) => setTimeout(resolve, 100));
+        }
+        if (!image || image.isEmpty()) {
+            throw lastCaptureError ?? new Error('Unable to capture a non-empty editor screenshot');
+        }
         fs.writeFileSync(screenshotPath, image.toPNG());
     }
     fs.writeFileSync(outputPath, JSON.stringify(result, null, 2), 'utf8');
@@ -1197,8 +1754,14 @@ ipcMain.handle('show-save-dialog', async (event, options) => {
     return result;
 });
 
+let buildSettingsSmokeDialogIndex = 0;
 ipcMain.handle('show-open-dialog', async (event, options) => {
     requireEditorSender(event);
+    if (process.env.ENGINE_BUILD_SETTINGS_SMOKE === '1' && options?.properties?.includes('openDirectory')) {
+        const selections = [null, process.env.ENGINE_BUILD_SETTINGS_SUCCESS_ROOT, process.env.ENGINE_BUILD_SETTINGS_FAILURE_ROOT];
+        const selectedPath = selections[buildSettingsSmokeDialogIndex++] ?? null;
+        return selectedPath ? { canceled: false, filePaths: [selectedPath] } : { canceled: true, filePaths: [] };
+    }
     const result = await dialog.showOpenDialog(BrowserWindow.fromWebContents(event.sender), options);
     if (!result.canceled && Array.isArray(result.filePaths)) {
         const grantsDirectories = options?.properties?.includes('openDirectory');
@@ -1417,7 +1980,14 @@ function serializeDirEntry(entry) {
 
 ipcMain.handle('fs-exists', async (event, targetPath) => {
     requireEditorSender(event);
-    return fs.existsSync(projectCapabilities.authorize(targetPath));
+    try {
+        return fs.existsSync(projectCapabilities.authorize(targetPath));
+    } catch (error) {
+        // A path can disappear between ancestor discovery and realpath.
+        // Missing is the value being queried; authorization failures remain strict.
+        if (error?.code === 'ENOENT' || error?.code === 'EBADF') return false;
+        throw error;
+    }
 });
 
 ipcMain.handle('fs-mkdir', async (event, targetPath, options) => {
@@ -1434,7 +2004,15 @@ ipcMain.handle('fs-readdir', async (event, targetPath, options) => {
 
 ipcMain.handle('fs-stat', async (event, targetPath) => {
     requireEditorSender(event);
-    return serializeStat(await fs.promises.stat(projectCapabilities.authorize(targetPath, { mustExist: true })));
+    try {
+        return serializeStat(await fs.promises.stat(projectCapabilities.authorize(targetPath, { mustExist: true })));
+    } catch (error) {
+        // A refresh can race with an expected undo/delete. Missing entries are
+        // ordinary filesystem state; keep authorization and all other errors
+        // strict while returning the contract's null stat for ENOENT.
+        if (error?.code === 'ENOENT') return null;
+        throw error;
+    }
 });
 
 ipcMain.handle('fs-read-file', async (event, targetPath, encoding) => {

@@ -77,7 +77,7 @@ export class ProjectSettingsWindow {
         this.mainPanel = mainPanel;
         content.appendChild(mainPanel);
 
-        const sections = ['Physics', 'Tags & Layers', 'Collision Matrix', 'Quality', 'Time', 'Audio'];
+        const sections = ['Physics', 'Input', 'Tags & Layers', 'Collision Matrix', 'Quality', 'Time', 'Audio'];
         sections.forEach(s => {
             const item = document.createElement('div');
             item.innerText = s;
@@ -135,6 +135,9 @@ export class ProjectSettingsWindow {
             case 'Physics':
                 this.renderPhysicsSection(container);
                 break;
+            case 'Input':
+                this.renderInputSection(container);
+                break;
             case 'Tags & Layers':
                 this.renderTagsAndLayersSection(container);
                 break;
@@ -182,6 +185,83 @@ export class ProjectSettingsWindow {
         });
 
         this.addSaveButton(container);
+    }
+
+    private static renderInputSection(container: HTMLElement): void {
+        const hint = document.createElement('div');
+        hint.innerText = 'Configure primary and alternate bindings used by editor Play Mode and saved scenes.';
+        hint.style.cssText = 'font-size: 11px; color: var(--unity-text-dim); margin-bottom: 12px;';
+        container.appendChild(hint);
+
+        const list = document.createElement('div');
+        list.style.cssText = 'display: flex; flex-direction: column; gap: 8px;';
+        container.appendChild(list);
+
+        const field = (row: HTMLElement, label: string, value: string, onChange: (value: string) => void) => {
+            const wrapper = document.createElement('label');
+            wrapper.style.cssText = 'display: flex; align-items: center; gap: 5px; font-size: 10px;';
+            wrapper.innerText = label;
+            const input = document.createElement('input');
+            input.type = 'text';
+            input.value = value;
+            input.placeholder = 'None';
+            input.setAttribute('aria-label', label);
+            input.style.cssText = 'width: 72px; background: var(--unity-bg-input); color: var(--unity-text); border: 1px solid var(--unity-border-light); padding: 3px 5px; font-size: 10px;';
+            let captureOrigin = value;
+            input.onfocus = () => {
+                captureOrigin = input.value;
+                input.value = '';
+                input.placeholder = 'Press key';
+            };
+            input.onkeydown = (event) => {
+                event.preventDefault();
+                if (event.key === 'Escape') {
+                    input.value = captureOrigin;
+                    input.blur();
+                    return;
+                }
+                if (event.key === 'Backspace' || event.key === 'Delete') {
+                    input.value = '';
+                    onChange('');
+                    input.blur();
+                    return;
+                }
+                if (event.repeat) return;
+                const binding = this.bindingFromKeyboardEvent(event);
+                if (!binding) return;
+                input.value = binding;
+                onChange(binding);
+                input.blur();
+            };
+            input.onchange = () => onChange(input.value.trim());
+            input.onblur = () => { input.placeholder = 'None'; };
+            wrapper.appendChild(input);
+            row.appendChild(wrapper);
+        };
+
+        ProjectSettings.inputAxes.forEach((axis, name) => {
+            const row = document.createElement('div');
+            row.style.cssText = 'display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 8px; background: var(--unity-bg-dark); border: 1px solid var(--unity-border); border-radius: 3px;';
+            const title = document.createElement('strong');
+            title.innerText = name;
+            title.style.cssText = 'width: 72px; font-size: 11px;';
+            row.appendChild(title);
+            field(row, 'Positive', axis.positiveButton, (value) => { axis.positiveButton = value; });
+            field(row, 'Negative', axis.negativeButton, (value) => { axis.negativeButton = value; });
+            field(row, 'Alt +', axis.altPositiveButton ?? '', (value) => { axis.altPositiveButton = value; });
+            field(row, 'Alt -', axis.altNegativeButton ?? '', (value) => { axis.altNegativeButton = value; });
+            list.appendChild(row);
+        });
+
+        this.addSaveButton(container);
+    }
+
+    private static bindingFromKeyboardEvent(event: KeyboardEvent): string {
+        const code = event.code || '';
+        if (!code || /^(Shift|Control|Alt|Meta|CapsLock|NumLock|ScrollLock|ContextMenu)/.test(code)) return '';
+        if (code === 'Space') return ' ';
+        if (/^Key[A-Z]$/.test(code)) return code.slice(3).toLowerCase();
+        return code;
     }
 
     // ─── Tags & Layers Section ─────────────────────────────────────────────────

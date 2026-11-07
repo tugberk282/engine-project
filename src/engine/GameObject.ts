@@ -266,7 +266,7 @@ export class GameObject {
 
     private matchesComponentType<T extends Component>(component: Component, componentType: (new (go: GameObject) => T) | string): boolean {
         if (typeof componentType === 'string') {
-            return component.constructor.name === componentType;
+            return ((component.constructor as any).__componentTypeName ?? component.constructor.name) === componentType;
         }
         return component instanceof componentType;
     }
@@ -285,7 +285,7 @@ export class GameObject {
             .map((component, index) => ({
                 component,
                 index,
-                order: ScriptRegistry.getExecutionOrder(component.constructor.name)
+                order: ScriptRegistry.getExecutionOrder(ScriptRegistry.getComponentName(component))
             }))
             .sort((left, right) => {
                 if (left.order !== right.order) return left.order - right.order;

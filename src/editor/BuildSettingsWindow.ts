@@ -12,7 +12,11 @@ export class BuildSettingsWindow extends EditorWindow {
     private activeBuildId: string | null = null;
     private status = 'Loading project scenes…';
 
-    constructor(parent: HTMLElement) { super(parent, 'Build Settings'); void this.refreshScenes(); }
+    constructor(parent: HTMLElement) {
+        super(parent, 'Build Settings');
+        BuildSettings.load();
+        void this.refreshScenes();
+    }
     public refresh(): void { this.onGUI(); }
 
     private projectRoot(): string {
@@ -25,8 +29,12 @@ export class BuildSettingsWindow extends EditorWindow {
         try {
             const manifest = JSON.parse(await this.fs.readFile(PathUtils.join(this.projectRoot(), 'project.json'), 'utf8') as string);
             const prior = new Map(this.scenes.map((scene) => [scene.path, scene.included]));
+            const persisted = new Set(BuildSettings.scenes.map((path) => path.replace(/\\/g, '/')));
             this.scenes = (manifest.scenes ?? []).map((scene: { path: string }) => ({
-                path: scene.path.replace(/\\/g, '/'), included: prior.get(scene.path) ?? true
+                path: scene.path.replace(/\\/g, '/'),
+                included: persisted.size > 0
+                    ? persisted.has(scene.path.replace(/\\/g, '/'))
+                    : (prior.get(scene.path) ?? true)
             }));
             this.status = this.scenes.length ? 'Ready to build.' : 'No authored scenes are listed in project.json.';
         } catch (error) { this.scenes = []; this.status = this.errorMessage(error); }
@@ -36,6 +44,8 @@ export class BuildSettingsWindow extends EditorWindow {
     private async startBuild(outputPath: string): Promise<void> {
         const scenes = this.scenes.filter((scene) => scene.included).map((scene) => scene.path);
         if (!scenes.length) throw new Error('Select at least one scene.');
+        BuildSettings.scenes = [...scenes];
+        BuildSettings.save();
         const projectRoot = this.projectRoot();
         const projectText = await this.fs.readFile(PathUtils.join(projectRoot, 'project.json'), 'utf8') as string;
         const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(projectText));
@@ -47,7 +57,10 @@ export class BuildSettingsWindow extends EditorWindow {
         });
         try {
             const result = await this.builds.build({ version: 1, buildId, projectRoot, projectRevision, outputPath, target: 'win-x64', scenes });
-            this.status = `Build complete: ${result.outputPath}`;
+            const diagnostics = result.manifest.runtimeDiagnostics ?? [];
+            this.status = diagnostics.length
+                ? `Build complete with ${diagnostics.length} runtime warning${diagnostics.length === 1 ? '' : 's'}: ${diagnostics.map((entry) => entry.type).join(', ')}`
+                : `Build complete: ${result.outputPath}`;
             await (window as any).electronAPI?.revealInFolder?.(result.outputPath);
         } catch (error) { this.status = this.errorMessage(error); }
         finally { unsubscribe(); this.activeBuildId = null; this.refresh(); }
@@ -55,26 +68,36 @@ export class BuildSettingsWindow extends EditorWindow {
 
     private errorMessage(error: unknown): string {
         const value = error as { code?: string; message?: string };
-        return `${value.code ? `${value.code}: ` : ''}${value.message || 'Build failed.'}`;
+        const message = value.message || 'Build failed.';
+        return value.code && !message.startsWith(`${value.code}: `)
+            ? `${value.code}: ${message}`
+            : message;
     }
 
     public onGUI(): void {
-        const content = this.getContentArea(); content.innerHTML = '';
+        const content = this.getContentArea(); content.innerHTML = ''; content.id = 'build-settings-content';
         content.style.cssText = 'padding:12px;display:flex;flex-direction:column;gap:10px;min-width:520px;min-height:360px';
         const title = document.createElement('strong'); title.innerText = 'Scenes In Build'; content.appendChild(title);
         const list = document.createElement('div'); list.style.cssText = 'flex:1;overflow:auto;border:1px solid var(--unity-border);padding:6px';
         this.scenes.forEach((scene, index) => {
             const row = document.createElement('label'); row.style.cssText = 'display:flex;gap:8px;padding:4px';
             const checkbox = document.createElement('input'); checkbox.type = 'checkbox'; checkbox.checked = scene.included;
-            checkbox.disabled = !!this.activeBuildId; checkbox.onchange = () => { scene.included = checkbox.checked; };
+            checkbox.dataset.scenePath = scene.path;
+            checkbox.setAttribute('aria-label', `Include ${scene.path} in build`);
+            checkbox.disabled = !!this.activeBuildId;
+            checkbox.onchange = () => {
+                scene.included = checkbox.checked;
+                BuildSettings.scenes = this.scenes.filter((entry) => entry.included).map((entry) => entry.path);
+                BuildSettings.save();
+            };
             row.append(checkbox, document.createTextNode(`${index}. ${scene.path}`)); list.appendChild(row);
         });
         content.appendChild(list);
-        const status = document.createElement('div'); status.setAttribute('role', 'status'); status.innerText = this.status; content.appendChild(status);
+        const status = document.createElement('div'); status.id = 'build-settings-status'; status.setAttribute('role', 'status'); status.setAttribute('aria-live', 'polite'); status.innerText = this.status; content.appendChild(status);
         const actions = document.createElement('div'); actions.style.cssText = 'display:flex;justify-content:flex-end;gap:8px';
-        const refresh = document.createElement('button'); refresh.innerText = 'Refresh'; refresh.disabled = !!this.activeBuildId;
+        const refresh = document.createElement('button'); refresh.id = 'build-settings-refresh'; refresh.innerText = 'Refresh'; refresh.disabled = !!this.activeBuildId;
         refresh.onclick = () => void this.refreshScenes();
-        const build = document.createElement('button'); build.innerText = this.activeBuildId ? 'Cancel Build' : 'Build Windows Player';
+        const build = document.createElement('button'); build.id = 'build-settings-build'; build.innerText = this.activeBuildId ? 'Cancel Build' : 'Build Windows Player';
         build.disabled = !this.activeBuildId && !this.scenes.some((scene) => scene.included);
         build.onclick = async () => {
             if (this.activeBuildId) { await this.builds.cancel(this.activeBuildId).catch(() => {}); return; }

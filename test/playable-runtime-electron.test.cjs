@@ -42,7 +42,15 @@ test('rendered Play/Pause/Step/Stop uses the supervised runtime and restores aut
     const checks = new Map(result.checks.map((check) => [check.name, check.pass]));
     for (const name of [
         'retained playable scene loads an authored object',
+        'retained playable scene loads an input-controlled player',
         'child runtime visibly advances authored Update and fixed-step state',
+        'Game View captures the configured physical keyboard axis',
+        'Game View keyboard input reaches the child runtime and moves the player',
+        'Game View captures mouse look deltas in the runtime snapshot',
+        'Game View mouse look reaches the child runtime and rotates the player',
+        'Game View captures the configured Jump press',
+        'Game View Jump reaches grounded child-runtime physics',
+        'Game View releases Jump after keyup',
         'Pause freezes runtime-authored state',
         'Step advances one paused runtime frame',
         'Stop restores edit scene byte-for-byte'

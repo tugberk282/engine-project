@@ -64,8 +64,9 @@ class RuntimeSupervisor {
 
     pause() { return this.transition('pause'); }
     resume() { return this.transition('resume'); }
-    tick(deltaTime) { return this.transition('tick', { deltaTime }); }
-    step(deltaTime) { return this.transition('step', { deltaTime }); }
+    tick(deltaTime, input = {}) { return this.transition('tick', { deltaTime, input }); }
+    step(deltaTime, input = {}) { return this.transition('step', { deltaTime, input }); }
+    uiEvent(name, value) { return this.transition('uiEvent', { name, value }); }
 
     async transition(command, payload = {}) {
         if (!this.child) throw this.error('RUNTIME_NOT_RUNNING', 'The play runtime is not running.');

@@ -38,8 +38,9 @@ export class AudioSource extends Component {
         if (!this.buffer) return;
 
         // Try to find listener in scene
+        // Audio loading can run in editor/test processes without a browser global.
         // @ts-ignore
-        const listener = window.AudioListenerInstance;
+        const listener = typeof window !== 'undefined' ? window.AudioListenerInstance : null;
         if (!listener) {
             console.warn("No AudioListener found in the scene. AudioSource might not play.");
             return;
@@ -60,6 +61,9 @@ export class AudioSource extends Component {
         this.audio.setBuffer(this.buffer);
         this.audio.setLoop(this.loop);
         this.audio.setVolume(this.volume);
+        if ('setPlaybackRate' in this.audio) {
+            this.audio.setPlaybackRate(this.pitch);
+        }
 
         if (this.audio instanceof THREE.PositionalAudio) {
             this.audio.setRefDistance(1);
@@ -110,6 +114,7 @@ export class AudioSource extends Component {
         this.stop();
         if (this.audio) {
             this.gameObject.object3D.remove(this.audio);
+            this.audio = null;
         }
     }
 

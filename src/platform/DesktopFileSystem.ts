@@ -34,8 +34,16 @@ export class DesktopFileSystem {
     private protocol: TugberkV1API | null;
 
     constructor() {
-        this.electronAPI = (window as any).electronAPI ?? null;
-        this.protocol = (window as any).tugberk?.v1 ?? null;
+        const host = typeof window !== 'undefined' ? window as any : null;
+        this.electronAPI = host?.electronAPI ?? null;
+        this.protocol = host?.tugberk?.v1 ?? null;
+    }
+
+    /** True when the privileged desktop filesystem API is available. */
+    public isAvailable(): boolean {
+        return typeof this.electronAPI?.fsExists === 'function'
+            && typeof this.electronAPI?.fsReadFile === 'function'
+            && typeof this.electronAPI?.fsWriteFile === 'function';
     }
 
     private deserializeStat(stat: SerializedStat | null): any {

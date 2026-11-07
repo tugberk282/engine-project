@@ -4,9 +4,10 @@ Engine Project is a full-scale game engine and runtime built as an Electron-base
 
 ## Durum
 
-- Faz 1-8 tamamlandi
 - Faz 9 aktif: Desktop App Productization
-- Guncel parity durumu: `593/593`
+- Usable-core durumu: editor authoring, runtime gameplay, persistence ve Windows export cekirdegi testlerle dogrulaniyor
+- `npm test`: 92/92 test basarili
+- Paketli smoke: 43/43 kontrol basarili
 
 ## Teknoloji
 
@@ -41,22 +42,26 @@ Build:
 npm run build
 ```
 
-Parity testleri:
+Ana test suite:
 
 ```bash
-npm run test:parity
+npm test
 ```
 
-Faz 8 testleri:
+Editor workflow ve Scene View:
 
 ```bash
-npm run test:phase8
+npm run test:editor-workflow
+npm run test:scene-view
+npm run test:input-focus
 ```
 
-Faz 9 testleri:
+Runtime ve guvenlik:
 
 ```bash
-npm run test:phase9
+npm run test:runtime
+npm run test:security
+npm run test:diagnostics
 ```
 
 ## Mimari ve Handoff
@@ -88,6 +93,15 @@ Ilk buildable vertical slice:
 
 ```bash
 npm run verify:vertical-slice
+```
+
+Windows paket ve installer dogrulamasi:
+
+```bash
+npm run electron:build:dir
+npm run test:packaged-smoke -- release/win-unpacked
+npm run electron:build:installer
+npm run test:installer -- release
 ```
 
 Kanonik ornek proje, paketli smoke adimlari ve bilinen parity bosluklari

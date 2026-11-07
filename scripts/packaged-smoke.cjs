@@ -34,11 +34,21 @@ function runExecutable(executable, options = {}) {
     let stderr = '';
     child.stdout.on('data', (chunk) => { stdout += chunk; });
     child.stderr.on('data', (chunk) => { stderr += chunk; });
+    const terminate = () => {
+      if (process.platform === 'win32' && child.pid) {
+        spawn('taskkill', ['/pid', String(child.pid), '/t', '/f'], { windowsHide: true, stdio: 'ignore' });
+      } else {
+        child.kill();
+      }
+    };
     const timer = setTimeout(() => {
-      child.kill();
+      terminate();
       reject(new Error(`timed out after ${timeoutMs}ms launching ${executable}\n${stdout}\n${stderr}`));
     }, timeoutMs);
-    child.once('error', reject);
+    child.once('error', (error) => {
+      clearTimeout(timer);
+      reject(error);
+    });
     child.once('exit', (code, signal) => {
       clearTimeout(timer);
       if (code !== 0) {

@@ -15,8 +15,10 @@ function snapshot(overrides = {}) {
 test('representative project scene and custom component identifiers remain valid', () => {
     const file = path.join(__dirname, '..', 'samples', 'vertical-slice', 'Assets', 'Scenes', 'Main.scene.json');
     const result = validateRuntimeSnapshot(fs.readFileSync(file, 'utf8'));
-    assert.equal(result.metrics.gameObjects, 2);
-    assert.equal(result.metrics.components, 3);
+    // Keep this representative fixture aligned with the canonical playable scene;
+    // the security gate must validate the complete authored payload, not an old count.
+    assert.equal(result.metrics.gameObjects, 6);
+    assert.equal(result.metrics.components, 19);
 });
 
 test('pathological snapshots fail with bounded stable errors', () => {

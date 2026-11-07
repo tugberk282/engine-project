@@ -1,7 +1,15 @@
 import * as CANNON from 'cannon-es';
+import * as THREE from 'three';
 import { RigidBody } from './components/RigidBody';
 import { LayerManager } from './LayerManager';
 import { ProjectSettings } from './ProjectSettings';
+
+export interface PhysicsRaycastHit {
+    gameObject: any;
+    distance: number;
+    point: THREE.Vector3;
+    normal: THREE.Vector3;
+}
 
 export class PhysicsSystem {
     public world: CANNON.World;
@@ -105,6 +113,108 @@ export class PhysicsSystem {
             const supportingY = bodyJ === rb.body ? contact.ni.y : -contact.ni.y;
             return supportingY >= minimumUp;
         });
+    }
+
+    /** Cast a world-space ray through registered physics bodies. */
+    public raycast(
+        origin: THREE.Vector3,
+        direction: THREE.Vector3,
+        maxDistance: number = Infinity,
+        layerMask: number = 0xFFFFFFFF,
+        includeTriggers: boolean = true
+    ): PhysicsRaycastHit | null {
+        const hits = this.raycastAll(origin, direction, maxDistance, layerMask, includeTriggers, true);
+        return hits[0] ?? null;
+    }
+
+    /** Return all ray hits ordered from nearest to farthest. */
+    public raycastAll(
+        origin: THREE.Vector3,
+        direction: THREE.Vector3,
+        maxDistance: number = Infinity,
+        layerMask: number = 0xFFFFFFFF,
+        includeTriggers: boolean = true,
+        closestOnly: boolean = false
+    ): PhysicsRaycastHit[] {
+        const length = direction.length();
+        if (!Number.isFinite(length) || length <= 1e-8) return [];
+        const distance = Number.isFinite(maxDistance) ? Math.max(0, maxDistance) : 1e6;
+        const from = new CANNON.Vec3(origin.x, origin.y, origin.z);
+        const to = new CANNON.Vec3(
+            origin.x + direction.x / length * distance,
+            origin.y + direction.y / length * distance,
+            origin.z + direction.z / length * distance
+        );
+        const results: PhysicsRaycastHit[] = [];
+        const options: CANNON.RayOptions = {
+            from,
+            to,
+            mode: closestOnly ? CANNON.Ray.CLOSEST : CANNON.Ray.ALL,
+            collisionFilterMask: layerMask >>> 0,
+            collisionFilterGroup: 0xFFFFFFFF,
+            checkCollisionResponse: includeTriggers
+        };
+        if (!closestOnly) {
+            options.callback = (result) => {
+                const gameObject = (result.body as any)?.userData?.gameObject;
+                if (!gameObject) return;
+                results.push({
+                    gameObject,
+                    distance: result.distance,
+                    point: new THREE.Vector3(result.hitPointWorld.x, result.hitPointWorld.y, result.hitPointWorld.z),
+                    normal: new THREE.Vector3(result.hitNormalWorld.x, result.hitNormalWorld.y, result.hitNormalWorld.z)
+                });
+            };
+        }
+        const result = new CANNON.RaycastResult();
+        if (closestOnly) {
+            options.result = result;
+            if (!this.world.raycastClosest(from, to, options, result)) return [];
+            const gameObject = (result.body as any)?.userData?.gameObject;
+            if (!gameObject) return [];
+            results.push({
+                gameObject,
+                distance: result.distance,
+                point: new THREE.Vector3(result.hitPointWorld.x, result.hitPointWorld.y, result.hitPointWorld.z),
+                normal: new THREE.Vector3(result.hitNormalWorld.x, result.hitNormalWorld.y, result.hitNormalWorld.z)
+            });
+        } else {
+            this.world.raycastAll(from, to, options);
+        }
+        return results.sort((left, right) => left.distance - right.distance);
+    }
+
+    /** Return bodies whose physics shapes overlap a world-space sphere. */
+    public overlapSphere(
+        center: THREE.Vector3,
+        radius: number,
+        layerMask: number = 0xFFFFFFFF,
+        includeTriggers: boolean = true
+    ): any[] {
+        const safeRadius = Number.isFinite(radius) ? Math.max(0, radius) : 0;
+        const hits: any[] = [];
+        for (const body of this.world.bodies) {
+            if ((body.collisionFilterGroup & (layerMask >>> 0)) === 0) continue;
+            if (!includeTriggers && !body.collisionResponse) continue;
+            const gameObject = (body as any).userData?.gameObject;
+            if (!gameObject) continue;
+
+            let overlaps = false;
+            for (let index = 0; index < body.shapes.length && !overlaps; index += 1) {
+                const shape = body.shapes[index];
+                const offset = body.shapeOffsets[index] ?? new CANNON.Vec3();
+                const worldX = body.position.x + offset.x;
+                const worldY = body.position.y + offset.y;
+                const worldZ = body.position.z + offset.z;
+                const shapeRadius = Number.isFinite(shape.boundingSphereRadius) ? shape.boundingSphereRadius : 0;
+                const dx = center.x - worldX;
+                const dy = center.y - worldY;
+                const dz = center.z - worldZ;
+                overlaps = dx * dx + dy * dy + dz * dz <= (safeRadius + shapeRadius) ** 2;
+            }
+            if (overlaps) hits.push(gameObject);
+        }
+        return hits;
     }
 
     /**
@@ -247,8 +357,9 @@ export class PhysicsSystem {
                 this.dispatchPhysicsEvent(goJ, isNewContact ? 'onTriggerEnter' : 'onTriggerStay', goI);
             } else {
                 // Collision events
-                this.dispatchPhysicsEvent(goI, 'onCollisionStay', { gameObject: goJ });
-                this.dispatchPhysicsEvent(goJ, 'onCollisionStay', { gameObject: goI });
+                const eventName = isNewContact ? 'onCollisionEnter' : 'onCollisionStay';
+                this.dispatchPhysicsEvent(goI, eventName, { gameObject: goJ, contact });
+                this.dispatchPhysicsEvent(goJ, eventName, { gameObject: goI, contact });
             }
         }
 

@@ -23,6 +23,7 @@ export class PlayModeManager {
     private targetFrameTime: number = 1 / 60; // 60 FPS default
     private readonly runtime = new RuntimeBridge();
     private runtimeError: RuntimeFailure | null = null;
+    private lastRuntimeUiEvent: string | null = null;
 
     private sceneSnapshot: any = null;
     private editorState: any = null;
@@ -39,7 +40,17 @@ export class PlayModeManager {
             console.error(`[PlayMode] ${error.code}: ${error.message}`);
             this.exitPlayMode();
         });
+        if (typeof window !== 'undefined') {
+            window.addEventListener('tugberk-ui-event', this.handleRuntimeUIEvent as EventListener);
+        }
     }
+
+    private readonly handleRuntimeUIEvent = (event: Event): void => {
+        if (this.mode !== 'play') return;
+        const detail = (event as CustomEvent<{ name?: string; value?: unknown }>).detail;
+        const name = detail?.name;
+        if (typeof name === 'string' && name.length > 0 && name.length <= 128) this.runtime.uiEvent(name, detail?.value);
+    };
 
     public static getInstance(): PlayModeManager {
         if (!PlayModeManager.instance) {
@@ -72,6 +83,7 @@ export class PlayModeManager {
         this.lastFrameTime = performance.now() / 1000;
 
         this.runtimeError = null;
+        this.lastRuntimeUiEvent = null;
         if (this.sceneSnapshot) this.runtime.start(this.sceneSnapshot);
 
         // Trigger callbacks
@@ -88,6 +100,7 @@ export class PlayModeManager {
         if (this.mode === 'edit') return;
 
         this.runtime.stop();
+        this.lastRuntimeUiEvent = null;
 
         // Restore scene from snapshot
         if (this.sceneSnapshot) {
@@ -142,7 +155,7 @@ export class PlayModeManager {
         if (this.mode !== 'play') return;
         this.isPaused = true;
         this.deltaTime = this.targetFrameTime;
-        this.runtime.step(this.targetFrameTime);
+        this.runtime.step(this.targetFrameTime, Input.snapshot());
     }
 
     /**
@@ -289,10 +302,21 @@ export class PlayModeManager {
         for (const transformState of runtimeFrame.transforms) {
             const gameObject = scene.findGameObjectByID(transformState.id);
             if (!gameObject) continue;
+            if (typeof transformState.active === 'boolean' && gameObject.enabled !== transformState.active) {
+                gameObject.setActive(transformState.active);
+            }
             gameObject.transform.position.set(...transformState.position);
             gameObject.transform.rotation.set(...transformState.rotation);
             gameObject.transform.scale.set(...transformState.scale);
             gameObject.object3D.updateMatrixWorld(true);
+        }
+        if (runtimeFrame.lastUiEvent && runtimeFrame.lastUiEvent !== this.lastRuntimeUiEvent) {
+            this.lastRuntimeUiEvent = runtimeFrame.lastUiEvent;
+            if (typeof window !== 'undefined') {
+                window.dispatchEvent(new CustomEvent('tugberk-runtime-ui-event', {
+                    detail: { name: runtimeFrame.lastUiEvent, value: runtimeFrame.lastUiEventPayload }
+                }));
+            }
         }
     }
 

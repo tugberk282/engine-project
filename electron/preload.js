@@ -146,9 +146,10 @@ const tugberkV1 = Object.freeze({
             throw Object.assign(new Error('Invalid IPC response'), { code: responseValidation.code });
         }
         if (!response.ok) {
-            throw Object.assign(new Error(response.error?.message || 'Request failed'), {
-                code: response.error?.code || 'REQUEST_FAILED'
-            });
+            const code = response.error?.code || 'REQUEST_FAILED';
+            const message = response.error?.message || 'Request failed';
+            // contextBridge preserves Error.message but may drop custom fields.
+            throw Object.assign(new Error(`${code}: ${message}`), { code });
         }
         return response.value;
     },

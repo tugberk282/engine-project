@@ -20,6 +20,10 @@ export class DirtyState {
         this.emit();
     }
 
+    public getCommandRevision(): number {
+        return this.commandRevision;
+    }
+
     public markPersisted(): void {
         this.persistedRevision = this.revision;
         this.persistedCommandRevision = this.commandRevision;

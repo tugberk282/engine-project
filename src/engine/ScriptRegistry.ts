@@ -1,36 +1,6 @@
 /// <reference types="vite/client" />
 import { Component } from './Component';
 import { AssetDatabase } from './AssetDatabase';
-import { RigidBody } from './components/RigidBody';
-import { MeshRenderer } from './components/MeshRenderer';
-import { EditorCameraController } from './components/EditorCameraController';
-import { AudioSource } from './components/AudioSource';
-import { AudioListener } from './components/AudioListener';
-import { ParticleSystem } from './components/ParticleSystem';
-import { Camera } from './components/Camera';
-import { Light } from './components/Light';
-import { Animator } from './components/Animator';
-import { BoxCollider } from './components/BoxCollider';
-import { CapsuleCollider } from './components/CapsuleCollider';
-import { MeshFilter } from './components/MeshFilter';
-import { Canvas } from './components/Canvas';
-import { CanvasGroup } from './components/CanvasGroup';
-import { EventSystem } from './components/EventSystem';
-import { GraphicRaycaster } from './components/GraphicRaycaster';
-import { RectTransform } from './components/RectTransform';
-import { UIImage } from './components/UIImage';
-import { UIText } from './components/UIText';
-import { UIButton } from './components/UIButton';
-import { UIInputField } from './components/UIInputField';
-import { UIDropdown } from './components/UIDropdown';
-import { ToggleGroup } from './components/ToggleGroup';
-import { UIToggle } from './components/UIToggle';
-import { UISlider } from './components/UISlider';
-import { UIScrollbar } from './components/UIScrollbar';
-import { UIScrollRect } from './components/UIScrollRect';
-import { VerticalLayoutGroup } from './components/VerticalLayoutGroup';
-import { HorizontalLayoutGroup } from './components/HorizontalLayoutGroup';
-import { ContentSizeFitter } from './components/ContentSizeFitter';
 
 // Component category types
 export type ComponentCategory = 'Physics' | 'Rendering' | 'UI' | 'Audio' | 'Animation' | 'Scripting' | 'Utility';
@@ -78,6 +48,7 @@ export class ScriptRegistry {
         'VerticalLayoutGroup': 'UI',
         'HorizontalLayoutGroup': 'UI',
         'ContentSizeFitter': 'UI',
+        'UIEventAction': 'Utility',
 
         // Audio
         'AudioSource': 'Audio',
@@ -89,39 +60,6 @@ export class ScriptRegistry {
     };
 
     public static initialize() {
-        // Register Core Components with categories
-        this.registerWithCategory(MeshRenderer, 'Rendering');
-        this.registerWithCategory(MeshFilter, 'Rendering');
-        this.registerWithCategory(Canvas, 'UI');
-        this.registerWithCategory(CanvasGroup, 'UI');
-        this.registerWithCategory(GraphicRaycaster, 'UI');
-        this.registerWithCategory(EventSystem, 'UI');
-        this.registerWithCategory(RectTransform, 'UI');
-        this.registerWithCategory(UIImage, 'UI');
-        this.registerWithCategory(UIText, 'UI');
-        this.registerWithCategory(UIButton, 'UI');
-        this.registerWithCategory(UIInputField, 'UI');
-        this.registerWithCategory(UIDropdown, 'UI');
-        this.registerWithCategory(ToggleGroup, 'UI');
-        this.registerWithCategory(UIToggle, 'UI');
-        this.registerWithCategory(UISlider, 'UI');
-        this.registerWithCategory(UIScrollbar, 'UI');
-        this.registerWithCategory(UIScrollRect, 'UI');
-        this.registerWithCategory(VerticalLayoutGroup, 'UI');
-        this.registerWithCategory(HorizontalLayoutGroup, 'UI');
-        this.registerWithCategory(ContentSizeFitter, 'UI');
-
-        this.registerWithCategory(RigidBody, 'Physics');
-        this.registerWithCategory(EditorCameraController, 'Rendering');
-        this.registerWithCategory(AudioSource, 'Audio');
-        this.registerWithCategory(AudioListener, 'Audio');
-        this.registerWithCategory(ParticleSystem, 'Animation');
-        this.registerWithCategory(Camera, 'Rendering');
-        this.registerWithCategory(Light, 'Rendering');
-        this.registerWithCategory(Animator, 'Animation');
-        this.registerWithCategory(BoxCollider, 'Physics');
-        this.registerWithCategory(CapsuleCollider, 'Physics');
-
         // Auto-load user scripts from src/scripts
         // Note: import.meta.glob is a Vite-specific feature
         const modules = import.meta.glob('../scripts/*.ts', { eager: true });
@@ -132,7 +70,7 @@ export class ScriptRegistry {
             for (const key in module) {
                 const exported = module[key];
                 if (typeof exported === 'function' && exported.prototype instanceof Component) {
-                    this.registerWithCategory(exported, 'Scripting');
+                    this.registerWithCategory(exported, 'Scripting', key);
                 }
             }
         }
@@ -146,8 +84,14 @@ export class ScriptRegistry {
         return null;
     }
 
-    public static register(componentClass: any) {
-        this.scripts.set(componentClass.name, componentClass);
+    public static register(componentClass: any, componentName: string = componentClass.name) {
+        const stableName = componentName.trim();
+        if (!stableName) throw new Error('Component registration requires a stable name');
+        Object.defineProperty(componentClass, '__componentTypeName', {
+            value: stableName,
+            configurable: true
+        });
+        this.scripts.set(stableName, componentClass);
     }
 
     public static refreshScriptExecutionOrderFromAssetDatabase(): void {
@@ -191,6 +135,13 @@ export class ScriptRegistry {
 
     public static getComponentClass(name: string): any {
         return this.scripts.get(name);
+    }
+
+    public static getComponentName(componentOrClass: any): string {
+        const componentClass = typeof componentOrClass === 'function'
+            ? componentOrClass
+            : componentOrClass?.constructor;
+        return componentClass?.__componentTypeName ?? componentClass?.name ?? '';
     }
 
     public static getRegisteredNames(): string[] {
@@ -238,14 +189,14 @@ export class ScriptRegistry {
     /**
      * Register component with specific category
      */
-    public static registerWithCategory(componentClass: any, category?: ComponentCategory): void {
-        this.register(componentClass);
+    public static registerWithCategory(componentClass: any, category?: ComponentCategory, componentName: string = componentClass.name): void {
+        this.register(componentClass, componentName);
         if (category) {
-            this.componentCategoryMap.set(componentClass.name, category);
-        } else if (this.BUILTIN_CATEGORIES[componentClass.name]) {
-            this.componentCategoryMap.set(componentClass.name, this.BUILTIN_CATEGORIES[componentClass.name]);
+            this.componentCategoryMap.set(componentName, category);
+        } else if (this.BUILTIN_CATEGORIES[componentName]) {
+            this.componentCategoryMap.set(componentName, this.BUILTIN_CATEGORIES[componentName]);
         } else {
-            this.componentCategoryMap.set(componentClass.name, 'Scripting');
+            this.componentCategoryMap.set(componentName, 'Scripting');
         }
     }
 

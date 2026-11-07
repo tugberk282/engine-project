@@ -4,6 +4,7 @@ import { PhysicsSystem } from './PhysicsSystem';
 import { ScriptRegistry } from './ScriptRegistry';
 import { AssetDatabase } from './AssetDatabase';
 import { ProjectSettings } from './ProjectSettings';
+import { Input } from './Input';
 import { Time } from './Time';
 import { CoroutineManager } from './CoroutineManager';
 import {
@@ -23,6 +24,8 @@ export class Scene {
     public name: string = 'Untitled';
     public threeScene: THREE.Scene;
     public gameObjects: GameObject[] = [];
+    /** Optional per-scene input contract consumed by the editor and standalone player. */
+    public inputMap: Record<string, unknown> | null = null;
 
     // Environment Settings
     public ambientColor: string = "#ffffff";
@@ -228,6 +231,7 @@ export class Scene {
             name: this.name,
             version: SCENE_SCHEMA_VERSION,
             environment: this.serializeEnvironmentSettings(),
+            inputMap: this.inputMap ?? this.serializeInputMap(),
             gameObjects: roots.map(go => go.serialize())
         };
         return stableStringify(mergePreservingUnknown(this.serializedTemplate, data), 2);
@@ -246,6 +250,10 @@ export class Scene {
         this.serializedTemplate = data;
         if (data.sceneId) this.sceneId = data.sceneId;
         this.name = data.name;
+        this.inputMap = data.inputMap && typeof data.inputMap === 'object' && !Array.isArray(data.inputMap)
+            ? structuredClone(data.inputMap as Record<string, unknown>)
+            : null;
+        this.applySerializedInputMap();
         this.applySerializedEnvironment(data.environment);
         this.isLoadingFromSerializedData = true;
         try {
@@ -446,5 +454,30 @@ export class Scene {
         this.filmGrainIntensity = environment.postProcessing.filmGrain.intensity;
 
         this.updateEnvironment();
+    }
+
+    private serializeInputMap(): Record<string, unknown> {
+        const axes = Object.fromEntries(ProjectSettings.inputAxes.entries());
+        const jump = ProjectSettings.inputAxes.get('Jump')?.positiveButton ?? ' ';
+        return { axes, actions: { Jump: [jump] } };
+    }
+
+    private applySerializedInputMap(): void {
+        const axes = this.inputMap?.axes;
+        if (!axes || typeof axes !== 'object' || Array.isArray(axes)) return;
+        const bindings: Array<[string, { positiveButton: string; negativeButton: string; altPositiveButton?: string; altNegativeButton?: string; sensitivity: number; gravity: number }]> = [];
+        for (const [name, value] of Object.entries(axes)) {
+            if (!value || typeof value !== 'object' || Array.isArray(value)) continue;
+            const axis = value as Record<string, unknown>;
+            bindings.push([name, {
+                positiveButton: typeof axis.positiveButton === 'string' ? axis.positiveButton : String(axis.positive ?? ''),
+                negativeButton: typeof axis.negativeButton === 'string' ? axis.negativeButton : String(axis.negative ?? ''),
+                altPositiveButton: typeof axis.altPositiveButton === 'string' ? axis.altPositiveButton : String(axis.positiveAlt ?? ''),
+                altNegativeButton: typeof axis.altNegativeButton === 'string' ? axis.altNegativeButton : String(axis.negativeAlt ?? ''),
+                sensitivity: Number(axis.sensitivity) || 3,
+                gravity: Number(axis.gravity) || 3
+            }]);
+        }
+        if (bindings.length > 0) Input.configureProjectAxes(bindings);
     }
 }

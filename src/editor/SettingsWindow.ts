@@ -9,6 +9,7 @@ export class SettingsWindow {
     private currentTab: 'project' | 'build' = 'project';
 
     public show(): void {
+        BuildSettings.load();
         if (this.windowElement) {
             this.windowElement.style.display = 'block';
             return;

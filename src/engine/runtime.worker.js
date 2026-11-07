@@ -5,6 +5,11 @@ let frame = 0;
 let time = 0;
 let snapshot = null;
 let gameplay = null;
+let lastUiEvent = null;
+let lastUiEventPayload = null;
+let runtimeObjects = [];
+let runtimeCollisionMatrix = new Array(32).fill(0xFFFFFFFF);
+let runtimeFixedAccumulator = 0;
 
 const DEFAULT_FIXED_STEP = 1 / 50;
 
@@ -16,24 +21,123 @@ function componentData(component) {
 
 function allGameObjects(roots) {
     const result = [];
-    const visit = (object) => {
+    const visit = (object, parentEnabled = true) => {
         if (!object || typeof object !== 'object') return;
+        object.enabled = parentEnabled && object.enabled !== false;
         result.push(object);
-        if (Array.isArray(object.children)) object.children.forEach(visit);
+        if (Array.isArray(object.children)) object.children.forEach((child) => visit(child, object.enabled));
     };
-    if (Array.isArray(roots)) roots.forEach(visit);
+    if (Array.isArray(roots)) roots.forEach((root) => visit(root, true));
     return result;
 }
 
 function findComponent(object, type) {
     return Array.isArray(object.components)
-        ? object.components.find((component) => component && component.type === type)
+        ? object.components.find((component) => component && component.type === type && component.data?.enabled !== false)
         : null;
+}
+
+function runtimeComponent(object, type) {
+    return findComponent(object, type);
+}
+
+function applyUiEventActions(name, value) {
+    for (const object of runtimeObjects) {
+        for (const component of object.components || []) {
+            if (component?.data?.enabled === false || component?.type !== 'UIEventAction' || component.data?.eventName !== name) continue;
+            if (component.data?.action === 'LoadScene') continue;
+            const target = component.data?.targetObjectId
+                ? runtimeObjects.find((candidate) => candidate.id === component.data.targetObjectId) || object
+                : object;
+            if (component.data?.action === 'SetPosition') {
+                const position = component.data?.position;
+                if (Array.isArray(position) && position.length >= 3) target.transform.position = vector3(position, target.transform?.position || [0, 0, 0]);
+                continue;
+            }
+            if (component.data?.action === 'SetRotation') {
+                const rotation = component.data?.rotation;
+                if (Array.isArray(rotation) && rotation.length >= 3) target.transform.rotation = vector3(rotation, target.transform?.rotation || [0, 0, 0]);
+                continue;
+            }
+            if (component.data?.action === 'SetScale') {
+                const scale = component.data?.scale;
+                if (Array.isArray(scale) && scale.length >= 3) target.transform.scale = vector3(scale, target.transform?.scale || [1, 1, 1]);
+                continue;
+            }
+            if (component.data?.action === 'SetVelocity') {
+                const velocity = component.data?.velocity;
+                const body = (target.components || []).find((candidate) => candidate?.type === 'RigidBody');
+                if (body && Array.isArray(velocity) && velocity.length >= 3) body.data = { ...(body.data || {}), velocity: vector3(velocity, body.data?.velocity || [0, 0, 0]) };
+                continue;
+            }
+            if (component.data?.action === 'SetText') {
+                const authoredText = String(component.data?.text ?? '');
+                const displayValue = value && typeof value === 'object' && value.value !== undefined ? value.value : value;
+                const text = component.data?.useEventValue === true
+                    ? authoredText.split('{value}').join(displayValue == null ? '' : String(displayValue))
+                    : authoredText;
+                for (const targetComponent of target.components || []) {
+                    if (targetComponent?.type === 'UIText' || targetComponent?.type === 'UIInputField') targetComponent.data = { ...(targetComponent.data || {}), text };
+                }
+                continue;
+            }
+            target.enabled = component.data?.action === 'ToggleActive'
+                ? !target.enabled
+                : component.data?.active !== false;
+        }
+    }
 }
 
 function vector3(value, fallback) {
     if (!Array.isArray(value) || value.length < 3) return [...fallback];
     return value.slice(0, 3).map((entry, index) => Number.isFinite(Number(entry)) ? Number(entry) : fallback[index]);
+}
+
+function runtimeCollider(object) {
+    return findComponent(object, 'BoxCollider')
+        || findComponent(object, 'SphereCollider')
+        || findComponent(object, 'CapsuleCollider');
+}
+
+function runtimeBounds(object, position, scaleBox = false) {
+    const source = runtimeCollider(object);
+    if (!source) return null;
+    const collider = componentData(source);
+    const scale = vector3(object.transform?.scale, [1, 1, 1]).map((entry) => Math.abs(entry));
+    const center = vector3(collider.center, [0, 0, 0]).map((entry, index) =>
+        scaleBox && source.type === 'BoxCollider' ? entry * scale[index] : entry
+    );
+    let size;
+    if (source.type === 'SphereCollider') {
+        const diameter = Math.max(0.1, Math.abs(Number(collider.radius) || 0.5) * Math.max(...scale) * 2);
+        size = [diameter, diameter, diameter];
+    } else if (source.type === 'CapsuleCollider') {
+        const diameter = Math.max(0.1, Math.abs(Number(collider.radius) || 0.5) * Math.max(scale[0], scale[2]) * 2);
+        size = [diameter, Math.max(diameter, Math.abs(Number(collider.height) || 2)), diameter];
+    } else {
+        size = vector3(collider.size, [1, 1, 1]).map((entry, index) =>
+            Math.max(0.01, Math.abs(entry) * (scaleBox ? scale[index] : 1))
+        );
+    }
+    return {
+        min: position.map((entry, index) => entry + center[index] - size[index] / 2),
+        max: position.map((entry, index) => entry + center[index] + size[index] / 2),
+        halfHeight: size[1] / 2
+    };
+}
+
+function runtimeBoundsOverlap(left, right) {
+    return left.min[0] <= right.max[0] && left.max[0] >= right.min[0]
+        && left.min[1] <= right.max[1] && left.max[1] >= right.min[1]
+        && left.min[2] <= right.max[2] && left.max[2] >= right.min[2];
+}
+
+function runtimeLayersCollide(left, right) {
+    const leftLayer = Number.isInteger(left.layer) ? left.layer : 0;
+    const rightLayer = Number.isInteger(right.layer) ? right.layer : 0;
+    const leftMask = runtimeCollisionMatrix[leftLayer] ?? 0xFFFFFFFF;
+    const rightMask = runtimeCollisionMatrix[rightLayer] ?? 0xFFFFFFFF;
+    return (leftMask & (1 << rightLayer)) !== 0 && (rightMask & (1 << leftLayer)) !== 0;
 }
 
 function createGameplay(scene) {
@@ -48,19 +152,43 @@ function createGameplay(scene) {
     const ui = componentData(uiObject ? findComponent(uiObject, 'GameplayUI') : null);
     const capsule = componentData(findComponent(playerObject, 'CapsuleCollider'));
     const spawn = vector3(playerObject.transform?.position || playerObject.position, [0, 2, 0]);
-    const radius = Math.max(0.05, Number(capsule.radius) || 0.45);
+    const initialRotation = vector3(playerObject.transform?.rotation, [0, 0, 0]);
+    playerObject.transform = playerObject.transform && typeof playerObject.transform === 'object'
+        ? playerObject.transform
+        : {};
+    playerObject.transform.rotation = [...initialRotation];
+    const playerScale = vector3(playerObject.transform?.scale, [1, 1, 1]).map((value) => Math.abs(value));
+    const radius = Math.max(0.05, (Number(capsule.radius) || 0.45) * Math.max(playerScale[0], playerScale[2]));
+    // Capsule height is authored in world units in the scene contract; the
+    // horizontal radius still follows the object's X/Z scale.
     const height = Math.max(radius * 2, Number(capsule.height) || 1.8);
     const boxes = [];
     const triggers = [];
+    const authoredMatrix = scene.layerCollisionMatrix || scene.projectSettings?.collisionMatrix;
+    const collisionMatrix = Array.from({ length: 32 }, (_, index) => {
+        const value = Array.isArray(authoredMatrix) ? Number(authoredMatrix[index]) : NaN;
+        return Number.isFinite(value) ? value >>> 0 : 0xFFFFFFFF;
+    });
 
     for (const object of objects) {
         if (object === playerObject) continue;
-        const colliderSource = findComponent(object, 'BoxCollider');
+        const colliderSource = findComponent(object, 'BoxCollider')
+            || findComponent(object, 'SphereCollider')
+            || findComponent(object, 'CapsuleCollider');
         if (!colliderSource) continue;
         const collider = componentData(colliderSource);
         const position = vector3(object.transform?.position || object.position, [0, 0, 0]);
         const center = vector3(collider.center, [0, 0, 0]);
-        const size = vector3(collider.size, [1, 1, 1]).map((entry) => Math.max(0.01, Math.abs(entry)));
+        const objectScale = vector3(object.transform?.scale, [1, 1, 1]).map((entry) => Math.abs(entry));
+        const size = colliderSource.type === 'SphereCollider'
+            ? [1, 1, 1].map(() => Math.max(0.01, Math.abs(Number(collider.radius) || 0.5) * 2))
+            : colliderSource.type === 'CapsuleCollider'
+                ? [
+                    Math.max(0.1, Math.abs(Number(collider.radius) || 0.5) * Math.max(objectScale[0], objectScale[2]) * 2),
+                    Math.max(0.1, Math.abs(Number(collider.height) || 2)),
+                    Math.max(0.1, Math.abs(Number(collider.radius) || 0.5) * Math.max(objectScale[0], objectScale[2]) * 2)
+                ]
+                : vector3(collider.size, [1, 1, 1]).map((entry) => Math.max(0.01, Math.abs(entry)));
         const box = {
             id: object.id || object.name || `trigger-${triggers.length}`,
             min: position.map((entry, index) => entry + center[index] - size[index] / 2),
@@ -69,7 +197,8 @@ function createGameplay(scene) {
                 : (object.tag === 'Respawn' ? 'respawn'
                     : (object.tag === 'Collect' ? 'collect'
                         : (object.tag === 'Lose' ? 'lose' : 'trigger'))),
-            active: true
+            active: true,
+            layer: Number.isInteger(object.layer) && object.layer >= 0 && object.layer < 32 ? object.layer : 0
         };
         if (collider.isTrigger) triggers.push(box);
         else boxes.push(box);
@@ -81,6 +210,8 @@ function createGameplay(scene) {
         gravity: Number.isFinite(Number(controller.gravity)) ? Number(controller.gravity) : -9.81,
         moveSpeed: Math.max(0, Number(controller.moveSpeed ?? controller.speed) || 5),
         jumpSpeed: Math.max(0, Number(controller.jumpForce ?? controller.jumpSpeed) || 6),
+        lookSensitivity: Math.max(0, Number(controller.lookSensitivity) || 0.002),
+        initialYaw: initialRotation[1],
         requiredCollectibles: Math.max(0, Math.floor(Number(controller.requiredCollectibles) || 0)),
         respawnY: Number.isFinite(Number(controller.respawnY)) ? Number(controller.respawnY) : -8,
         spawn,
@@ -88,6 +219,10 @@ function createGameplay(scene) {
         halfHeight: height / 2,
         boxes,
         triggers,
+        collisionMatrix,
+        playerLayer: Number.isInteger(playerObject.layer) && playerObject.layer >= 0 && playerObject.layer < 32 ? playerObject.layer : 0,
+        playerObject,
+        rotation: [...initialRotation],
         position: [...spawn],
         velocity: [0, 0, 0],
         grounded: false,
@@ -103,6 +238,12 @@ function createGameplay(scene) {
             offset: vector3(camera.offset, [0, 6, 8])
         }
     };
+}
+
+function layersCollide(simulation, leftLayer, rightLayer) {
+    const leftMask = simulation.collisionMatrix[leftLayer] ?? 0xFFFFFFFF;
+    const rightMask = simulation.collisionMatrix[rightLayer] ?? 0xFFFFFFFF;
+    return (leftMask & (1 << rightLayer)) !== 0 && (rightMask & (1 << leftLayer)) !== 0;
 }
 
 function overlaps(minA, maxA, minB, maxB) {
@@ -126,6 +267,20 @@ function respawn(simulation) {
     simulation.respawnCount += 1;
 }
 
+function restartGameplay(simulation) {
+    simulation.position = [...simulation.spawn];
+    simulation.rotation[1] = Number(simulation.initialYaw) || 0;
+    simulation.velocity = [0, 0, 0];
+    simulation.grounded = false;
+    simulation.jumpWasHeld = false;
+    simulation.pendingJump = false;
+    simulation.accumulator = 0;
+    simulation.status = 'playing';
+    simulation.collectedCount = 0;
+    simulation.respawnCount = 0;
+    for (const trigger of simulation.triggers) trigger.active = true;
+}
+
 function moveHorizontal(simulation, axis, amount) {
     if (amount === 0) return;
     const oldPosition = [...simulation.position];
@@ -135,6 +290,7 @@ function moveHorizontal(simulation, axis, amount) {
     const nextBounds = playerBounds(simulation, nextPosition);
 
     for (const box of simulation.boxes) {
+        if (!layersCollide(simulation, simulation.playerLayer, box.layer)) continue;
         if (!overlaps(nextBounds.min, nextBounds.max, box.min, box.max)) continue;
         // Merely touching a platform's top is support, not a horizontal wall.
         if (nextBounds.min[1] >= box.max[1] - 1e-7 || nextBounds.max[1] <= box.min[1] + 1e-7) continue;
@@ -154,9 +310,15 @@ function moveHorizontal(simulation, axis, amount) {
 function simulateFixedStep(simulation, input) {
     const horizontal = Math.max(-1, Math.min(1, Number(input.Horizontal) || 0));
     const vertical = Math.max(-1, Math.min(1, Number(input.Vertical) || 0));
+    const lookX = Number(input.LookX) || 0;
+    const sensitivity = Math.max(0, Number(simulation.lookSensitivity) || 0.002);
+    simulation.rotation[1] -= lookX * sensitivity;
+    simulation.playerObject.transform.rotation[1] = simulation.rotation[1];
+    const sin = Math.sin(simulation.rotation[1]);
+    const cos = Math.cos(simulation.rotation[1]);
     const length = Math.hypot(horizontal, vertical) || 1;
-    simulation.velocity[0] = horizontal / length * simulation.moveSpeed;
-    simulation.velocity[2] = -vertical / length * simulation.moveSpeed;
+    simulation.velocity[0] = (horizontal * cos + vertical * sin) / length * simulation.moveSpeed;
+    simulation.velocity[2] = (horizontal * sin - vertical * cos) / length * simulation.moveSpeed;
 
     if (simulation.pendingJump && simulation.grounded) {
         simulation.velocity[1] = simulation.jumpSpeed;
@@ -192,6 +354,7 @@ function simulateFixedStep(simulation, input) {
     const bounds = playerBounds(simulation, simulation.position);
     for (const trigger of simulation.triggers) {
         if (!trigger.active) continue;
+        if (!layersCollide(simulation, simulation.playerLayer, trigger.layer)) continue;
         if (!overlaps(bounds.min, bounds.max, trigger.min, trigger.max)) continue;
         if (trigger.kind === 'collect') {
             trigger.active = false;
@@ -222,6 +385,90 @@ function tickGameplay(simulation, deltaTime, input) {
     }
 }
 
+function runRuntimeComponents(deltaTime, runUpdates = true, runPhysics = true) {
+    for (const object of runtimeObjects) {
+        if (object.enabled === false || !object.transform) continue;
+
+        const autoRotate = runUpdates ? runtimeComponent(object, 'AutoRotate') : null;
+        if (autoRotate) {
+            const settings = componentData(autoRotate);
+            const speed = Number(settings.speed ?? settings.rotationSpeed ?? 90);
+            if (Number.isFinite(speed)) {
+                const axis = vector3(settings.axis, [0, 1, 0]);
+                const length = Math.hypot(axis[0], axis[1], axis[2]) || 1;
+                const degrees = speed * deltaTime;
+                const rotation = vector3(object.transform.rotation, [0, 0, 0]);
+                object.transform.rotation = rotation.map((value, index) =>
+                    value + axis[index] / length * degrees * Math.PI / 180
+                );
+            }
+        }
+
+        if (!runPhysics) continue;
+        const rigidBody = runtimeComponent(object, 'RigidBody');
+        if (!rigidBody) continue;
+        const settings = rigidBody.data && typeof rigidBody.data === 'object' ? rigidBody.data : rigidBody;
+        if (settings.isKinematic || Number(settings.mass) === 0 || runtimeComponent(object, 'PlayerController')) continue;
+
+        const start = vector3(object.transform.position, [0, 0, 0]);
+        const position = [...start];
+        const velocity = vector3(settings.velocity, [0, 0, 0]);
+        if (settings.useGravity !== false) velocity[1] += -9.81 * deltaTime;
+        for (const axis of [0, 2]) {
+            if (settings[`freezePosition${'XYZ'[axis]}`]) {
+                velocity[axis] = 0;
+                continue;
+            }
+            position[axis] += velocity[axis] * deltaTime;
+            const candidate = runtimeBounds(object, position, true);
+            for (const other of runtimeObjects) {
+                const otherCollider = runtimeCollider(other);
+                if (other === object || other.enabled === false || !otherCollider
+                    || componentData(otherCollider).isTrigger === true || !runtimeLayersCollide(object, other)) continue;
+                const obstacle = runtimeBounds(other, vector3(other.transform?.position, [0, 0, 0]));
+                if (!candidate || !obstacle || !runtimeBoundsOverlap(candidate, obstacle)) continue;
+                position[axis] = start[axis];
+                velocity[axis] = 0;
+                break;
+            }
+        }
+        const oldBounds = runtimeBounds(object, start, true);
+        if (settings.freezePositionY) velocity[1] = 0;
+        else position[1] += velocity[1] * deltaTime;
+        const candidate = runtimeBounds(object, position, true);
+        for (const other of runtimeObjects) {
+            const otherCollider = runtimeCollider(other);
+            if (other === object || other.enabled === false || !otherCollider
+                || componentData(otherCollider).isTrigger === true || !runtimeLayersCollide(object, other)) continue;
+            const obstacle = runtimeBounds(other, vector3(other.transform?.position, [0, 0, 0]));
+            if (!candidate || !oldBounds || !obstacle
+                || candidate.max[0] < obstacle.min[0] || candidate.min[0] > obstacle.max[0]
+                || candidate.max[2] < obstacle.min[2] || candidate.min[2] > obstacle.max[2]) continue;
+            if (velocity[1] <= 0 && oldBounds.min[1] >= obstacle.max[1] && candidate.min[1] <= obstacle.max[1]) {
+                position[1] = obstacle.max[1] + candidate.halfHeight;
+                velocity[1] = 0;
+            } else if (velocity[1] > 0 && oldBounds.max[1] <= obstacle.min[1] && candidate.max[1] >= obstacle.min[1]) {
+                position[1] = obstacle.min[1] - candidate.halfHeight;
+                velocity[1] = 0;
+            }
+        }
+        const drag = Math.max(0, Number(settings.drag) || 0);
+        const damping = Math.max(0, 1 - drag * deltaTime);
+        settings.velocity = velocity.map((value) => value * damping);
+        object.transform.position = position;
+    }
+}
+
+function runtimeTransformState() {
+    return runtimeObjects.map((object) => ({
+        id: String(object.id || object.name || ''),
+        ...(object.enabled === false ? { active: false } : {}),
+        position: vector3(object.transform?.position, [0, 0, 0]),
+        rotation: vector3(object.transform?.rotation, [0, 0, 0]),
+        scale: vector3(object.transform?.scale, [1, 1, 1])
+    })).filter((object) => object.id.length > 0);
+}
+
 function gameplayState() {
     if (!gameplay) return null;
     return {
@@ -239,7 +486,14 @@ function gameplayState() {
         camera: {
             mode: gameplay.camera.mode,
             position: (gameplay.camera.mode === 'follow'
-                ? gameplay.position.map((value, index) => value + gameplay.camera.offset[index])
+                ? (() => {
+                    const yaw = Number(gameplay.rotation[1]) || 0;
+                    const sin = Math.sin(yaw);
+                    const cos = Math.cos(yaw);
+                    const offset = gameplay.camera.offset;
+                    const rotatedOffset = [offset[0] * cos + offset[2] * sin, offset[1], offset[0] * sin - offset[2] * cos];
+                    return gameplay.position.map((value, index) => value + rotatedOffset[index]);
+                })()
                 : gameplay.camera.position).map((value) => Number(value.toFixed(6))),
             target: gameplay.position.map((value) => Number(value.toFixed(6)))
         }
@@ -247,7 +501,10 @@ function gameplayState() {
 }
 
 function emitState() {
-    self.postMessage({ type: 'state', sessionId, state, frame, time, gameplay: gameplayState() });
+    const uiText = runtimeObjects.flatMap((object) => (object.components || [])
+        .filter((component) => component?.type === 'UIText' || component?.type === 'UIInputField')
+        .map((component) => ({ id: `${object.id}:${component.type}`, text: String(component.data?.text ?? '') })));
+    self.postMessage({ type: 'state', sessionId, state, frame, time, transforms: runtimeTransformState(), gameplay: gameplayState(), uiText, lastUiEvent, lastUiEventPayload });
 }
 
 function fail(code, message) {
@@ -270,7 +527,16 @@ self.onmessage = (event) => {
         try {
             snapshot = JSON.parse(envelope.payload?.snapshot);
             if (!snapshot || typeof snapshot !== 'object') throw new Error('invalid snapshot');
+            runtimeObjects = allGameObjects(snapshot.gameObjects);
+            runtimeFixedAccumulator = 0;
+            const authoredMatrix = snapshot.layerCollisionMatrix || snapshot.projectSettings?.collisionMatrix;
+            runtimeCollisionMatrix = Array.from({ length: 32 }, (_, index) => {
+                const value = Array.isArray(authoredMatrix) ? Number(authoredMatrix[index]) : NaN;
+                return Number.isFinite(value) ? value >>> 0 : 0xFFFFFFFF;
+            });
             gameplay = createGameplay(snapshot);
+            lastUiEvent = null;
+            lastUiEventPayload = null;
             state = 'running';
             emitState();
         } catch {
@@ -282,6 +548,19 @@ self.onmessage = (event) => {
     if (envelope.sessionId !== sessionId || state === 'idle' || state === 'failed') return;
 
     switch (envelope.command) {
+        case 'uiEvent': {
+            const name = envelope.payload?.name;
+            if (typeof name !== 'string' || name.length === 0 || name.length > 128) {
+                fail('INVALID_UI_EVENT', 'The UI event name is invalid.');
+                break;
+            }
+            lastUiEvent = name;
+            lastUiEventPayload = envelope.payload?.value === undefined ? null : envelope.payload.value;
+            applyUiEventActions(name, envelope.payload?.value);
+            if (gameplay && name.toLowerCase() === 'restart') restartGameplay(gameplay);
+            emitState();
+            break;
+        }
         case 'ping':
             self.postMessage({ type: 'heartbeat', sessionId, state, frame, time });
             break;
@@ -310,13 +589,29 @@ self.onmessage = (event) => {
             }
             frame += 1;
             time += deltaTime;
+            runRuntimeComponents(deltaTime, true, false);
+            runtimeFixedAccumulator += deltaTime;
+            let runtimeFixedSteps = 0;
+            while (runtimeFixedAccumulator + 1e-9 >= DEFAULT_FIXED_STEP && runtimeFixedSteps < 5) {
+                runRuntimeComponents(DEFAULT_FIXED_STEP, false, true);
+                runtimeFixedAccumulator -= DEFAULT_FIXED_STEP;
+                runtimeFixedSteps += 1;
+            }
+            if (runtimeFixedSteps === 5 && runtimeFixedAccumulator >= DEFAULT_FIXED_STEP) {
+                runtimeFixedAccumulator %= DEFAULT_FIXED_STEP;
+            }
             if (gameplay) tickGameplay(gameplay, deltaTime, envelope.payload?.input || {});
             emitState();
             break;
         }
         case 'stop':
             snapshot = null;
+            runtimeObjects = [];
+            runtimeCollisionMatrix = new Array(32).fill(0xFFFFFFFF);
+            runtimeFixedAccumulator = 0;
             gameplay = null;
+            lastUiEvent = null;
+            lastUiEventPayload = null;
             state = 'idle';
             emitState();
             sessionId = '';

@@ -141,6 +141,17 @@ class ProjectAssetTransactionService {
         const sourceMeta = sourceMetaContext?.path || null;
         const targetMeta = targetMetaContext?.path || null;
         const fs = this.projects.fs;
+        if (process.env.ENGINE_SMOKE_TEST === '1') {
+            console.info('[asset-transaction]', JSON.stringify({
+                operation: request.operation,
+                sourcePath: request.sourcePath,
+                targetPath: request.targetPath,
+                source,
+                target,
+                sourceMeta,
+                targetMeta
+            }));
+        }
 
         if ((request.operation === 'create' || request.operation === 'move' || request.operation === 'duplicate')
             && await this.exists(target)) {
@@ -179,6 +190,14 @@ class ProjectAssetTransactionService {
             const before = decodeBytes(patch.beforeBase64, 'referencePatches.beforeBase64');
             if (!current.equals(before)) throw codedError('REFERENCE_CONFLICT', `Referenced asset changed: ${patch.path}`);
             await this.writeAtomic(context, decodeBytes(patch.afterBase64, 'referencePatches.afterBase64'));
+        }
+        if (process.env.ENGINE_SMOKE_TEST === '1' && target) {
+            console.info('[asset-transaction-result]', JSON.stringify({
+                operation: request.operation,
+                sourceExists: source ? await this.exists(source) : null,
+                targetExists: await this.exists(target),
+                targetMetaExists: targetMeta ? await this.exists(targetMeta) : null
+            }));
         }
     }
 

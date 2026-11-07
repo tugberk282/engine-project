@@ -1,11 +1,16 @@
 'use strict';
 
+// This worker may run through electron.exe in Node mode. Player packaging must
+// copy Electron's .asar files as opaque bytes rather than traversing them.
+process.noAsar = true;
+
 const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
 const { BUILD_MANIFEST_VERSION, BuildError, STAGES, assertBuildRequest, serializeError } = require('./build-contract');
 const { stableStringify, contentHash, migrateProject, migrateScene, normalizeDocument, validateDocument } =
     require('../architecture/persistence');
+const { collectRuntimeDiagnostics } = require('./runtime-support');
 
 let cancelled = false;
 process.on('message', (message) => {
@@ -106,7 +111,7 @@ async function run(rawRequest) {
             if (parsed.sceneId !== entry.sceneId) {
                 throw new BuildError('SCENE_GUID_MISMATCH', `Scene identifier does not match ${entry.path}`);
             }
-            scenes.push({ path: entry.path.replaceAll('\\', '/'), value: parsed });
+            scenes.push({ sceneId: entry.sceneId, path: entry.path.replaceAll('\\', '/'), value: parsed });
         }
         if (scenes.length === 0) throw new BuildError('SCENE_MISSING', 'At least one scene is required');
     });
@@ -115,6 +120,15 @@ async function run(rawRequest) {
         const assetRoot = path.join(request.projectRoot, 'Assets');
         return fs.existsSync(assetRoot) ? listFiles(assetRoot) : [];
     });
+
+    const runtimeDiagnostics = collectRuntimeDiagnostics(scenes);
+    for (const diagnostic of runtimeDiagnostics) {
+        emit('log', {
+            level: 'warn',
+            message: diagnostic.message
+                || `Component ${diagnostic.type} is editor-only or unsupported by the standalone runtime (${diagnostic.count} occurrence${diagnostic.count === 1 ? '' : 's'}).`
+        });
+    }
 
     const workspace = request.workspacePath;
     await stage('bundle', async () => {
@@ -144,10 +158,11 @@ async function run(rawRequest) {
             await fs.promises.rename(path.join(workspace, 'electron.exe'), path.join(workspace, 'Tugberk Player.exe'));
             const appRoot = path.join(workspace, 'resources', 'app');
             await fs.promises.mkdir(appRoot, { recursive: true });
-            for (const file of ['player-main.js', 'player-preload.js', 'player.html', 'player-renderer.js']) {
+            for (const file of ['player-main.js', 'player-preload.js', 'player-content.js', 'player.html', 'player-renderer.js', 'player-scene.mjs', 'player-ui.mjs', 'player.css']) {
                 await fs.promises.copyFile(path.join(__dirname, file), path.join(appRoot, file));
             }
             await fs.promises.copyFile(path.resolve(__dirname, '..', '..', 'src', 'engine', 'runtime.worker.js'), path.join(appRoot, 'runtime.worker.js'));
+            await fs.promises.copyFile(path.join(path.dirname(require.resolve('three')), 'three.module.js'), path.join(appRoot, 'three.module.js'));
             await fs.promises.writeFile(path.join(appRoot, 'package.json'), stableStringify({
                 name: 'tugberk-standalone-player', version: '1.0.0', private: true, main: 'player-main.js'
             }), 'utf8');
@@ -169,7 +184,8 @@ async function run(rawRequest) {
             projectRevision: request.projectRevision,
             target: request.target,
             entryScene: scenes[0].path,
-            scenes: project.scenes.map((scene) => ({ sceneId: scene.sceneId, path: scene.path.replaceAll('\\', '/') })),
+            scenes: scenes.map((scene) => ({ sceneId: scene.sceneId, path: scene.path.replaceAll('\\', '/') })),
+            runtimeDiagnostics,
             files
         };
         const result = { ...core, manifestHash: contentHash(core) };

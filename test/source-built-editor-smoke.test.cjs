@@ -17,7 +17,7 @@ const {
 
 test('source-built smoke has explicit finite build and launch bounds and runs twice', () => {
   assert.equal(BUILD_TIMEOUT_MS, 120_000);
-  assert.equal(LAUNCH_TIMEOUT_MS, 45_000);
+  assert.equal(LAUNCH_TIMEOUT_MS, 75_000);
   assert.equal(RUN_COUNT, 2);
 });
 

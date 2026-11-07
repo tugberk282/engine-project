@@ -611,6 +611,10 @@ export class ProjectWindow {
                                 return;
                             }
                             const stat = await this.fs.stat(sourcePath);
+                            if (!stat) {
+                                this.announceAssetMutation('Asset no longer exists; refresh the Project window and try again');
+                                return;
+                            }
                             await this.executeAssetMutation('Move Asset', {
                                 operation: 'move', sourcePath, targetPath,
                                 assetKind: stat.isDirectory() ? 'directory' : 'file',
@@ -895,9 +899,9 @@ export class ProjectWindow {
         }
 
         if (includeDependents) {
-            AssetDatabase.getInstance().getReferencerClosurePaths(assetPath, false)
-                .filter( async(pathValue) => await this.isRuntimeRefreshCandidate(pathValue))
-                .forEach((pathValue) => runtimePaths.add(pathValue));
+            for (const pathValue of AssetDatabase.getInstance().getReferencerClosurePaths(assetPath, false)) {
+                if (await this.isRuntimeRefreshCandidate(pathValue)) runtimePaths.add(pathValue);
+            }
         }
 
         return Array.from(runtimePaths);
@@ -910,14 +914,14 @@ export class ProjectWindow {
     public async auditAssetReferences(assetPath: string): Promise<AssetReferenceAuditResult | null> {
         const candidates = await this.getReferenceAuditCandidatePaths(assetPath);
         if (candidates.length === 0) return null;
-        return this.auditAndRepairReferenceFiles(candidates, false);
+        return await this.auditAndRepairReferenceFiles(candidates, false);
     }
 
     public async repairAssetReferences(assetPath: string): Promise<AssetReferenceAuditResult | null> {
         const candidates = await this.getReferenceAuditCandidatePaths(assetPath);
         if (candidates.length === 0) return null;
 
-        const result = this.auditAndRepairReferenceFiles(candidates, true);
+        const result = await this.auditAndRepairReferenceFiles(candidates, true);
         this.recordRepairHistory(assetPath, result);
         if (result.filesChanged > 0) {
             await this.refreshAssetDatabaseAndView({
@@ -929,11 +933,11 @@ export class ProjectWindow {
     }
 
     public async auditAllAssetReferences(): Promise<AssetReferenceAuditResult> {
-        return this.auditAndRepairReferenceFiles(await this.getReferenceAuditCandidatePaths(), false);
+        return await this.auditAndRepairReferenceFiles(await this.getReferenceAuditCandidatePaths(), false);
     }
 
     public async repairAllAssetReferences(): Promise<AssetReferenceAuditResult> {
-        const result = this.auditAndRepairReferenceFiles(await this.getReferenceAuditCandidatePaths(), true);
+        const result = await this.auditAndRepairReferenceFiles(await this.getReferenceAuditCandidatePaths(), true);
         this.recordRepairHistory(this.rootPath, result);
         if (result.filesChanged > 0) {
             await this.refreshAssetDatabaseAndView({ preserveSelection: true });
@@ -946,11 +950,14 @@ export class ProjectWindow {
             ? scopePath
             : this.rootPath;
         const refreshResult = await this.refreshAssetDatabaseAndView({ preserveSelection: true });
-        const scopeEntries = AssetDatabase.getInstance()
-            .getAllEntries()
-            .filter( async(entry) => this.isPathInsideScope(entry.path, effectiveScopePath) && await this.isFileAssetPath(entry.path));
+        const scopeEntries = [] as ReturnType<AssetDatabase['getAllEntries']>;
+        for (const entry of AssetDatabase.getInstance().getAllEntries()) {
+            if (this.isPathInsideScope(entry.path, effectiveScopePath) && await this.isFileAssetPath(entry.path)) {
+                scopeEntries.push(entry);
+            }
+        }
         const scopeAssetPaths = scopeEntries.map((entry) => entry.path);
-        const referenceAudit = this.auditAndRepairReferenceFiles(await this.getReferenceAuditCandidatePaths(effectiveScopePath), false);
+        const referenceAudit = await this.auditAndRepairReferenceFiles(await this.getReferenceAuditCandidatePaths(effectiveScopePath), false);
 
         const scriptEntries = scopeEntries.filter((entry) => entry.meta.assetType === 'script');
         const scriptsWithCustomExecutionOrder = scriptEntries.filter((entry) => {
@@ -959,9 +966,12 @@ export class ProjectWindow {
         }).length;
         const scriptsAutoReferencedDisabled = scriptEntries.filter((entry) => entry.meta.importer.settings.autoReferenced === false).length;
 
-        const runtimeCandidateCount = scopeAssetPaths.filter( async(assetPath) => await this.isRuntimeRefreshCandidate(assetPath)).length;
+        let runtimeCandidateCount = 0;
+        for (const assetPath of scopeAssetPaths) {
+            if (await this.isRuntimeRefreshCandidate(assetPath)) runtimeCandidateCount += 1;
+        }
         const dependencyEdgeCount = scopeAssetPaths.reduce((sum, assetPath) => sum + AssetDatabase.getInstance().getDependencyPaths(assetPath).length, 0);
-        const reimportDiagnostics = this.collectReimportDiagnostics(scopeAssetPaths);
+        const reimportDiagnostics = await this.collectReimportDiagnostics(scopeAssetPaths);
         const healthDiagnostics = this.collectHealthDiagnostics(scopeEntries, referenceAudit, effectiveScopePath);
         const assetTypeCounts = this.collectAssetTypeCounts(scopeEntries);
 
@@ -1147,7 +1157,7 @@ export class ProjectWindow {
         this.editor.reconcileProjectSelection(options?.focusAssetPath === null);
         ScriptRegistry.refreshScriptExecutionOrderFromAssetDatabase();
         if (refreshResult.moved.length > 0) {
-            this.applyMovedAssetReferenceEffects(refreshResult.moved);
+            await this.applyMovedAssetReferenceEffects(refreshResult.moved);
         }
         const nextSelectionPath = await this.resolveSelectionPathAfterRefresh(refreshResult, options?.focusAssetPath, options?.preserveSelection);
 
@@ -1161,9 +1171,10 @@ export class ProjectWindow {
 
         await this.refresh();
         if (options?.runtimeAssetPaths?.length) {
-            Array.from(new Set(options.runtimeAssetPaths))
-                .filter((assetPath) => typeof assetPath === 'string' && assetPath.length > 0)
-                .forEach( async(assetPath) => await this.applyRuntimeReimportEffects(assetPath));
+            for (const assetPath of Array.from(new Set(options.runtimeAssetPaths))) {
+                if (typeof assetPath !== 'string' || assetPath.length === 0) continue;
+                await this.applyRuntimeReimportEffects(assetPath);
+            }
         }
 
         if (this.selectedAssetPath && await this.fs.exists(this.selectedAssetPath)) {
@@ -1205,7 +1216,17 @@ export class ProjectWindow {
     }
 
     private async buildAssetSelection(assetPath: string, assetName: string, isFolder: boolean): Promise<ProjectAssetSelection> {
-        const entry = this.getAssetEntry(assetPath);
+        let entry = this.getAssetEntry(assetPath);
+        // A committed file transaction can become visible to the filesystem
+        // just before the queued AssetDatabase scan observes its .meta file.
+        // Never pass a selection with an undefined GUID into the editor.
+        if (!entry) {
+            await AssetDatabase.getInstance().refresh(this.rootPath);
+            entry = this.getAssetEntry(assetPath);
+        }
+        if (!entry?.meta || !entry.guid) {
+            throw new Error(`Asset metadata is not ready: ${assetPath}`);
+        }
         const extension = isFolder ? '' : PathUtils.extname(assetPath).toLowerCase();
 
         return {
@@ -1213,7 +1234,7 @@ export class ProjectWindow {
             name: assetName,
             path: assetPath,
             extension,
-            meta: entry?.meta ?? AssetDatabase.getInstance().getMeta(assetPath)!,
+            meta: entry.meta,
             payload: isFolder ? null : await this.loadAssetPayload(assetPath, extension)
         };
     }
@@ -1283,17 +1304,17 @@ export class ProjectWindow {
 
         if (meta.assetType === 'texture') {
             AssetImporter.invalidateTextureCache(assetPath);
-            this.reloadMaterialTextureReferences(assetPath);
+            await this.reloadMaterialTextureReferences(assetPath);
         } else if (meta.assetType === 'material') {
             await this.loadMaterialAsset(assetPath);
         } else if (meta.assetType === 'audio') {
             AssetImporter.invalidateAudioCache(assetPath);
-            this.reloadAudioSourcesForAsset(assetPath);
+            await this.reloadAudioSourcesForAsset(assetPath);
         } else if (meta.assetType === 'prefab') {
             await this.reloadPrefabInstancesForAsset(assetPath);
         } else if (meta.assetType === 'model') {
             AssetImporter.invalidateModelCache(assetPath);
-            this.reloadModelInstancesForAsset(assetPath);
+            await this.reloadModelInstancesForAsset(assetPath);
             this.reloadAnimatorClipsForAsset(assetPath);
         }
 
@@ -1360,13 +1381,13 @@ export class ProjectWindow {
         return match?.path ?? null;
     }
 
-    private reloadMaterialTextureReferences(assetPath: string) {
-        MaterialManager.getAllMaterials().forEach( async(material) => {
+    private async reloadMaterialTextureReferences(assetPath: string): Promise<void> {
+        for (const material of MaterialManager.getAllMaterials()) {
             await this.reloadMaterialTextureSlot(material, 'mainTexture', assetPath, (texture) => material.setMainTexture(texture));
             await this.reloadMaterialTextureSlot(material, 'normalMap', assetPath, (texture) => material.setNormalMap(texture));
             await this.reloadMaterialTextureSlot(material, 'metallicMap', assetPath, (texture) => material.setMetallicMap(texture));
             await this.reloadMaterialTextureSlot(material, 'roughnessMap', assetPath, (texture) => material.setRoughnessMap(texture));
-        });
+        }
     }
 
     private async reloadMaterialTextureSlot(
@@ -1387,22 +1408,25 @@ export class ProjectWindow {
         });
     }
 
-    private reloadAudioSourcesForAsset(assetPath: string) {
+    private async reloadAudioSourcesForAsset(assetPath: string): Promise<void> {
         const normalizedAssetPath = this.normalizeAssetPath(assetPath);
         const assetGuid = AssetDatabase.getInstance().getGuid(assetPath) ?? null;
-        this.editor.scene.gameObjects.forEach((go: GameObject) => {
-            go.getComponents(AudioSource).forEach( async(source) => {
+        for (const go of this.editor.scene.gameObjects) {
+            for (const source of go.getComponents(AudioSource)) {
                 const matchesByPath = !!source.clipPath && this.pathsEqual(source.clipPath, normalizedAssetPath);
                 const matchesByGuid = !!assetGuid && source.clipGuid === assetGuid;
-                if (!matchesByPath && !matchesByGuid) return;
+                if (!matchesByPath && !matchesByGuid) continue;
                 await source.loadClip(normalizedAssetPath);
-            });
-        });
+            }
+        }
     }
 
     private async reloadPrefabInstancesForAsset(assetPath: string) {
         const prefab = await PrefabManager.loadPrefabFromPath(assetPath);
-        if (!prefab) return;
+        if (!prefab) {
+            console.error(`Prefab refresh rejected '${assetPath}': source is missing or invalid; linked instances were preserved.`);
+            return;
+        }
         const assetGuid = AssetDatabase.getInstance().getGuid(assetPath) ?? null;
         const importerSettings = this.getImporterSettings(assetPath, 'prefab');
         const autoReconnect = importerSettings.autoReconnect !== false;
@@ -1410,25 +1434,25 @@ export class ProjectWindow {
         if (!autoReconnect) return;
         const prefabName = PathUtils.basename(assetPath, PathUtils.extname(assetPath));
 
-        this.editor.scene.gameObjects.forEach( async(go: GameObject) => {
+        for (const go of this.editor.scene.gameObjects) {
             const matchesByPath = !!go.sourceAssetPath && this.pathsEqual(go.sourceAssetPath, assetPath);
             const matchesByGuid = !!assetGuid && go.sourceAssetGuid === assetGuid;
-            if (go.sourceAssetType !== 'prefab' || (!matchesByPath && !matchesByGuid)) return;
+            if (go.sourceAssetType !== 'prefab' || (!matchesByPath && !matchesByGuid)) continue;
             if (preserveOverrides) {
                 const overrideSnapshot = this.capturePrefabOverrideSnapshot(go);
-                const structuralOverrideSnapshot = this.capturePrefabStructuralOverrideSnapshot(go);
+                const structuralOverrideSnapshot = this.capturePrefabStructuralOverrideSnapshot(go, prefab.instantiate());
                 await PrefabManager.revertToPrefab(go);
-                this.restorePrefabOverrideSnapshot(go, overrideSnapshot);
-                this.restorePrefabStructuralOverrideSnapshot(go, structuralOverrideSnapshot);
+                await this.restorePrefabOverrideSnapshot(go, overrideSnapshot);
+                await this.restorePrefabStructuralOverrideSnapshot(go, structuralOverrideSnapshot);
                 go.sourceAssetPath = assetPath;
                 go.sourceAssetGuid = assetGuid;
                 go.sourceAssetType = 'prefab';
                 go.prefabSource = prefabName;
-                return;
+                continue;
             }
 
             await PrefabManager.revertToPrefab(go);
-        });
+        }
     }
 
     private capturePrefabOverrideSnapshot(prefabRoot: GameObject): PrefabOverrideNodeSnapshot[] {
@@ -1439,11 +1463,11 @@ export class ProjectWindow {
             const gameObjectOverrideKeys = Array.from(current.overrides.values());
             const transformOverrideKeys = Array.from(current.transform.overrides.values());
             const componentSnapshots = current.components
-                .filter((component) => component.constructor.name !== 'Transform' && component.overrides.size > 0)
+                .filter((component) => component !== current.transform && component.overrides.size > 0)
                 .map((component) => {
                     const serialized = component.serialize();
                     return {
-                        type: component.constructor.name,
+                        type: ScriptRegistry.getComponentName(component),
                         overrideKeys: Array.from(component.overrides.values()),
                         data: (serialized?.data && typeof serialized.data === 'object' && !Array.isArray(serialized.data))
                             ? serialized.data as Record<string, unknown>
@@ -1482,66 +1506,96 @@ export class ProjectWindow {
         return snapshots;
     }
 
-    private capturePrefabStructuralOverrideSnapshot(prefabRoot: GameObject): PrefabStructuralOverrideSnapshot[] {
+    private capturePrefabStructuralOverrideSnapshot(prefabRoot: GameObject, sourceRoot: GameObject): PrefabStructuralOverrideSnapshot[] {
         const snapshots: PrefabStructuralOverrideSnapshot[] = [];
 
-        const walk = (current: GameObject) => {
-            const targetPath = PrefabManager.getPrefabNodePathForGameObject(current, prefabRoot);
-            const entries = this.editor.getPrefabOverrideEntries?.(current) ?? [];
-            entries.forEach((entry: Record<string, any>) => {
-                switch (entry.kind) {
-                    case 'component-added': {
-                        if (!entry.component?.serialize) return;
-                        const serialized = entry.component.serialize();
-                        snapshots.push({
-                            kind: 'component-added',
-                            targetPath,
-                            componentType: entry.component.constructor?.name,
-                            componentData: (serialized?.data && typeof serialized.data === 'object' && !Array.isArray(serialized.data))
-                                ? serialized.data as Record<string, unknown>
-                                : {}
-                        });
-                        break;
-                    }
-                    case 'component-removed':
-                        snapshots.push({
-                            kind: 'component-removed',
-                            targetPath,
-                            componentType: entry.componentType
-                        });
-                        break;
-                    case 'child-added':
-                        if (!entry.childGameObject?.serialize) return;
-                        snapshots.push({
-                            kind: 'child-added',
-                            targetPath,
-                            childPath: PrefabManager.getPrefabNodePathForGameObject(entry.childGameObject, prefabRoot),
-                            parentPath: entry.parentPath ?? null,
-                            childData: entry.childGameObject.serialize()
-                        });
-                        break;
-                    case 'child-removed':
-                        snapshots.push({
-                            kind: 'child-removed',
-                            targetPath,
-                            childPath: entry.childPath ?? null
-                        });
-                        break;
-                    default:
-                        break;
-                }
-            });
-            current.transform.children.forEach((child) => walk(child.gameObject));
+        const collectNodes = (root: GameObject): Map<string | null, GameObject> => {
+            const nodes = new Map<string | null, GameObject>();
+            const visit = (current: GameObject) => {
+                const path = PrefabManager.getPrefabNodePathForGameObject(current, root);
+                nodes.set(path, current);
+                current.transform.children.forEach((childTransform) => {
+                    const child = childTransform.gameObject;
+                    const isNestedBoundary = child !== root && child.sourceAssetType === 'prefab';
+                    nodes.set(PrefabManager.getPrefabNodePathForGameObject(child, root), child);
+                    if (!isNestedBoundary) visit(child);
+                });
+            };
+            visit(root);
+            return nodes;
         };
 
-        walk(prefabRoot);
+        const parentPath = (path: string | null): string | null => {
+            if (!path) return null;
+            const separator = path.lastIndexOf('/');
+            return separator < 0 ? null : path.slice(0, separator);
+        };
+
+        const currentNodes = collectNodes(prefabRoot);
+        const sourceNodes = collectNodes(sourceRoot);
+
+        for (const [targetPath, current] of currentNodes) {
+            const source = sourceNodes.get(targetPath);
+            if (!source) {
+                const currentParentPath = parentPath(targetPath);
+                if (sourceNodes.has(currentParentPath)) {
+                    snapshots.push({
+                        kind: 'child-added',
+                        targetPath: currentParentPath,
+                        childPath: targetPath,
+                        parentPath: currentParentPath,
+                        childData: current.serialize()
+                    });
+                }
+                continue;
+            }
+
+            const currentComponents = new Map(current.components
+                .filter((component) => component !== current.transform)
+                .map((component) => [ScriptRegistry.getComponentName(component), component]));
+            const sourceComponents = new Map(source.components
+                .filter((component) => component !== source.transform)
+                .map((component) => [ScriptRegistry.getComponentName(component), component]));
+
+            for (const [componentType, component] of currentComponents) {
+                if (sourceComponents.has(componentType)) continue;
+                const serialized = component.serialize();
+                snapshots.push({
+                    kind: 'component-added',
+                    targetPath,
+                    componentType,
+                    componentData: (serialized?.data && typeof serialized.data === 'object' && !Array.isArray(serialized.data))
+                        ? serialized.data as Record<string, unknown>
+                        : {}
+                });
+            }
+            for (const componentType of sourceComponents.keys()) {
+                if (!currentComponents.has(componentType)) {
+                    snapshots.push({ kind: 'component-removed', targetPath, componentType });
+                }
+            }
+        }
+
+        for (const sourcePath of sourceNodes.keys()) {
+            if (!sourcePath || currentNodes.has(sourcePath)) continue;
+            const sourceParentPath = parentPath(sourcePath);
+            if (currentNodes.has(sourceParentPath)) {
+                snapshots.push({
+                    kind: 'child-removed',
+                    targetPath: sourceParentPath,
+                    childPath: sourcePath
+                });
+            }
+        }
+
+        sourceRoot.onDestroy();
         return snapshots;
     }
 
-    private restorePrefabOverrideSnapshot(prefabRoot: GameObject, snapshots: PrefabOverrideNodeSnapshot[]) {
-        snapshots.forEach((snapshot) => {
+    private async restorePrefabOverrideSnapshot(prefabRoot: GameObject, snapshots: PrefabOverrideNodeSnapshot[]): Promise<void> {
+        for (const snapshot of snapshots) {
             const target = PrefabManager.findPrefabInstanceNodeByPath(prefabRoot, snapshot.path);
-            if (!target) return;
+            if (!target) continue;
 
             snapshot.gameObjectOverrideKeys.forEach((key) => {
                 if (key === 'name') {
@@ -1571,78 +1625,80 @@ export class ProjectWindow {
             });
             target.transform.overrides = new Set(snapshot.transformOverrideKeys);
 
-            snapshot.componentSnapshots.forEach((componentSnapshot) => {
-                const component = target.components.find((entry) => entry.constructor.name === componentSnapshot.type);
-                if (!component) return;
+            for (const componentSnapshot of snapshot.componentSnapshots) {
+                const component = target.components.find((entry) => ScriptRegistry.getComponentName(entry) === componentSnapshot.type);
+                if (!component) continue;
                 if (component.deserialize) {
-                    component.deserialize(componentSnapshot.data);
+                    const payload = await PrefabManager.resolveComponentPayloadForInstance(target, componentSnapshot.data, prefabRoot);
+                    component.deserialize(payload);
                 } else {
                     Object.entries(componentSnapshot.data).forEach(([key, value]) => {
                         (component as any)[key] = value;
                     });
                 }
                 component.overrides = new Set(componentSnapshot.overrideKeys);
-            });
-        });
+            }
+        }
     }
 
-    private restorePrefabStructuralOverrideSnapshot(prefabRoot: GameObject, snapshots: PrefabStructuralOverrideSnapshot[]) {
-        snapshots.forEach((snapshot) => {
+    private async restorePrefabStructuralOverrideSnapshot(prefabRoot: GameObject, snapshots: PrefabStructuralOverrideSnapshot[]): Promise<void> {
+        for (const snapshot of snapshots) {
             const target = PrefabManager.findPrefabInstanceNodeByPath(prefabRoot, snapshot.targetPath ?? null);
-            if (!target) return;
+            if (!target) continue;
 
             if (snapshot.kind === 'component-added') {
-                if (!snapshot.componentType) return;
-                const existing = target.components.find((component) => component.constructor.name === snapshot.componentType);
-                if (existing) return;
+                if (!snapshot.componentType) continue;
+                const existing = target.components.find((component) => ScriptRegistry.getComponentName(component) === snapshot.componentType);
+                if (existing) continue;
                 const ComponentClass = ScriptRegistry.getComponentClass(snapshot.componentType);
-                if (!ComponentClass) return;
+                if (!ComponentClass) continue;
                 const component = target.addComponent(ComponentClass, { invokeLifecycle: false });
                 if (component.deserialize && snapshot.componentData) {
                     component.deserialize(snapshot.componentData);
                 }
                 component.overrides = new Set(Object.keys(snapshot.componentData ?? {}));
                 target.flushPendingLifecycle(false);
-                return;
+                continue;
             }
 
             if (snapshot.kind === 'component-removed') {
-                if (!snapshot.componentType) return;
-                const existing = target.components.find((component) => component.constructor.name === snapshot.componentType);
-                if (!existing || existing === target.transform) return;
+                if (!snapshot.componentType) continue;
+                const existing = target.components.find((component) => ScriptRegistry.getComponentName(component) === snapshot.componentType);
+                if (!existing || existing === target.transform) continue;
                 target.removeComponent(existing);
-                return;
+                continue;
             }
 
             if (snapshot.kind === 'child-added') {
-                if (!snapshot.childData) return;
-                if (snapshot.childPath && PrefabManager.findPrefabInstanceNodeByPath(prefabRoot, snapshot.childPath)) return;
+                if (!snapshot.childData) continue;
+                if (snapshot.childPath && PrefabManager.findPrefabInstanceNodeByPath(prefabRoot, snapshot.childPath)) continue;
                 const parent = snapshot.parentPath
                     ? PrefabManager.findPrefabInstanceNodeByPath(prefabRoot, snapshot.parentPath)
                     : target;
-                if (!parent) return;
-                const child = Prefab.instantiateData(snapshot.childData);
+                if (!parent) continue;
+                const externalIdMap = await PrefabManager.buildInstancePrefabReferenceMap(target, prefabRoot);
+                const child = Prefab.instantiateData(snapshot.childData, { externalIdMap });
                 if (prefabRoot.scene) {
                     prefabRoot.scene.addGameObject(child);
                 }
                 child.transform.setParent(parent.transform, false);
-                return;
+                continue;
             }
 
             if (snapshot.kind === 'child-removed') {
-                if (!snapshot.childPath) return;
+                if (!snapshot.childPath) continue;
                 const child = PrefabManager.findPrefabInstanceNodeByPath(prefabRoot, snapshot.childPath);
-                if (!child) return;
+                if (!child) continue;
                 if (child.scene) {
                     child.scene.removeGameObject(child);
                 } else {
                     child.onDestroy();
                 }
             }
-        });
+        }
     }
 
-    private reloadModelInstancesForAsset(assetPath: string) {
+    private async reloadModelInstancesForAsset(assetPath: string): Promise<void> {
         const assetGuid = AssetDatabase.getInstance().getGuid(assetPath) ?? null;
         const targets = this.editor.scene.gameObjects.filter((go: GameObject) =>
             go.sourceAssetType === 'model' &&
@@ -1652,7 +1708,7 @@ export class ProjectWindow {
             )
         );
 
-        targets.forEach( async(target: GameObject) => {
+        for (const target of targets) {
             await AssetImporter.importModel(assetPath, (importedGO) => {
                 PrefabManager.applySerializedData(target, importedGO.serialize(), {
                     preserveTransform: true,
@@ -1662,7 +1718,7 @@ export class ProjectWindow {
                 target.sourceAssetGuid = assetGuid;
                 target.sourceAssetType = 'model';
             });
-        });
+        }
     }
 
     private reloadAnimatorClipsForAsset(assetPath: string) {
@@ -1683,7 +1739,7 @@ export class ProjectWindow {
         });
     }
 
-    private applyMovedAssetReferenceEffects(movedEntries: AssetRefreshMove[]) {
+    private async applyMovedAssetReferenceEffects(movedEntries: AssetRefreshMove[]): Promise<void> {
         if (movedEntries.length === 0) return;
 
         const movedByGuid = new Map(movedEntries.map((entry) => [entry.guid, entry]));
@@ -1729,13 +1785,13 @@ export class ProjectWindow {
             });
         });
 
-        this.patchSerializedMovedReferencesOnDisk(movedEntries, movedByGuid);
+        await this.patchSerializedMovedReferencesOnDisk(movedEntries, movedByGuid);
     }
 
-    private patchSerializedMovedReferencesOnDisk(
+    private async patchSerializedMovedReferencesOnDisk(
         movedEntries: AssetRefreshMove[],
         movedByGuid: Map<string, AssetRefreshMove>
-    ) {
+    ): Promise<void> {
         if (!this.fs || movedEntries.length === 0) return;
 
         const allEntries = AssetDatabase.getInstance().getAllEntries();
@@ -1752,21 +1808,21 @@ export class ProjectWindow {
             .filter((entry) => entry.meta.assetType === 'scriptableObject')
             .map((entry) => entry.path);
 
-        materialPaths.forEach( async(assetPath) => {
+        for (const assetPath of materialPaths) {
             await this.patchJsonAssetFile(assetPath, (data) => this.patchMaterialAssetDataReferences(data, movedEntries, movedByGuid));
-        });
+        }
 
-        scenePaths.forEach( async(assetPath) => {
+        for (const assetPath of scenePaths) {
             await this.patchJsonAssetFile(assetPath, (data) => this.patchSceneAssetDataReferences(data, movedEntries, movedByGuid));
-        });
+        }
 
-        prefabPaths.forEach( async(assetPath) => {
+        for (const assetPath of prefabPaths) {
             await this.patchJsonAssetFile(assetPath, (data) => this.patchPrefabAssetDataReferences(data, movedEntries, movedByGuid));
-        });
+        }
 
-        scriptableObjectPaths.forEach( async(assetPath) => {
+        for (const assetPath of scriptableObjectPaths) {
             await this.patchJsonAssetFile(assetPath, (data) => this.patchGenericAssetDataReferences(data, movedEntries, movedByGuid));
-        });
+        }
     }
 
     private async patchJsonAssetFile(assetPath: string, patcher: (data: any) => boolean): Promise<void> {
@@ -2024,6 +2080,7 @@ export class ProjectWindow {
         if (!project?.grantId || !project.root) throw new Error('Project asset transactions require an active project grant');
         this.setAssetMutationBusy(true, `${name} in progress`);
         const selectedBefore = this.selectedAssetPath;
+        const dirtyRevisionBefore = this.editor.dirtyState.getCommandRevision();
         const command = new ProjectAssetCommand(name, {
             contractVersion: 1,
             grantId: project.grantId,
@@ -2048,6 +2105,12 @@ export class ProjectWindow {
         });
         try {
             await Promise.resolve(CommandHistory.execute(command));
+            // CommandHistory advances its state after the command callback
+            // resolves. Sync only after the full async transaction completes.
+            this.editor.dirtyState.setCommandRevision(Math.max(
+                CommandHistory.getCurrentState(),
+                dirtyRevisionBefore + 1
+            ));
         } catch (error) {
             this.announceAssetMutation(`${name} failed: ${error instanceof Error ? error.message : String(error)}`);
             throw error;
@@ -2622,13 +2685,13 @@ export class ProjectWindow {
         };
     }
 
-    private auditAndRepairReferenceFiles(assetPaths: string[], applyFixes: boolean): AssetReferenceAuditResult {
+    private async auditAndRepairReferenceFiles(assetPaths: string[], applyFixes: boolean): Promise<AssetReferenceAuditResult> {
         const result = this.createEmptyReferenceAuditResult();
         if (!this.fs || assetPaths.length === 0) return result;
 
-        assetPaths.forEach( async(assetPath) => {
+        for (const assetPath of assetPaths) {
             await this.auditAndRepairReferenceFile(assetPath, applyFixes, result);
-        });
+        }
         return result;
     }
 
@@ -2848,7 +2911,8 @@ export class ProjectWindow {
         referenceAudit: AssetReferenceAuditResult,
         scopePath: string
     ): Phase3ReadinessReport['healthDiagnostics'] {
-        const fileEntries = scopeEntries.filter( async(entry) => await this.isFileAssetPath(entry.path));
+        // runPhase3ReadinessCheck already filters this list to file assets after awaiting stat checks.
+        const fileEntries = scopeEntries;
         const unusedAssetCount = fileEntries.filter((entry) => {
             if (!this.isUnusedAssetCandidate(entry.meta.assetType)) return false;
             return AssetDatabase.getInstance()
@@ -2927,13 +2991,13 @@ export class ProjectWindow {
         return `${label}\nScope: ${report.scopePath}\nReady: ${report.ready ? 'YES' : 'NO'}\n\nScope Assets: ${report.scopeAssetCount}\nRuntime Candidates: ${report.runtimeCandidateCount}\nDependency Edges: ${report.dependencyEdgeCount}\nReimport Direct Runtime Paths: ${report.reimportDiagnostics.directRuntimeReimportCount}\nReimport Dependent Graph Assets: ${report.reimportDiagnostics.dependentGraphExpandableCount}\nReimport Dependent Runtime Reloads: ${report.reimportDiagnostics.totalDependentRuntimeReloads}\nReimport Max Runtime Reload Fanout: ${report.reimportDiagnostics.maxDependentRuntimeReloads}\nUnused Asset Candidates: ${report.healthDiagnostics.unusedAssetCount}\nCircular Dependency Chains: ${report.healthDiagnostics.circularDependencyCount}\nMissing Target Issues: ${report.healthDiagnostics.missingTargetIssueCount}\nOrphan GUID Issues: ${report.healthDiagnostics.orphanGuidIssueCount}\nAmbiguous Name References: ${report.healthDiagnostics.ambiguousReferenceCount}\nScripts: ${report.scriptCount}\nScripts with custom executionOrder: ${report.scriptsWithCustomExecutionOrder}\nScripts with autoReferenced=false: ${report.scriptsAutoReferencedDisabled}\n\nRefresh Scan: ${report.refreshSummary.scannedCount}\nRefresh Added: ${report.refreshSummary.added}\nRefresh Removed: ${report.refreshSummary.removed}\nRefresh Changed: ${report.refreshSummary.changed}\nRefresh Meta Changed: ${report.refreshSummary.metaChanged}\nRefresh Meta Repaired: ${report.refreshSummary.metaRepaired}\nRefresh Duplicate GUID Repaired: ${report.refreshSummary.duplicateGuidRepaired}\nRefresh Orphan Meta Files: ${report.refreshSummary.orphanMetaFiles}\nRefresh Moved: ${report.refreshSummary.moved}\n\nReference Issues: ${report.referenceAudit.issues}\nReference Fixable: ${report.referenceAudit.fixable}\nReference Unresolved: ${report.referenceAudit.unresolved}\n\nAsset Types:\n${typeLines || 'None'}\n\nBlockers:\n${blockers}`;
     }
 
-    private collectReimportDiagnostics(scopeAssetPaths: string[]): Phase3ReadinessReport['reimportDiagnostics'] {
+    private async collectReimportDiagnostics(scopeAssetPaths: string[]): Promise<Phase3ReadinessReport['reimportDiagnostics']> {
         let directRuntimeReimportCount = 0;
         let dependentGraphExpandableCount = 0;
         let totalDependentRuntimeReloads = 0;
         let maxDependentRuntimeReloads = 0;
 
-        scopeAssetPaths.forEach( async(assetPath) => {
+        for (const assetPath of scopeAssetPaths) {
             if (await this.isRuntimeRefreshCandidate(assetPath)) {
                 directRuntimeReimportCount++;
             }
@@ -2946,7 +3010,7 @@ export class ProjectWindow {
                 totalDependentRuntimeReloads += dependentRuntimePaths.length;
                 maxDependentRuntimeReloads = Math.max(maxDependentRuntimeReloads, dependentRuntimePaths.length);
             }
-        });
+        }
 
         return {
             directRuntimeReimportCount,
@@ -3248,6 +3312,12 @@ export class ProjectWindow {
                             assetKind: isDirectory ? 'directory' : 'file', contentBase64: null,
                             metadataBase64: null, referencePatches
                         });
+                        for (let attempt = 0; attempt < 30 && !await this.fs.exists(newPath); attempt += 1) {
+                            await new Promise((resolve) => setTimeout(resolve, 50));
+                        }
+                        if (!await this.fs.exists(newPath)) {
+                            throw new Error(`Rename transaction completed without visible target: ${newPath}`);
+                        }
                     } catch (err) {
                         console.error("Rename failed", err);
                     }

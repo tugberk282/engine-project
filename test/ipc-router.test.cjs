@@ -2,7 +2,7 @@
 
 const assert = require('node:assert/strict');
 const test = require('node:test');
-const { createVersionedHandler } = require('../electron/architecture/ipc-router');
+const { createVersionedHandler, stableError } = require('../electron/architecture/ipc-router');
 
 function request(requestId = 'request-1') {
     return {
@@ -82,4 +82,14 @@ test('router converts handler failures and renderer teardown to stable errors', 
     });
     const response = await teardownHandler({ sender: tornDown }, request('teardown'));
     assert.equal(response.error.code, 'RENDERER_GONE');
+});
+
+test('router preserves bounded build failures for actionable editor feedback', () => {
+    assert.deepEqual(stableError(Object.assign(
+        new Error('Project changed after the build request was created'),
+        { code: 'REVISION_STALE' }
+    )), {
+        code: 'REVISION_STALE',
+        message: 'Project changed after the build request was created'
+    });
 });

@@ -30,6 +30,8 @@ test('focus loss clears held keyboard, pointer, deltas, wheel, and axes', async 
     assert.equal(Input.getKey('KeyD'), true);
     assert.equal(Input.getMouseButton(0), true);
     assert.equal(Input.GetAxis('Horizontal'), 1);
+    assert.equal(Input.snapshot().LookX, 7);
+    assert.equal(Input.snapshot().LookY, -4);
 
     fakeWindow.dispatch('blur');
 

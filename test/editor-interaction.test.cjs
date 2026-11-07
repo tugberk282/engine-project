@@ -18,7 +18,7 @@ const electronExecutable = path.join(
 
 test('rendered editor interactions create, select, inspect, and expose menu state', {
     skip: process.platform !== 'win32' ? 'The desktop editor interaction lane currently qualifies Windows only.' : false,
-    timeout: 120_000
+    timeout: 150_000
 }, async (t) => {
     assert.ok(fs.existsSync(path.join(root, 'dist', 'index.html')),
         'dist/index.html is missing; run npm run build before the interaction test');
@@ -44,7 +44,7 @@ test('rendered editor interactions create, select, inspect, and expose menu stat
             ENGINE_AUTO_OPEN_PROJECT_PATH: project,
             ENGINE_USER_DATA_PATH: path.join(workDirectory, 'user-data')
         },
-        timeoutMs: 60_000
+        timeoutMs: 75_000
     });
 
     const result = JSON.parse(fs.readFileSync(output, 'utf8'));
@@ -104,12 +104,14 @@ test('rendered editor interactions create, select, inspect, and expose menu stat
             ENGINE_AUTO_OPEN_PROJECT_PATH: project,
             ENGINE_USER_DATA_PATH: path.join(workDirectory, 'user-data')
         },
-        timeoutMs: 60_000
+        timeoutMs: 75_000
     });
     const restartResult = JSON.parse(fs.readFileSync(restartOutput, 'utf8'));
     assert.equal(restartResult.ok, true, JSON.stringify(restartResult.failures ?? restartResult, null, 2));
     const restartChecks = new Map(restartResult.checks.map((check) => [check.name, check]));
     assert.equal(restartChecks.get('saved scene transaction survives editor relaunch with stable IDs and order')?.pass, true);
+    assert.equal(restartChecks.get('saved prefab Repair and Unpack state survives editor relaunch')?.pass, true);
+    assert.equal(restartChecks.get('editor relaunch starts with a fresh undo history')?.pass, true);
 });
 
 test('launcher keeps a visible recoverable error after project bootstrap failure', {

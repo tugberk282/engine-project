@@ -111,7 +111,9 @@ export class MeshRenderer extends Component {
 
     public serialize(): any {
         return {
-            type: this.constructor.name,
+            // Do not derive persisted component identity from constructor.name:
+            // production minifiers are allowed to rename class constructors.
+            type: 'MeshRenderer',
             data: {
                 color: this.color,
                 materialName: this.materialName,

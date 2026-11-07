@@ -53,12 +53,15 @@ export class CapsuleCollider extends Collider {
     }
 
     public setRadius(radius: number) {
-        this.radius = radius;
+        if (!Number.isFinite(radius)) return;
+        this.radius = Math.max(0.0001, radius);
+        this.height = Math.max(this.height, this.radius * 2);
         this.updateCollider();
     }
 
     public setHeight(height: number) {
-        this.height = height;
+        if (!Number.isFinite(height)) return;
+        this.height = Math.max(this.radius * 2, height);
         this.updateCollider();
     }
 

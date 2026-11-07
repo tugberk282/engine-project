@@ -4,6 +4,7 @@ import { MaterialManager } from '../engine/Material';
 import { AssetImporter } from '../engine/AssetImporter';
 import { AssetDatabase } from '../engine/AssetDatabase';
 import { describeObjectReference, parseObjectReferenceDropPayload, sameObjectReference } from './ObjectReference';
+import { ScriptRegistry } from '../engine/ScriptRegistry';
 
 export class EditorInspectors {
     public refreshSelected: (() => void) | null = null;
@@ -1768,8 +1769,10 @@ export class EditorInspectors {
 
     // Collider Inspector
     public createColliderInspector(parent: HTMLElement, collider: any): void {
-        const isBox = collider.constructor.name === 'BoxCollider';
-        const isSphere = collider.constructor.name === 'SphereCollider';
+        const colliderType = ScriptRegistry.getComponentName(collider);
+        const isBox = colliderType === 'BoxCollider';
+        const isSphere = colliderType === 'SphereCollider';
+        const isCapsule = colliderType === 'CapsuleCollider';
 
         // Is Trigger
         this.createUnityCheckbox(parent, 'Is Trigger', collider.isTrigger || false, (checked: boolean) => {
@@ -1843,6 +1846,42 @@ export class EditorInspectors {
                     }
                 });
             }, collider, 'radius');
+        } else if (isCapsule) {
+            this.createUnityField(parent, 'Radius', 'number', collider.radius ?? 0.5, (v) => {
+                const oldVal = collider.radius;
+                const newVal = Math.max(0.0001, Number.parseFloat(v));
+                if (!Number.isFinite(newVal)) return;
+                CommandHistory.execute({
+                    name: 'Change Capsule Collider Radius',
+                    execute: () => {
+                        collider.setRadius(newVal);
+                        this.recordOverride(collider, 'radius');
+                        this.notifyChange(collider);
+                    },
+                    undo: () => {
+                        collider.setRadius(oldVal);
+                        this.notifyChange(collider);
+                    }
+                });
+            }, collider, 'radius');
+            this.createUnityField(parent, 'Height', 'number', collider.height ?? 2, (v) => {
+                const oldVal = collider.height;
+                const requested = Number.parseFloat(v);
+                if (!Number.isFinite(requested)) return;
+                const newVal = Math.max((collider.radius ?? 0.5) * 2, requested);
+                CommandHistory.execute({
+                    name: 'Change Capsule Collider Height',
+                    execute: () => {
+                        collider.setHeight(newVal);
+                        this.recordOverride(collider, 'height');
+                        this.notifyChange(collider);
+                    },
+                    undo: () => {
+                        collider.setHeight(oldVal);
+                        this.notifyChange(collider);
+                    }
+                });
+            }, collider, 'height');
         }
     }
 
@@ -3103,6 +3142,22 @@ export class EditorInspectors {
                 },
                 undo: () => {
                     btn.label = oldVal;
+                    this.notifyChange(btn);
+                }
+            });
+        }, btn);
+
+        this.createUnityField(parent, 'Runtime Event', 'text', btn.eventName || '', (v) => {
+            const oldVal = btn.eventName || '';
+            CommandHistory.execute({
+                name: 'Change Button Runtime Event',
+                execute: () => {
+                    btn.eventName = v;
+                    this.recordOverride(btn, 'eventName');
+                    this.notifyChange(btn);
+                },
+                undo: () => {
+                    btn.eventName = oldVal;
                     this.notifyChange(btn);
                 }
             });
@@ -5719,6 +5774,78 @@ export class EditorInspectors {
                 }
             });
         }, eventSystem, 'pixelDragThreshold');
+    }
+
+    public createUIEventActionInspector(parent: HTMLElement, action: any): void {
+        const setValue = (field: string, value: unknown, label: string): void => {
+            const oldValue = action[field];
+            CommandHistory.execute({
+                name: label,
+                execute: () => {
+                    action[field] = value;
+                    this.recordOverride(action, field);
+                    this.notifyChange(action);
+                },
+                undo: () => {
+                    action[field] = oldValue;
+                    this.notifyChange(action);
+                }
+            });
+        };
+        this.createUnityField(parent, 'Event Name', 'text', action.eventName || '', (value) => {
+            setValue('eventName', value.trim(), 'Change UI Event Name');
+        }, action, 'eventName');
+        this.createUnityDropdown(parent, 'Action', [
+            'SetActive', 'ToggleActive', 'SetPosition', 'SetRotation', 'SetScale', 'SetVelocity', 'SetText', 'LoadScene'
+        ], action.action || 'SetActive', (value) => {
+            setValue('action', value, 'Change UI Event Action');
+        }, action, 'action');
+
+        if (action.action === 'LoadScene') {
+            this.createUnityField(parent, 'Scene Path', 'text', action.scenePath || '', (value) => {
+                setValue('scenePath', value.replaceAll('\\', '/').trim(), 'Change UI Event Scene');
+            }, action, 'scenePath');
+            return;
+        }
+
+        this.createUnityField(parent, 'Target Object ID', 'text', action.targetObjectId || '', (value) => {
+            setValue('targetObjectId', value.trim(), 'Change UI Event Target');
+        }, action, 'targetObjectId');
+        if (action.action === 'SetActive') {
+            this.createUnityCheckbox(parent, 'Active', action.active !== false, (value) => {
+                setValue('active', value, 'Change UI Event Active State');
+            }, action, 'active');
+        }
+        const vectorFields: Record<string, { label: string; fallback: [number, number, number] }> = {
+            SetPosition: { label: 'Position', fallback: [0, 0, 0] },
+            SetRotation: { label: 'Rotation', fallback: [0, 0, 0] },
+            SetScale: { label: 'Scale', fallback: [1, 1, 1] },
+            SetVelocity: { label: 'Velocity', fallback: [0, 0, 0] }
+        };
+        const vectorField = vectorFields[action.action];
+        if (vectorField) {
+            const field = action.action === 'SetPosition' ? 'position'
+                : action.action === 'SetRotation' ? 'rotation'
+                    : action.action === 'SetScale' ? 'scale' : 'velocity';
+            const current = Array.isArray(action[field]) ? [...action[field]] : [...vectorField.fallback];
+            ['X', 'Y', 'Z'].forEach((axis, index) => {
+                this.createUnityField(parent, `${vectorField.label} ${axis}`, 'number', current[index], (raw) => {
+                    const value = Number.parseFloat(raw);
+                    if (!Number.isFinite(value)) return;
+                    const next = [...current];
+                    next[index] = value;
+                    setValue(field, next, `Change UI Event ${vectorField.label}`);
+                }, action, field);
+            });
+        }
+        if (action.action === 'SetText') {
+            this.createUnityField(parent, 'Text', 'text', action.text || '', (value) => {
+                setValue('text', value, 'Change UI Event Text');
+            }, action, 'text');
+            this.createUnityCheckbox(parent, 'Use Event Value', action.useEventValue === true, (value) => {
+                setValue('useEventValue', value, 'Toggle UI Event Value');
+            }, action, 'useEventValue');
+        }
     }
 
     // UIImage Inspector

@@ -1,4 +1,4 @@
-import { LayerManager } from './LayerManager';
+import { LayerManager } from './LayerManager.ts';
 
 /**
  * ProjectSettings - Unity-style project configuration
@@ -103,6 +103,7 @@ export class ProjectSettings {
             renderScale: this.renderScale,
             masterVolume: this.masterVolume,
             dopplerFactor: this.dopplerFactor,
+            inputAxes: Object.fromEntries(this.inputAxes.entries()),
             tags: this.tags,
             layerNames: this.layerNames,
             layerCollisionMatrix: this.layerCollisionMatrix
@@ -113,8 +114,18 @@ export class ProjectSettings {
     public static load(): void {
         const saved = localStorage.getItem('tugberkengine_project_settings');
         if (saved) {
-            const settings = JSON.parse(saved);
-            Object.assign(this, settings);
+            try {
+                const settings = JSON.parse(saved);
+                if (settings && typeof settings === 'object') {
+                    const { inputAxes, ...scalarSettings } = settings as Record<string, unknown>;
+                    Object.assign(this, scalarSettings);
+                    if (inputAxes && typeof inputAxes === 'object' && !Array.isArray(inputAxes)) {
+                        this.inputAxes = this.normalizeInputAxes(inputAxes);
+                    }
+                }
+            } catch {
+                // Keep defaults when an older or corrupt local settings value is present.
+            }
         }
         this.layerNames = this.normalizeLayerNames(this.layerNames);
         this.layerCollisionMatrix = this.normalizeLayerCollisionMatrix(this.layerCollisionMatrix);
@@ -164,6 +175,26 @@ export class ProjectSettings {
             }
         }
         return matrix;
+    }
+
+    private static normalizeInputAxes(input: unknown): Map<string, InputAxis> {
+        const axes = new Map<string, InputAxis>();
+        if (!input || typeof input !== 'object' || Array.isArray(input)) return axes;
+        for (const [name, value] of Object.entries(input)) {
+            if (!value || typeof value !== 'object' || Array.isArray(value)) continue;
+            const source = value as Partial<InputAxis>;
+            axes.set(name, {
+                positiveButton: typeof source.positiveButton === 'string' ? source.positiveButton : '',
+                negativeButton: typeof source.negativeButton === 'string' ? source.negativeButton : '',
+                altPositiveButton: typeof source.altPositiveButton === 'string' ? source.altPositiveButton : '',
+                altNegativeButton: typeof source.altNegativeButton === 'string' ? source.altNegativeButton : '',
+                gravity: Number.isFinite(source.gravity) ? Number(source.gravity) : 3,
+                sensitivity: Number.isFinite(source.sensitivity) ? Number(source.sensitivity) : 3,
+                snap: source.snap !== false,
+                type: source.type === 'MouseMovement' || source.type === 'JoystickAxis' ? source.type : 'KeyOrMouseButton'
+            });
+        }
+        return axes;
     }
 }
 

@@ -125,3 +125,63 @@ test('activation changes propagate lifecycle state through enabled descendants',
     assert.match(gameObject, /public isActiveInHierarchy\(\): boolean/);
     assert.match(gameObject, /this\.transform\?\.parent \?\? null/);
 });
+
+test('Game View camera discovery traverses active child hierarchies deterministically', () => {
+    const editor = source('src/editor/Editor.ts');
+    const method = editor.match(/private getRuntimeCameraEntries\(\)[^]*?\n    }\n\n    private syncRuntimeLayerAssignments/);
+    assert.ok(method, 'camera entry collector must remain a dedicated bounded method');
+    assert.match(method[0], /let hierarchyIndex = 0/);
+    assert.match(method[0], /go\.isActiveInHierarchy\(\)/);
+    assert.match(method[0], /go\.transform\.children\.forEach\(\(child\) => visit\(child\.gameObject\)\)/);
+    assert.match(method[0], /depthDelta/);
+    assert.match(method[0], /left\.index - right\.index/);
+});
+
+test('CapsuleCollider Inspector authors bounded radius and height through undoable setters', () => {
+    const inspectors = source('src/editor/EditorInspectors.ts');
+    const inspectorWindow = source('src/editor/InspectorWindow.ts');
+    const capsule = source('src/engine/components/CapsuleCollider.ts');
+    assert.match(inspectorWindow, /compName === 'BoxCollider' \|\| compName === 'SphereCollider' \|\| compName === 'CapsuleCollider'/);
+    assert.match(inspectors, /const isCapsule = colliderType === 'CapsuleCollider'/);
+    assert.match(inspectors, /Change Capsule Collider Radius/);
+    assert.match(inspectors, /collider\.setRadius\(newVal\)/);
+    assert.match(inspectors, /recordOverride\(collider, 'radius'\)/);
+    assert.match(inspectors, /Change Capsule Collider Height/);
+    assert.match(inspectors, /collider\.setHeight\(newVal\)/);
+    assert.match(inspectors, /recordOverride\(collider, 'height'\)/);
+    assert.match(capsule, /this\.radius = Math\.max\(0\.0001, radius\)/);
+    assert.match(capsule, /this\.height = Math\.max\(this\.radius \* 2, height\)/);
+});
+
+test('UIEventAction Inspector exposes an undoable authored LoadScene path', () => {
+    const inspectors = source('src/editor/EditorInspectors.ts');
+    const inspectorWindow = source('src/editor/InspectorWindow.ts');
+    const component = source('src/engine/components/UIEventAction.ts');
+    assert.match(inspectorWindow, /compName === 'UIEventAction'/);
+    assert.match(inspectorWindow, /createUIEventActionInspector\(sectionContent, comp\)/);
+    assert.match(inspectors, /'SetText', 'LoadScene'/);
+    assert.match(inspectors, /action\.action === 'LoadScene'/);
+    assert.match(inspectors, /'Scene Path'/);
+    assert.match(inspectors, /recordOverride\(action, field\)/);
+    assert.match(component, /window\.dispatchEvent\(new CustomEvent\('tugberk-runtime-load-scene'/);
+    assert.match(component, /@serialize public scenePath: string/);
+});
+
+test('broken prefab sources expose safe repair and undoable unpack actions', () => {
+    const editor = source('src/editor/Editor.ts');
+    const inspector = source('src/editor/InspectorWindow.ts');
+
+    assert.match(editor, /public async getPrefabSourceStatus/);
+    assert.match(editor, /public async repairPrefabSource/);
+    assert.match(editor, /Prefab repair requires a \.prefab asset inside the current project Assets folder/);
+    assert.match(editor, /public unpackPrefabInstance\(gameObject: GameObject, completely = false\)/);
+    assert.match(editor, /Unpack Prefab Completely/);
+    assert.match(editor, /this\.executeSceneMutationCommand\(/);
+    assert.match(inspector, /id="prefab-source-status" role="status" aria-live="polite"/);
+    assert.match(inspector, /id="prefab-repair">Repair/);
+    assert.match(inspector, /id="prefab-unpack">Unpack/);
+    assert.match(inspector, /id="prefab-unpack-completely">Unpack Completely/);
+    assert.match(inspector, /openBtn\.disabled = !connected/);
+    assert.match(inspector, /applyBtn\.disabled = !connected/);
+    assert.match(inspector, /revertBtn\.disabled = !connected/);
+});

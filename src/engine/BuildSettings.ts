@@ -20,7 +20,11 @@ export type BuildProgress = Readonly<{
 export type BuildResult = Readonly<{
     buildId: string;
     outputPath: string;
-    manifest: Readonly<{ manifestVersion: 1; manifestHash: string }>;
+    manifest: Readonly<{
+        manifestVersion: 1;
+        manifestHash: string;
+        runtimeDiagnostics?: ReadonlyArray<Readonly<{ type: string; count: number; scenes: ReadonlyArray<string> }>>;
+    }>;
 }>;
 
 type BuildProtocol = {

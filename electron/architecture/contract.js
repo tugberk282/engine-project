@@ -25,6 +25,7 @@ const COMMANDS = Object.freeze({
     RUNTIME_RESUME: 'runtime.resume',
     RUNTIME_TICK: 'runtime.tick',
     RUNTIME_STEP: 'runtime.step',
+    RUNTIME_UI_EVENT: 'runtime.uiEvent',
     RUNTIME_STOP: 'runtime.stop',
     BUILD_START: 'build.start',
     BUILD_CANCEL: 'build.cancel'
@@ -51,6 +52,14 @@ function hasExactKeys(value, keys) {
     const actual = Object.keys(value).sort();
     const expected = [...keys].sort();
     return actual.length === expected.length && actual.every((key, index) => key === expected[index]);
+}
+
+function isUiEventValue(value) {
+    if (value === undefined || value === null || typeof value === 'string' || typeof value === 'boolean') return true;
+    if (Number.isFinite(value)) return true;
+    if (!isRecord(value)) return false;
+    const keys = Object.keys(value);
+    return keys.length <= 4 && keys.every((key) => ID_PATTERN.test(key) && isUiEventValue(value[key]));
 }
 
 function utf8Length(value) {
@@ -151,10 +160,21 @@ function validatePayload(command, payload) {
             && utf8Length(payload.snapshot) <= 16 * 1024 * 1024;
     }
     if (command === COMMANDS.RUNTIME_TICK || command === COMMANDS.RUNTIME_STEP) {
-        return hasExactKeys(payload, ['deltaTime'])
+        const inputValid = isRecord(payload.input || {})
+                && Object.keys(payload.input || {}).length <= 256
+                && Object.values(payload.input || {}).every((value) => typeof value === 'boolean' || Number.isFinite(value));
+        return hasExactKeys(payload, ['deltaTime', 'input'])
             && Number.isFinite(payload.deltaTime)
             && payload.deltaTime >= 0
-            && payload.deltaTime <= 0.1;
+            && payload.deltaTime <= 0.1
+            && inputValid;
+    }
+    if (command === COMMANDS.RUNTIME_UI_EVENT) {
+        return (hasExactKeys(payload, ['name']) || hasExactKeys(payload, ['name', 'value']))
+            && typeof payload.name === 'string'
+            && payload.name.length > 0
+            && payload.name.length <= 128
+            && isUiEventValue(payload.value);
     }
     if (command === COMMANDS.RUNTIME_PAUSE
         || command === COMMANDS.RUNTIME_RESUME

@@ -12,6 +12,8 @@ test('mapped input owns configuration, frame snapshots, and focus-loss clearing'
     assert.match(input, /public static configure\(map: Partial<InputMap>\)/);
     assert.match(input, /window\.addEventListener\('blur', \(\) => this\.clearHeldState\(\)\)/);
     assert.match(input, /public static snapshot\(\): Record<string, number \| boolean>/);
+    assert.match(input, /frame\.LookX = this\.mouseDelta\.x/);
+    assert.match(input, /frame\.LookY = this\.mouseDelta\.y/);
     assert.match(bridge, /\{ deltaTime, input \}/);
 });
 
