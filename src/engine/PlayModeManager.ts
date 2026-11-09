@@ -24,6 +24,9 @@ export class PlayModeManager {
     private readonly runtime = new RuntimeBridge();
     private runtimeError: RuntimeFailure | null = null;
     private lastRuntimeUiEvent: string | null = null;
+    private runtimeSceneSnapshot: string | null = null;
+    private runtimeScenePath: string | null = null;
+    private sceneTransitionInFlight = false;
 
     private sceneSnapshot: any = null;
     private editorState: any = null;
@@ -42,6 +45,7 @@ export class PlayModeManager {
         });
         if (typeof window !== 'undefined') {
             window.addEventListener('tugberk-ui-event', this.handleRuntimeUIEvent as EventListener);
+            window.addEventListener('tugberk-runtime-load-scene', this.handleRuntimeLoadScene as EventListener);
         }
     }
 
@@ -51,6 +55,56 @@ export class PlayModeManager {
         const name = detail?.name;
         if (typeof name === 'string' && name.length > 0 && name.length <= 128) this.runtime.uiEvent(name, detail?.value);
     };
+
+    private readonly handleRuntimeLoadScene = (event: Event): void => {
+        if (this.mode !== 'play' || this.sceneTransitionInFlight) return;
+        const scenePath = (event as CustomEvent<{ scenePath?: unknown }>).detail?.scenePath;
+        if (typeof scenePath !== 'string' || !scenePath.trim()) return;
+        void this.loadRuntimeScene(scenePath);
+    };
+
+    private async loadRuntimeScene(scenePath: string): Promise<void> {
+        this.sceneTransitionInFlight = true;
+        try {
+            const editor = (window as any).Editor?.instance;
+            if (!editor?.prepareRuntimeSceneSnapshot) {
+                throw Object.assign(new Error('The editor runtime scene loader is unavailable.'), {
+                    code: 'RUNTIME_SCENE_LOADER_UNAVAILABLE'
+                });
+            }
+            const prepared = await editor.prepareRuntimeSceneSnapshot(scenePath) as { path: string; snapshot: string };
+            if (this.mode !== 'play') return;
+            const scene = SceneManager.getInstance().getActiveScene();
+            if (!scene) throw Object.assign(new Error('No active scene is available for Play Mode.'), {
+                code: 'RUNTIME_SCENE_UNAVAILABLE'
+            });
+
+            scene.loadFromJSON(prepared.snapshot);
+            this.runtimeSceneSnapshot = prepared.snapshot;
+            this.runtimeScenePath = prepared.path;
+            this.lastRuntimeUiEvent = null;
+            this.frame = 0;
+            this.time = 0;
+            this.deltaTime = 0;
+            this.runtimeError = null;
+            editor.onRuntimeSceneChanged?.(prepared.path);
+            this.runtime.restart(prepared.snapshot);
+            console.log(`[PlayMode] Loaded runtime scene: ${prepared.path}`);
+        } catch (cause) {
+            const code = typeof (cause as any)?.code === 'string'
+                ? (cause as any).code
+                : 'RUNTIME_SCENE_LOAD_FAILED';
+            const message = typeof (cause as any)?.message === 'string'
+                ? (cause as any).message
+                : `Failed to load runtime scene '${scenePath}'.`;
+            console.error(`[PlayMode] ${code}: ${message}`);
+            window.dispatchEvent(new CustomEvent('tugberk-runtime-load-scene-error', {
+                detail: { code, message, scenePath }
+            }));
+        } finally {
+            this.sceneTransitionInFlight = false;
+        }
+    }
 
     public static getInstance(): PlayModeManager {
         if (!PlayModeManager.instance) {
@@ -73,6 +127,8 @@ export class PlayModeManager {
         const scene = SceneManager.getInstance().getActiveScene();
         if (scene) {
             this.sceneSnapshot = this.snapshotScene(scene);
+            this.runtimeSceneSnapshot = this.sceneSnapshot;
+            this.runtimeScenePath = SceneManager.getInstance().getActiveScenePath();
         }
 
         this.mode = 'play';
@@ -84,6 +140,7 @@ export class PlayModeManager {
 
         this.runtimeError = null;
         this.lastRuntimeUiEvent = null;
+        this.sceneTransitionInFlight = false;
         if (this.sceneSnapshot) this.runtime.start(this.sceneSnapshot);
 
         // Trigger callbacks
@@ -107,6 +164,8 @@ export class PlayModeManager {
             this.restoreScene(this.sceneSnapshot);
             this.sceneSnapshot = null;
         }
+        this.runtimeSceneSnapshot = null;
+        this.runtimeScenePath = null;
 
         // Restore editor state
         this.restoreEditorState();
@@ -271,13 +330,16 @@ export class PlayModeManager {
     }
 
     public restartPlayMode(): void {
-        if (this.mode === 'edit' || !this.sceneSnapshot) return;
+        if (this.mode === 'edit' || !this.runtimeSceneSnapshot) return;
         this.frame = 0;
         this.time = 0;
         this.deltaTime = 0;
         this.isPaused = false;
         this.runtimeError = null;
-        this.runtime.restart(this.sceneSnapshot);
+        const scene = SceneManager.getInstance().getActiveScene();
+        if (scene) scene.loadFromJSON(this.runtimeSceneSnapshot);
+        this.lastRuntimeUiEvent = null;
+        this.runtime.restart(this.runtimeSceneSnapshot);
     }
 
     public getRuntimeState(): RuntimeState {
@@ -286,6 +348,10 @@ export class PlayModeManager {
 
     public getRuntimeError(): RuntimeFailure | null {
         return this.runtimeError;
+    }
+
+    public getRuntimeScenePath(): string | null {
+        return this.runtimeScenePath;
     }
 
     private handleRuntimeState(state: RuntimeState): void {

@@ -53,6 +53,7 @@ test('rendered Play/Pause/Step/Stop uses the supervised runtime and restores aut
         'Game View releases Jump after keyup',
         'Pause freezes runtime-authored state',
         'Step advances one paused runtime frame',
+        'authored LoadScene replaces only the supervised Play Mode scene',
         'Stop restores edit scene byte-for-byte'
     ]) assert.equal(checks.get(name), true, `missing or failed rendered check: ${name}`);
 });

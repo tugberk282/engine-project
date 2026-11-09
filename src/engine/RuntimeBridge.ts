@@ -72,7 +72,9 @@ export class RuntimeBridge {
     }
 
     public restart(snapshot: string): void {
-        this.start(snapshot);
+        this.stoppingIntentionally = false;
+        this.setState('starting');
+        void this.request('runtime.restart', { snapshot });
     }
 
     public stop(): void {

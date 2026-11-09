@@ -14,7 +14,7 @@
     "bootstrap:electron": "install-electron --no",
     "dev": "concurrently \"vite --port 5174\" \"wait-on tcp:5174 && node scripts/start-electron.js\"",
     "build": "tsc && vite build && node scripts/fix-dist-paths.js",
-    "test": "node --test test/build-service.test.cjs test/player-content.test.cjs test/runtime-support.test.cjs test/runtime-snapshot-security.test.cjs test/player-scene.test.mjs test/player-ui.test.mjs test/editor-workflow-contract.test.cjs test/runtime-bridge.test.cjs test/runtime-supervisor.test.cjs test/persistence.test.cjs test/asset-database-contract.test.cjs test/project-asset-services.test.cjs test/vertical-slice.test.cjs",
+    "test": "node --experimental-strip-types --test test/runtime-scene-transition.test.mjs test/build-service.test.cjs test/player-content.test.cjs test/runtime-support.test.cjs test/runtime-snapshot-security.test.cjs test/player-scene.test.mjs test/player-ui.test.mjs test/editor-workflow-contract.test.cjs test/runtime-bridge.test.cjs test/runtime-supervisor.test.cjs test/persistence.test.cjs test/asset-database-contract.test.cjs test/project-asset-services.test.cjs test/vertical-slice.test.cjs",
     "test:player-scene": "node --test test/player-scene.test.mjs",
     "test:editor-workflow": "node --test test/editor-workflow-contract.test.cjs test/editor-interaction.test.cjs",
     "test:editor-headless": "node --test test/editor-headless-interaction.test.cjs",

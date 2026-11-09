@@ -1,0 +1,39 @@
+{
+  "formatVersion": 1,
+  "sceneId": "runtime-transition-target",
+  "name": "RuntimeTransition",
+  "version": "1.4",
+  "environment": {
+    "backgroundColor": 2500134
+  },
+  "gameObjects": [
+    {
+      "id": "runtime-transition-marker",
+      "name": "Runtime Transition Marker",
+      "tag": "Untagged",
+      "layer": 0,
+      "isStatic": false,
+      "enabled": true,
+      "prefabSource": null,
+      "sourceAssetPath": null,
+      "sourceAssetGuid": null,
+      "sourceAssetType": null,
+      "transform": {
+        "position": [0, 1, 0],
+        "rotation": [0, 0, 0],
+        "scale": [2, 2, 2]
+      },
+      "components": [
+        {
+          "type": "MeshFilter",
+          "data": { "primitiveType": "Cube" }
+        },
+        {
+          "type": "MeshRenderer",
+          "data": { "color": 5635925 }
+        }
+      ],
+      "children": []
+    }
+  ]
+}

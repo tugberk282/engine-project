@@ -235,6 +235,14 @@ test('fs-exists source handles Windows disappearance races without swallowing au
     assert.match(handler, /throw error/);
 });
 
+test('preload permits every supervised runtime command declared by the main contract', () => {
+    const preload = fs.readFileSync(path.join(root, 'electron/preload.js'), 'utf8');
+    for (const command of ['runtime.start', 'runtime.restart', 'runtime.pause', 'runtime.resume',
+        'runtime.tick', 'runtime.step', 'runtime.uiEvent', 'runtime.stop']) {
+        assert.match(preload, new RegExp(`['"]${command.replace('.', '\\.') }['"]`), command);
+    }
+});
+
 test('preload exports only the reviewed API and maps every method to an allowlisted channel', async () => {
     const { api, calls } = loadPreload();
     assert.deepEqual(Object.keys(api).sort(), [

@@ -48,6 +48,10 @@ class RuntimeSupervisor {
         return this.launch();
     }
 
+    async restart(snapshot) {
+        return this.start(snapshot);
+    }
+
     async launch() {
         this.state = 'starting';
         this.sessionId = randomUUID();

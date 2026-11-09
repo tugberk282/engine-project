@@ -308,6 +308,8 @@ async function executeProtocolCommand(event, request) {
             return true;
         case COMMANDS.RUNTIME_START:
             return runtimeSupervisor.start(request.payload.snapshot);
+        case COMMANDS.RUNTIME_RESTART:
+            return runtimeSupervisor.restart(request.payload.snapshot);
         case COMMANDS.RUNTIME_PAUSE:
             return runtimeSupervisor.pause();
         case COMMANDS.RUNTIME_RESUME:
@@ -695,6 +697,16 @@ async function runSmokeTest(mainWindow) {
                 record('Step advances one paused runtime frame',
                     pausedRotation !== null && (movingCube?.transform.rotation.y ?? pausedRotation) > pausedRotation,
                     JSON.stringify({ pausedRotation, steppedRotation: movingCube?.transform.rotation.y ?? null }));
+                window.dispatchEvent(new CustomEvent('tugberk-ui-event', {
+                    detail: { name: 'NextScene' }
+                }));
+                await waitUntil(() => editor.playMode?.getRuntimeScenePath?.() === 'Assets/Scenes/RuntimeTransition.json'
+                    && !!editor.scene.findGameObjectByID('runtime-transition-marker'));
+                const runtimeScenePath = editor.playMode?.getRuntimeScenePath?.() ?? null;
+                const runtimeTransitionMarker = editor.scene.findGameObjectByID('runtime-transition-marker');
+                record('authored LoadScene replaces only the supervised Play Mode scene',
+                    runtimeScenePath === 'Assets/Scenes/RuntimeTransition.json' && !!runtimeTransitionMarker,
+                    JSON.stringify({ runtimeScenePath, marker: runtimeTransitionMarker?.name ?? null }));
                 await click('play-btn', 250);
                 const restoredBytes = editor.scene.toJSON();
                 record('Stop restores edit scene byte-for-byte', restoredBytes === originalBytes,
@@ -703,7 +715,7 @@ async function runSmokeTest(mainWindow) {
                     ok: failures.length === 0,
                     failures,
                     checks,
-                    snapshot: { initial, afterPlay, keyboardSnapshot, inputStartX, inputEndX, lookSnapshot, lookStartY, lookEndY, jumpPressedSnapshot, jumpReleasedSnapshot, jumpStartY, jumpEndY, pausedRotation, restoredByteLength: restoredBytes.length }
+                    snapshot: { initial, afterPlay, keyboardSnapshot, inputStartX, inputEndX, lookSnapshot, lookStartY, lookEndY, jumpPressedSnapshot, jumpReleasedSnapshot, jumpStartY, jumpEndY, pausedRotation, runtimeScenePath, restoredByteLength: restoredBytes.length }
                 };
             }
 

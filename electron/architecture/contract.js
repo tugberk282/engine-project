@@ -21,6 +21,7 @@ const COMMANDS = Object.freeze({
     RECENT_PROJECTS_SAVE: 'recentProjects.save',
     TELEMETRY_RECORD: 'telemetry.record',
     RUNTIME_START: 'runtime.start',
+    RUNTIME_RESTART: 'runtime.restart',
     RUNTIME_PAUSE: 'runtime.pause',
     RUNTIME_RESUME: 'runtime.resume',
     RUNTIME_TICK: 'runtime.tick',
@@ -154,7 +155,7 @@ function validatePayload(command, payload) {
     if (command === COMMANDS.BUILD_CANCEL) {
         return hasExactKeys(payload, ['buildId']) && ID_PATTERN.test(payload.buildId || '');
     }
-    if (command === COMMANDS.RUNTIME_START) {
+    if (command === COMMANDS.RUNTIME_START || command === COMMANDS.RUNTIME_RESTART) {
         return hasExactKeys(payload, ['snapshot'])
             && typeof payload.snapshot === 'string'
             && utf8Length(payload.snapshot) <= 16 * 1024 * 1024;

@@ -37,6 +37,14 @@
         {
           "type": "RigidBody",
           "data": { "enabled": true, "mass": 1, "useGravity": true, "isKinematic": false }
+        },
+        {
+          "type": "UIEventAction",
+          "data": {
+            "eventName": "NextScene",
+            "action": "LoadScene",
+            "scenePath": "Assets/Scenes/RuntimeTransition.json"
+          }
         }
       ],
       "children": []

@@ -167,6 +167,19 @@ test('UIEventAction Inspector exposes an undoable authored LoadScene path', () =
     assert.match(component, /@serialize public scenePath: string/);
 });
 
+test('Play Mode LoadScene swaps only the runtime scene and preserves the edit snapshot', () => {
+    const manager = source('src/engine/PlayModeManager.ts');
+    const editor = source('src/editor/Editor.ts');
+    assert.match(manager, /tugberk-runtime-load-scene/);
+    assert.match(manager, /this\.runtimeSceneSnapshot = prepared\.snapshot/);
+    assert.match(manager, /this\.runtime\.restart\(prepared\.snapshot\)/);
+    assert.match(source('src/engine/RuntimeBridge.ts'), /this\.request\('runtime\.restart', \{ snapshot \}\)/);
+    assert.match(manager, /this\.restoreScene\(this\.sceneSnapshot\)/);
+    assert.match(manager, /restartPlayMode\(\)[^]*?this\.runtime\.restart\(this\.runtimeSceneSnapshot\)/);
+    assert.match(editor, /resolveRuntimeScenePath\(scenePath, BuildSettings\.scenes, projectScenes\)/);
+    assert.match(editor, /prepareScene\(absolutePath\)/);
+});
+
 test('broken prefab sources expose safe repair and undoable unpack actions', () => {
     const editor = source('src/editor/Editor.ts');
     const inspector = source('src/editor/InspectorWindow.ts');

@@ -78,6 +78,8 @@ import {
 import { calculateViewportSize, viewportSizeEquals, type ViewportSize } from './ViewportSizing';
 import { EditorSelection, type EditorSelectionSource } from './EditorSelection';
 import { BuildSettingsWindow } from './BuildSettingsWindow';
+import { BuildSettings } from '../engine/BuildSettings';
+import { resolveRuntimeScenePath } from '../engine/RuntimeSceneTransition';
 
 type FloatingDockTarget = {
     panelId: Exclude<EditorPanelId, 'viewport-panel'>;
@@ -6506,6 +6508,41 @@ export class Editor {
             console.error(`Invalid scene file '${scenePath}':`, error);
             return false;
         }
+    }
+
+    public async prepareRuntimeSceneSnapshot(scenePath: string): Promise<{ path: string; snapshot: string }> {
+        BuildSettings.load();
+        const projectFile = PathUtils.join(this.projectPath, 'project.json');
+        const projectText = await this.fs.readFile(projectFile, 'utf8') as string | null;
+        if (!projectText) throw Object.assign(new Error('Project manifest is unavailable.'), {
+            code: 'RUNTIME_PROJECT_MANIFEST_MISSING'
+        });
+
+        let projectScenes: unknown = [];
+        try {
+            const manifest = JSON.parse(projectText) as { scenes?: Array<{ path?: unknown }> };
+            projectScenes = manifest.scenes?.map((entry) => entry?.path) ?? [];
+        } catch {
+            throw Object.assign(new Error('Project manifest is invalid.'), {
+                code: 'RUNTIME_PROJECT_MANIFEST_INVALID'
+            });
+        }
+
+        const resolvedPath = resolveRuntimeScenePath(scenePath, BuildSettings.scenes, projectScenes);
+        if (!resolvedPath) throw Object.assign(new Error(`Scene '${scenePath}' is not selected in Build Settings.`), {
+            code: 'RUNTIME_SCENE_NOT_IN_BUILD'
+        });
+
+        const absolutePath = PathUtils.join(this.projectPath, ...resolvedPath.split('/'));
+        const prepared = await SceneManager.getInstance().prepareScene(absolutePath);
+        return { path: resolvedPath, snapshot: prepared.scene.toJSON() };
+    }
+
+    public onRuntimeSceneChanged(_scenePath: string): void {
+        this.selectGameObject(null);
+        this.hierarchyWindow.refresh();
+        this.inspectorWindow.refresh();
+        this.updatePostProcessing();
     }
 
     private async showOpenSceneDialog() {

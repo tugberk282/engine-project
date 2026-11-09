@@ -53,6 +53,26 @@ test('malformed and version-mismatched snapshots return stable bounded failures'
     }
 });
 
+test('restart replaces the runtime process and starts from the replacement snapshot', async () => {
+    const supervisor = new RuntimeSupervisor({ heartbeatIntervalMs: 60_000 });
+    const first = await supervisor.start(snapshot);
+    const firstChild = supervisor.child;
+    const firstSessionId = supervisor.sessionId;
+    const replacementSnapshot = JSON.stringify({
+        formatVersion: 1,
+        sceneId: 'replacement-scene',
+        gameObjects: [{ id: 'replacement', position: [4, 5, 6] }]
+    });
+
+    const restarted = await supervisor.restart(replacementSnapshot);
+    assert.equal(restarted.state, 'running');
+    assert.notEqual(supervisor.child, firstChild);
+    assert.notEqual(supervisor.sessionId, firstSessionId);
+    assert.notEqual(restarted.snapshotHash, first.snapshotHash);
+    assert.equal(supervisor.snapshot, replacementSnapshot);
+    await supervisor.shutdown();
+});
+
 test('runtime crash is isolated, preserves snapshot bytes, and consumes at most two restarts', async () => {
     const diagnostics = [];
     const supervisor = new RuntimeSupervisor({

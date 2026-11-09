@@ -48,6 +48,13 @@ test('bounds write content and validates command-specific payloads', () => {
     })).code, 'INVALID_PAYLOAD');
 });
 
+test('runtime restart accepts only the same bounded snapshot shape as runtime start', () => {
+    const snapshot = JSON.stringify({ formatVersion: 1, sceneId: 'restart', gameObjects: [] });
+    assert.equal(validateRequest(request({ command: COMMANDS.RUNTIME_RESTART, payload: { snapshot } })).ok, true);
+    assert.equal(validateRequest(request({ command: COMMANDS.RUNTIME_RESTART, payload: {} })).code, 'INVALID_PAYLOAD');
+    assert.equal(validateRequest(request({ command: COMMANDS.RUNTIME_RESTART, payload: { snapshot, extra: true } })).code, 'INVALID_PAYLOAD');
+});
+
 test('scan cancellation targets only a validated request ID', () => {
     assert.equal(validateRequest(request({
         command: 'asset.cancelScan',

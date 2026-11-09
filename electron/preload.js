@@ -8,8 +8,8 @@ const PROTOCOL_COMMANDS = new Set([
     'asset.scan', 'asset.cancelScan', 'asset.move', 'asset.transaction', 'asset.writeMetadata',
     'dialog.openProject', 'dialog.createProject', 'project.open', 'project.getTrust',
     'project.requestTrust', 'project.revokeTrust', 'recentProjects.load',
-    'recentProjects.save', 'telemetry.record', 'runtime.start', 'runtime.pause',
-    'runtime.resume', 'runtime.tick', 'runtime.step', 'runtime.stop', 'build.start', 'build.cancel'
+    'recentProjects.save', 'telemetry.record', 'runtime.start', 'runtime.restart', 'runtime.pause',
+    'runtime.resume', 'runtime.tick', 'runtime.step', 'runtime.uiEvent', 'runtime.stop', 'build.start', 'build.cancel'
 ]);
 const PROTOCOL_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const isRecord = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);

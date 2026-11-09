@@ -6,6 +6,10 @@
     {
       "sceneId": "playable-runtime-slice",
       "path": "Assets/Scenes/PlayableSlice.json"
+    },
+    {
+      "sceneId": "runtime-transition-target",
+      "path": "Assets/Scenes/RuntimeTransition.json"
     }
   ]
 }
