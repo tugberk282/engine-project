@@ -10,6 +10,7 @@ import { Light } from './components/Light';
 import { Animator } from './components/Animator';
 import { BoxCollider } from './components/BoxCollider';
 import { CapsuleCollider } from './components/CapsuleCollider';
+import { SphereCollider } from './components/SphereCollider';
 import { MeshFilter } from './components/MeshFilter';
 import { Canvas } from './components/Canvas';
 import { CanvasGroup } from './components/CanvasGroup';
@@ -30,6 +31,7 @@ import { VerticalLayoutGroup } from './components/VerticalLayoutGroup';
 import { HorizontalLayoutGroup } from './components/HorizontalLayoutGroup';
 import { ContentSizeFitter } from './components/ContentSizeFitter';
 import { UIEventAction } from './components/UIEventAction';
+import { BehaviourScript } from './components/BehaviourScript';
 
 let registered = false;
 
@@ -37,7 +39,7 @@ export function registerBuiltinComponents(): void {
     if (registered) return;
     registered = true;
 
-    const entries: Array<[string, any, 'Physics' | 'Rendering' | 'UI' | 'Audio' | 'Animation' | 'Utility']> = [
+    const entries: Array<[string, any, 'Physics' | 'Rendering' | 'UI' | 'Audio' | 'Animation' | 'Scripting' | 'Utility']> = [
         ['MeshRenderer', MeshRenderer, 'Rendering'], ['MeshFilter', MeshFilter, 'Rendering'], ['EditorCameraController', EditorCameraController, 'Rendering'],
         ['Camera', Camera, 'Rendering'], ['Light', Light, 'Rendering'],
         ['Canvas', Canvas, 'UI'], ['CanvasGroup', CanvasGroup, 'UI'], ['GraphicRaycaster', GraphicRaycaster, 'UI'], ['EventSystem', EventSystem, 'UI'],
@@ -46,7 +48,8 @@ export function registerBuiltinComponents(): void {
         ['UISlider', UISlider, 'UI'], ['UIScrollbar', UIScrollbar, 'UI'], ['UIScrollRect', UIScrollRect, 'UI'],
         ['VerticalLayoutGroup', VerticalLayoutGroup, 'UI'], ['HorizontalLayoutGroup', HorizontalLayoutGroup, 'UI'], ['ContentSizeFitter', ContentSizeFitter, 'UI'],
         ['UIEventAction', UIEventAction, 'Utility'],
-        ['RigidBody', RigidBody, 'Physics'], ['BoxCollider', BoxCollider, 'Physics'], ['CapsuleCollider', CapsuleCollider, 'Physics'],
+        ['BehaviourScript', BehaviourScript, 'Scripting'],
+        ['RigidBody', RigidBody, 'Physics'], ['BoxCollider', BoxCollider, 'Physics'], ['SphereCollider', SphereCollider, 'Physics'], ['CapsuleCollider', CapsuleCollider, 'Physics'],
         ['AudioSource', AudioSource, 'Audio'], ['AudioListener', AudioListener, 'Audio'],
         ['ParticleSystem', ParticleSystem, 'Animation'], ['Animator', Animator, 'Animation']
     ];

@@ -510,6 +510,16 @@ export class EditorInspectors {
     }
 
     public createParticleSystemInspector(parent: HTMLElement, ps: any): void {
+        this.createUnityField(parent, 'Duration', 'number', ps.duration, (v) => {
+            const oldVal = ps.duration;
+            const newVal = Math.max(0, parseFloat(v) || 0);
+            CommandHistory.execute({
+                name: 'Change Particle Duration',
+                execute: () => { ps.duration = newVal; this.recordOverride(ps, 'duration'); this.notifyChange(ps); },
+                undo: () => { ps.duration = oldVal; this.notifyChange(ps); }
+            });
+        }, ps, 'duration');
+
         this.createUnityField(parent, 'Emission Rate', 'number', ps.emissionRate, (v) => {
             const oldVal = ps.emissionRate;
             const newVal = parseFloat(v);
@@ -544,6 +554,26 @@ export class EditorInspectors {
             });
         }, ps, 'startLifetime');
 
+        this.createUnityField(parent, 'Start Speed', 'number', ps.startSpeed, (v) => {
+            const oldVal = ps.startSpeed;
+            const newVal = Math.max(0, parseFloat(v) || 0);
+            CommandHistory.execute({
+                name: 'Change Particle Start Speed',
+                execute: () => { ps.startSpeed = newVal; this.recordOverride(ps, 'startSpeed'); this.notifyChange(ps); },
+                undo: () => { ps.startSpeed = oldVal; this.notifyChange(ps); }
+            });
+        }, ps, 'startSpeed');
+
+        this.createUnityField(parent, 'Max Particles', 'number', ps.maxParticles, (v) => {
+            const oldVal = ps.maxParticles;
+            const newVal = Math.max(0, Math.trunc(parseFloat(v) || 0));
+            CommandHistory.execute({
+                name: 'Change Max Particles',
+                execute: () => { ps.maxParticles = newVal; this.recordOverride(ps, 'maxParticles'); this.notifyChange(ps); },
+                undo: () => { ps.maxParticles = oldVal; this.notifyChange(ps); }
+            });
+        }, ps, 'maxParticles');
+
         this.createUnitySlider(parent, 'Start Size', ps.startSize, 0.01, 2, (v) => {
             const oldVal = ps.startSize;
             CommandHistory.execute({
@@ -559,6 +589,33 @@ export class EditorInspectors {
                 }
             });
         }, ps, 'startSize');
+
+        this.createVector3Field(parent, 'Gravity', ps.gravity, (axis, val) => {
+            const oldVal = ps.gravity[axis];
+            CommandHistory.execute({
+                name: `Change Particle Gravity ${axis.toUpperCase()}`,
+                execute: () => { ps.gravity[axis] = val; this.recordOverride(ps, 'gravity'); this.notifyChange(ps); },
+                undo: () => { ps.gravity[axis] = oldVal; this.notifyChange(ps); }
+            });
+        }, ps, 'gravity');
+
+        this.createUnityColorField(parent, 'Start Color', `#${ps.startColor.getHexString()}`, (value) => {
+            const oldVal = ps.startColor.clone();
+            CommandHistory.execute({
+                name: 'Change Particle Start Color',
+                execute: () => { ps.startColor.set(value); this.recordOverride(ps, 'startColor'); this.notifyChange(ps); },
+                undo: () => { ps.startColor.copy(oldVal); this.notifyChange(ps); }
+            });
+        }, ps, 'startColor');
+
+        this.createUnityColorField(parent, 'End Color', `#${ps.endColor.getHexString()}`, (value) => {
+            const oldVal = ps.endColor.clone();
+            CommandHistory.execute({
+                name: 'Change Particle End Color',
+                execute: () => { ps.endColor.set(value); this.recordOverride(ps, 'endColor'); this.notifyChange(ps); },
+                undo: () => { ps.endColor.copy(oldVal); this.notifyChange(ps); }
+            });
+        }, ps, 'endColor');
 
         this.createUnityField(parent, 'Texture Path', 'text', ps.texturePath || '', (v) => {
             const oldVal = ps.texturePath;
@@ -591,6 +648,15 @@ export class EditorInspectors {
                 }
             });
         }, ps, 'loop');
+
+        this.createUnityCheckbox(parent, 'Play On Awake', ps.playOnAwake, (checked: boolean) => {
+            const oldVal = ps.playOnAwake;
+            CommandHistory.execute({
+                name: 'Toggle Particle Play On Awake',
+                execute: () => { ps.playOnAwake = checked; this.recordOverride(ps, 'playOnAwake'); this.notifyChange(ps); },
+                undo: () => { ps.playOnAwake = oldVal; this.notifyChange(ps); }
+            });
+        }, ps, 'playOnAwake');
 
         const btnContainer = document.createElement('div');
         btnContainer.style.display = 'flex';
@@ -1882,6 +1948,22 @@ export class EditorInspectors {
                     }
                 });
             }, collider, 'height');
+            this.createUnityDropdown(parent, 'Direction', ['X', 'Y', 'Z'], collider.direction || 'Y', (value) => {
+                const oldValue = collider.direction || 'Y';
+                const newValue = value as 'X' | 'Y' | 'Z';
+                CommandHistory.execute({
+                    name: 'Change Capsule Collider Direction',
+                    execute: () => {
+                        collider.setDirection(newValue);
+                        this.recordOverride(collider, 'direction');
+                        this.notifyChange(collider);
+                    },
+                    undo: () => {
+                        collider.setDirection(oldValue);
+                        this.notifyChange(collider);
+                    }
+                });
+            }, collider, 'direction');
         }
     }
 
@@ -5848,8 +5930,116 @@ export class EditorInspectors {
         }
     }
 
+    public createBehaviourScriptInspector(parent: HTMLElement, script: any): void {
+        const help = document.createElement('div');
+        help.textContent = 'Bounded JSON gameplay program. Use an Assets/*.behaviour.json path for a reusable program resolved on Play and Build.';
+        help.style.cssText = 'margin-bottom:6px;color:var(--unity-text-muted);font-size:11px;line-height:1.35;';
+        parent.appendChild(help);
+
+        this.createUnityField(parent, 'Asset Path', 'text', script.assetPath || '', (rawPath) => {
+            const nextPath = rawPath.replaceAll('\\', '/').trim();
+            if (nextPath === script.assetPath) return;
+            const oldPath = script.assetPath || '';
+            CommandHistory.execute({
+                name: 'Change Behaviour Script Asset',
+                execute: () => {
+                    script.assetPath = nextPath;
+                    this.recordOverride(script, 'assetPath');
+                    this.notifyChange(script);
+                    this.refreshSelected?.();
+                },
+                undo: () => {
+                    script.assetPath = oldPath;
+                    this.notifyChange(script);
+                    this.refreshSelected?.();
+                }
+            });
+        }, script, 'assetPath');
+
+        const label = document.createElement('label');
+        label.textContent = 'Program';
+        label.style.cssText = 'display:block;margin-bottom:3px;font-size:11px;';
+        parent.appendChild(label);
+
+        const editor = document.createElement('textarea');
+        editor.value = typeof script.program === 'string' ? script.program : '{}';
+        editor.spellcheck = false;
+        editor.readOnly = typeof script.assetPath === 'string' && script.assetPath.trim().length > 0;
+        editor.setAttribute('aria-label', 'Behaviour Script JSON program');
+        editor.style.cssText = 'box-sizing:border-box;width:100%;min-height:220px;resize:vertical;padding:7px;border:1px solid var(--unity-border);background:var(--unity-bg-input);color:var(--unity-text-primary);font:11px/1.45 Consolas,monospace;tab-size:2;';
+        parent.appendChild(editor);
+
+        const status = document.createElement('div');
+        status.style.cssText = 'min-height:16px;margin-top:4px;font-size:11px;';
+        parent.appendChild(status);
+        const validate = (): boolean => {
+            try {
+                const value = JSON.parse(editor.value || '{}');
+                if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Root must be an object');
+                if (value.version !== undefined && value.version !== 1) throw new Error('Only version 1 is supported');
+                status.textContent = 'Valid BehaviourScript v1 program';
+                status.style.color = '#7ecb84';
+                editor.setAttribute('aria-invalid', 'false');
+                return true;
+            } catch (error) {
+                status.textContent = `Invalid program: ${error instanceof Error ? error.message : String(error)}`;
+                status.style.color = '#ff8b8b';
+                editor.setAttribute('aria-invalid', 'true');
+                return false;
+            }
+        };
+        validate();
+        if (editor.readOnly) {
+            status.textContent = 'External program is resolved from Assets when Play Mode or Build starts.';
+            status.style.color = 'var(--unity-text-muted)';
+        }
+        editor.addEventListener('input', validate);
+        editor.addEventListener('keydown', (event) => {
+            if (editor.readOnly) return;
+            if (event.key !== 'Tab') return;
+            event.preventDefault();
+            const start = editor.selectionStart;
+            editor.setRangeText('  ', start, editor.selectionEnd, 'end');
+            validate();
+        });
+        editor.addEventListener('blur', () => {
+            if (editor.readOnly) return;
+            if (!validate() || editor.value === script.program) return;
+            const oldValue = script.program;
+            const newValue = editor.value;
+            CommandHistory.execute({
+                name: 'Edit Behaviour Script',
+                execute: () => {
+                    script.program = newValue;
+                    this.recordOverride(script, 'program');
+                    this.notifyChange(script);
+                },
+                undo: () => {
+                    script.program = oldValue;
+                    this.notifyChange(script);
+                }
+            });
+        });
+    }
+
     // UIImage Inspector
     public createUIImageInspector(parent: HTMLElement, image: any): void {
+        const setValue = (property: string, value: any, commandName: string) => {
+            const oldValue = image[property];
+            if (oldValue === value) return;
+            CommandHistory.execute({
+                name: commandName,
+                execute: () => {
+                    image[property] = value;
+                    this.recordOverride(image, property);
+                    this.notifyChange(image);
+                },
+                undo: () => {
+                    image[property] = oldValue;
+                    this.notifyChange(image);
+                }
+            });
+        };
         this.createUnityColorField(parent, 'Color', image.color || '#ffffff', (v) => {
             const oldVal = image.color;
             CommandHistory.execute({
@@ -5881,6 +6071,34 @@ export class EditorInspectors {
                 }
             });
         }, image, 'raycastTarget');
+
+        this.createUnityDropdown(parent, 'Image Type', ['Simple', 'Filled'], image.imageType || 'Simple', (value) => {
+            setValue('imageType', value, 'Change UI Image Type');
+        }, image, 'imageType');
+        this.createUnityCheckbox(parent, 'Preserve Aspect', image.preserveAspect === true, (value) => {
+            setValue('preserveAspect', value, 'Toggle UI Image Preserve Aspect');
+        }, image, 'preserveAspect');
+
+        if (image.imageType === 'Filled') {
+            this.createUnityDropdown(parent, 'Fill Method', ['Horizontal', 'Vertical', 'Radial360'], image.fillMethod || 'Horizontal', (value) => {
+                setValue('fillMethod', value, 'Change UI Image Fill Method');
+            }, image, 'fillMethod');
+            const origins = image.fillMethod === 'Radial360'
+                ? ['Bottom', 'Right', 'Top', 'Left']
+                : image.fillMethod === 'Vertical' ? ['Bottom', 'Top'] : ['Left', 'Right'];
+            const originIndex = Math.max(0, Math.min(origins.length - 1, Math.trunc(Number(image.fillOrigin) || 0)));
+            this.createUnityDropdown(parent, 'Fill Origin', origins, origins[originIndex], (value) => {
+                setValue('fillOrigin', origins.indexOf(value), 'Change UI Image Fill Origin');
+            }, image, 'fillOrigin');
+            if (image.fillMethod === 'Radial360') {
+                this.createUnityCheckbox(parent, 'Clockwise', image.fillClockwise !== false, (value) => {
+                    setValue('fillClockwise', value, 'Toggle UI Image Fill Direction');
+                }, image, 'fillClockwise');
+            }
+            this.createUnitySlider(parent, 'Fill Amount', Number(image.fillAmount ?? 1), 0, 1, (value) => {
+                setValue('fillAmount', value, 'Change UI Image Fill Amount');
+            }, image, 'fillAmount');
+        }
 
         this.createUnityField(parent, 'Sprite Path', 'text', image.spritePath || '', (v) => {
             const oldVal = image.spritePath;

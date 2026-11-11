@@ -126,6 +126,120 @@ test('authored Update and fixed-step components execute in the child runtime and
     await supervisor.shutdown();
 });
 
+test('supervised Play Mode executes BehaviourScript lifecycle, input and UI events', async () => {
+    const supervisor = new RuntimeSupervisor({ heartbeatIntervalMs: 60_000 });
+    const program = JSON.stringify({
+        version: 1, variables: { speed: 2 },
+        start: [{ op: 'setPosition', value: [2, 0, 0] }],
+        update: [{ op: 'translate', value: [{ multiply: [{ input: 'Horizontal' }, { variable: 'speed' }, { deltaTime: true }] }, 0, 0] }],
+        events: { Message: [{ op: 'setText', value: { eventValue: true } }] }
+    });
+    const authored = JSON.stringify({ formatVersion: 1, sceneId: 'behaviour-script', gameObjects: [{
+        id: 'actor', name: 'Actor', transform: {}, components: [
+            { type: 'BehaviourScript', data: { program } }, { type: 'UIText', data: { text: '' } }
+        ]
+    }] });
+    try {
+        const started = await supervisor.start(authored);
+        assert.equal(started.transforms[0].position[0], 2);
+        const moved = await supervisor.tick(0.1, { Horizontal: 1 });
+        assert.equal(moved.transforms[0].position[0], 2.2);
+        assert.equal(moved.behaviourScripts.instanceCount, 1);
+        const event = await supervisor.uiEvent('Message', 'Play Mode');
+        assert.equal(event.uiText[0].text, 'Play Mode');
+        assert.deepEqual(event.behaviourScripts.diagnostics, []);
+    } finally {
+        await supervisor.shutdown();
+    }
+});
+
+test('supervised BehaviourScript preserves authored action press and release edges', async () => {
+    const supervisor = new RuntimeSupervisor({ heartbeatIntervalMs: 60_000 });
+    const program = JSON.stringify({
+        version: 1,
+        update: [{
+            op: 'if', condition: { buttonDown: 'Interact' },
+            then: [{ op: 'setText', value: 'down' }],
+            else: [{ op: 'if', condition: { buttonUp: 'Interact' }, then: [{ op: 'setText', value: 'up' }] }]
+        }]
+    });
+    const authored = JSON.stringify({ formatVersion: 1, gameObjects: [{
+        id: 'actor', transform: {}, components: [
+            { type: 'BehaviourScript', data: { program } }, { type: 'UIText', data: { text: '' } }
+        ]
+    }] });
+    try {
+        await supervisor.start(authored);
+        const pressed = await supervisor.tick(0.02, { Interact: true, '__buttonDown:Interact': true });
+        assert.equal(pressed.uiText[0].text, 'down');
+        const released = await supervisor.tick(0.02, { Interact: false, '__buttonUp:Interact': true });
+        assert.equal(released.uiText[0].text, 'up');
+    } finally {
+        await supervisor.shutdown();
+    }
+});
+
+test('supervised BehaviourScript destroy removes a hierarchy until runtime restart', async () => {
+    const supervisor = new RuntimeSupervisor({ heartbeatIntervalMs: 60_000 });
+    const program = JSON.stringify({
+        version: 1,
+        events: {
+            Remove: [{ op: 'destroy', target: 'victim' }],
+            Restore: [{ op: 'setActive', target: 'victim', value: true }]
+        }
+    });
+    const authored = JSON.stringify({ formatVersion: 1, gameObjects: [
+        { id: 'actor', transform: {}, components: [{ type: 'BehaviourScript', data: { program } }] },
+        { id: 'victim', transform: {}, components: [{ type: 'BoxCollider', data: {} }], children: [
+            { id: 'victim-child', transform: {}, components: [] }
+        ] }
+    ] });
+    try {
+        await supervisor.start(authored);
+        const removed = await supervisor.uiEvent('Remove');
+        assert.equal(removed.transforms.find(({ id }) => id === 'victim').active, false);
+        assert.equal(removed.transforms.find(({ id }) => id === 'victim-child').active, false);
+        const restoreAttempt = await supervisor.uiEvent('Restore');
+        assert.equal(restoreAttempt.transforms.find(({ id }) => id === 'victim').active, false);
+        const restarted = await supervisor.restart(authored);
+        assert.notEqual(restarted.transforms.find(({ id }) => id === 'victim').active, false);
+    } finally {
+        await supervisor.shutdown();
+    }
+});
+
+test('supervised BehaviourScript receives trigger enter, stay and exit callbacks', async () => {
+    const supervisor = new RuntimeSupervisor({ heartbeatIntervalMs: 60_000 });
+    const program = JSON.stringify({
+        version: 1,
+        events: {
+            triggerEnter: [{ op: 'setText', value: { eventField: 'otherTag' } }],
+            triggerStay: [{ op: 'setText', value: 'stay' }],
+            triggerExit: [{ op: 'setText', value: 'exit' }],
+            MoveAway: [{ op: 'setPosition', value: [10, 0, 0] }]
+        }
+    });
+    const authored = JSON.stringify({ formatVersion: 1, gameObjects: [
+        { id: 'actor', name: 'Actor', transform: {}, components: [
+            { type: 'BoxCollider', data: { size: [1, 1, 1] } },
+            { type: 'UIText', data: { text: '' } },
+            { type: 'BehaviourScript', data: { program } }
+        ] },
+        { id: 'pickup', name: 'Pickup', tag: 'Pickup', transform: {}, components: [
+            { type: 'BoxCollider', data: { size: [1, 1, 1], isTrigger: true } }
+        ] }
+    ] });
+    try {
+        await supervisor.start(authored);
+        assert.equal((await supervisor.tick(0.02)).uiText[0].text, 'Pickup');
+        assert.equal((await supervisor.tick(0.02)).uiText[0].text, 'stay');
+        await supervisor.uiEvent('MoveAway');
+        assert.equal((await supervisor.tick(0.02)).uiText[0].text, 'exit');
+    } finally {
+        await supervisor.shutdown();
+    }
+});
+
 test('generic RigidBody resolves against authored box floors', async () => {
     const supervisor = new RuntimeSupervisor({ heartbeatIntervalMs: 60_000 });
     const rigidBodySnapshot = JSON.stringify({
@@ -201,6 +315,30 @@ test('generic RigidBody resolves against authored capsule colliders', async () =
     }
 });
 
+test('generic RigidBody honors the authored capsule direction axis', async () => {
+    const supervisor = new RuntimeSupervisor({ heartbeatIntervalMs: 60_000 });
+    const directionalSnapshot = JSON.stringify({
+        formatVersion: 1,
+        gameObjects: [
+            { id: 'body', transform: { position: [2, 3, 0], scale: [1, 1, 1] }, components: [
+                { type: 'RigidBody', data: { mass: 1, useGravity: true, velocity: [0, 0, 0] } },
+                { type: 'BoxCollider', data: { size: [1, 1, 1] } }
+            ] },
+            { id: 'x-capsule', transform: { position: [0, 0, 0], scale: [1, 1, 1] }, components: [
+                { type: 'CapsuleCollider', data: { radius: 0.5, height: 6, direction: 'X' } }
+            ] }
+        ]
+    });
+    try {
+        await supervisor.start(directionalSnapshot);
+        let state;
+        for (let index = 0; index < 140; index += 1) state = await supervisor.tick(0.02);
+        assert.equal(state.transforms.find(({ id }) => id === 'body').position[1], 1);
+    } finally {
+        await supervisor.shutdown();
+    }
+});
+
 test('supervised RigidBody applies authored drag and frozen position axes', async () => {
     const supervisor = new RuntimeSupervisor({ heartbeatIntervalMs: 60_000 });
     const constrainedSnapshot = JSON.stringify({
@@ -220,6 +358,30 @@ test('supervised RigidBody applies authored drag and frozen position axes', asyn
         const second = await supervisor.tick(0.02);
         assert.deepEqual(first.transforms[0].position, [1, 2.06, 3.04]);
         assert.deepEqual(second.transforms[0].position.map(value => Number(value.toFixed(6))), [1, 2.1188, 3.0792]);
+    } finally {
+        await supervisor.shutdown();
+    }
+});
+
+test('supervised RigidBody integrates angular velocity, angular drag, and frozen rotation axes', async () => {
+    const supervisor = new RuntimeSupervisor({ heartbeatIntervalMs: 60_000 });
+    const snapshot = JSON.stringify({
+        formatVersion: 1,
+        gameObjects: [{
+            id: 'spinner', transform: { position: [0, 0, 0], rotation: [0, 0, 0], scale: [1, 1, 1] }, components: [{
+                type: 'RigidBody', data: {
+                    mass: 1, useGravity: false, angularVelocity: [1, 2, 3], angularDrag: 1,
+                    freezeRotationY: true
+                }
+            }]
+        }]
+    });
+    try {
+        await supervisor.start(snapshot);
+        const first = await supervisor.tick(0.02);
+        const second = await supervisor.tick(0.02);
+        assert.deepEqual(first.transforms[0].rotation, [0.02, 0, 0.06]);
+        assert.deepEqual(second.transforms[0].rotation.map(value => Number(value.toFixed(6))), [0.0396, 0, 0.1188]);
     } finally {
         await supervisor.shutdown();
     }
@@ -374,6 +536,35 @@ test('follow GameplayCamera tracks the supervised player and returns camera stat
     }
 });
 
+test('follow camera consumes clamped vertical look once per rendered frame', async () => {
+    const supervisor = new RuntimeSupervisor({ heartbeatIntervalMs: 60_000 });
+    const snapshot = JSON.stringify({
+        formatVersion: 1,
+        gameObjects: [
+            { id: 'player', transform: { position: [0, 1, 0], rotation: [0, 0, 0], scale: [1, 1, 1] }, components: [
+                { type: 'PlayerController', data: { moveSpeed: 5, gravity: 0, lookSensitivity: 0.1, maxLookPitch: 45 } }
+            ] },
+            { id: 'camera', transform: { position: [0, 6, 8], scale: [1, 1, 1] }, components: [
+                { type: 'GameplayCamera', data: { mode: 'follow', offset: [0, 6, 8] } }
+            ] }
+        ]
+    });
+    try {
+        await supervisor.start(snapshot);
+        const lookFrame = await supervisor.tick(0.016, { LookX: 1, LookY: 1 });
+        assert.equal(Number(lookFrame.transforms.find(({ id }) => id === 'player').rotation[1].toFixed(6)), -0.1,
+            'mouse look must not wait for a fixed physics step');
+        const frame = await supervisor.tick(0.084, {});
+        const player = frame.transforms.find(({ id }) => id === 'player');
+        assert.equal(Number(player.rotation[1].toFixed(6)), -0.1, 'mouse delta must not repeat across fixed substeps');
+        assert.notEqual(Number(frame.gameplay.camera.position[1].toFixed(6)), 7, 'vertical look must orbit the follow camera');
+        const clamped = await supervisor.tick(0.02, { LookY: 100 });
+        assert.ok(clamped.gameplay.camera.position.every(Number.isFinite));
+    } finally {
+        await supervisor.shutdown();
+    }
+});
+
 test('supervised UI Restart event recreates the authored runtime world', async () => {
     const supervisor = new RuntimeSupervisor({ heartbeatIntervalMs: 60_000 });
     try {
@@ -402,6 +593,84 @@ test('standalone runtime applies cross-object UIEventAction transforms', async (
         await supervisor.start(scene);
         const result = await supervisor.uiEvent('Open');
         assert.deepEqual(Array.from(result.transforms.find(({ id }) => id === 'door').rotation), [0, 1, 0]);
+    } finally {
+        await supervisor.shutdown();
+    }
+});
+
+test('supervised runtime ignores UIEventAction components owned by inactive objects', async () => {
+    const supervisor = new RuntimeSupervisor({ heartbeatIntervalMs: 60_000 });
+    const scene = JSON.stringify({
+        formatVersion: 1,
+        gameObjects: [
+            { id: 'inactive-actions', enabled: false, transform: {}, components: [{
+                type: 'UIEventAction', data: { eventName: 'Move', action: 'SetPosition', position: [9, 9, 9], targetObjectId: 'target' }
+            }] },
+            { id: 'active-actions', transform: {}, components: [{
+                type: 'UIEventAction', data: { eventName: 'Move', action: 'SetPosition', position: [2, 3, 4], targetObjectId: 'target' }
+            }] },
+            { id: 'target', transform: { position: [0, 0, 0], rotation: [0, 0, 0], scale: [1, 1, 1] }, components: [] }
+        ]
+    });
+    try {
+        await supervisor.start(scene);
+        const changed = await supervisor.uiEvent('Move');
+        assert.deepEqual(Array.from(changed.transforms.find(({ id }) => id === 'target').position), [2, 3, 4]);
+    } finally {
+        await supervisor.shutdown();
+    }
+});
+
+test('supervised SetActive recomputes descendant activity while preserving local disabled state', async () => {
+    const supervisor = new RuntimeSupervisor({ heartbeatIntervalMs: 60_000 });
+    const scene = JSON.stringify({
+        formatVersion: 1,
+        gameObjects: [
+            { id: 'actions', transform: {}, components: [
+                { type: 'UIEventAction', data: { eventName: 'Close', action: 'SetActive', active: false, targetObjectId: 'panel' } },
+                { type: 'UIEventAction', data: { eventName: 'Open', action: 'SetActive', active: true, targetObjectId: 'panel' } }
+            ] },
+            { id: 'panel', transform: {}, components: [], children: [
+                { id: 'visible-child', transform: {}, components: [] },
+                { id: 'authored-hidden', enabled: false, transform: {}, components: [] }
+            ] }
+        ]
+    });
+    try {
+        await supervisor.start(scene);
+        const closed = await supervisor.uiEvent('Close');
+        assert.equal(closed.transforms.find(({ id }) => id === 'visible-child').active, false);
+        const opened = await supervisor.uiEvent('Open');
+        assert.equal(opened.transforms.find(({ id }) => id === 'panel').active, undefined);
+        assert.equal(opened.transforms.find(({ id }) => id === 'visible-child').active, undefined);
+        assert.equal(opened.transforms.find(({ id }) => id === 'authored-hidden').active, false);
+    } finally {
+        await supervisor.shutdown();
+    }
+});
+
+test('supervised SetActive can enable an initially inactive gameplay trigger', async () => {
+    const supervisor = new RuntimeSupervisor({ heartbeatIntervalMs: 60_000 });
+    const scene = JSON.stringify({
+        formatVersion: 1,
+        gameObjects: [
+            { id: 'actions', transform: {}, components: [{
+                type: 'UIEventAction', data: { eventName: 'SpawnCollectible', action: 'SetActive', active: true, targetObjectId: 'collectible' }
+            }] },
+            { id: 'player', transform: { position: [0, 0.5, 0], rotation: [0, 0, 0], scale: [1, 1, 1] }, components: [
+                { type: 'CapsuleCollider', data: { radius: 0.4, height: 1 } },
+                { type: 'PlayerController', data: { gravity: 0, requiredCollectibles: 1 } }
+            ] },
+            { id: 'collectible', enabled: false, tag: 'Collect', transform: { position: [0, 0.5, 0], rotation: [0, 0, 0], scale: [1, 1, 1] }, components: [
+                { type: 'BoxCollider', data: { size: [1, 1, 1], isTrigger: true } }
+            ] }
+        ]
+    });
+    try {
+        await supervisor.start(scene);
+        assert.equal((await supervisor.tick(0.02)).gameplay.collectedCount, 0);
+        await supervisor.uiEvent('SpawnCollectible');
+        assert.equal((await supervisor.tick(0.02)).gameplay.collectedCount, 1);
     } finally {
         await supervisor.shutdown();
     }

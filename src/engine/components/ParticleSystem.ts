@@ -15,6 +15,7 @@ interface Particle {
  */
 export class ParticleSystem extends Component {
     @serialize public emissionRate: number = 10; // particles per second
+    @serialize public duration: number = 5;
     @serialize public startLifetime: number = 2.0;
     @serialize public startSize: number = 0.1;
     @serialize public startSpeed: number = 1.0;
@@ -32,6 +33,7 @@ export class ParticleSystem extends Component {
     private particleSystem!: THREE.Points;
     private emissionTimer: number = 0;
     private isPlaying: boolean = false;
+    private elapsedTime: number = 0;
 
     public awake(): void {
         // Create particle system
@@ -63,6 +65,7 @@ export class ParticleSystem extends Component {
 
     public play(): void {
         this.isPlaying = true;
+        if (!this.loop && this.elapsedTime >= this.duration) this.elapsedTime = 0;
     }
 
     public pause(): void {
@@ -72,6 +75,8 @@ export class ParticleSystem extends Component {
     public stop(): void {
         this.isPlaying = false;
         this.particles = [];
+        this.elapsedTime = 0;
+        this.emissionTimer = 0;
         this.updateParticleGeometry();
     }
 
@@ -79,15 +84,18 @@ export class ParticleSystem extends Component {
         if (!this.isPlaying) return;
 
         // Emit new particles
-        this.emissionTimer += deltaTime;
-        const emitCount = Math.floor(this.emissionTimer * this.emissionRate);
+        const canEmit = this.loop || this.elapsedTime < this.duration;
+        const emissionDelta = canEmit ? (this.loop ? deltaTime : Math.min(deltaTime, Math.max(0, this.duration - this.elapsedTime))) : 0;
+        this.emissionTimer += emissionDelta * this.emissionRate;
+        const emitCount = Math.floor(this.emissionTimer);
 
         if (emitCount > 0) {
-            this.emissionTimer = 0;
+            this.emissionTimer -= emitCount;
             for (let i = 0; i < emitCount && this.particles.length < this.maxParticles; i++) {
                 this.emitParticle();
             }
         }
+        this.elapsedTime += deltaTime;
 
         // Update existing particles
         for (let i = this.particles.length - 1; i >= 0; i--) {
@@ -109,7 +117,7 @@ export class ParticleSystem extends Component {
         this.updateParticleGeometry();
 
         // Loop or stop
-        if (!this.loop && this.particles.length === 0) {
+        if (!this.loop && this.elapsedTime >= this.duration && this.particles.length === 0) {
             this.isPlaying = false;
         }
     }
@@ -151,6 +159,7 @@ export class ParticleSystem extends Component {
             type: 'ParticleSystem',
             data: {
                 emissionRate: this.emissionRate,
+                duration: this.duration,
                 startLifetime: this.startLifetime,
                 startSize: this.startSize,
                 startSpeed: this.startSpeed,

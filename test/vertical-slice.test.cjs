@@ -23,7 +23,14 @@ function createRuntime() {
     const events = [];
     const self = { postMessage: (event) => events.push(event), onmessage: null };
     const source = fs.readFileSync(path.join(__dirname, '..', 'src', 'engine', 'runtime.worker.js'), 'utf8');
-    vm.runInNewContext(source, { self, JSON, Number });
+    const context = vm.createContext({ self, JSON, Number, structuredClone });
+    context.globalThis = context;
+    context.importScripts = (relativePath) => {
+        const imported = fs.readFileSync(path.join(__dirname, '..', 'electron', 'runtime', path.basename(relativePath)), 'utf8');
+        vm.runInContext(imported, context);
+        self.TugberkBehaviourScript = context.TugberkBehaviourScript;
+    };
+    vm.runInContext(source, context);
     return {
         send(command, payload = {}) {
             self.onmessage({

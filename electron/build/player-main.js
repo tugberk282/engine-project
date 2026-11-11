@@ -81,6 +81,21 @@ function readAudioAsset(relativePath) {
     return fs.readFileSync(filePath);
 }
 
+function readModelAsset(relativePath) {
+    if (!verifiedBuild || typeof relativePath !== 'string') throw new Error('Player is not initialized');
+    const normalized = relativePath.replaceAll('\\', '/');
+    const entry = verifiedBuild.manifest.files.find((file) => file.path === normalized);
+    const extensionAllowed = /\.(?:glb|gltf|bin|png|jpe?g|webp)$/i.test(normalized);
+    const sizeLimit = /\.(?:png|jpe?g|webp)$/i.test(normalized) ? 16 * 1024 * 1024 : 256 * 1024 * 1024;
+    if (!entry || !normalized.startsWith('Assets/') || !extensionAllowed || entry.bytes > sizeLimit) {
+        throw new Error('Asset is not an allowed model build resource');
+    }
+    const contentRoot = path.resolve(buildRoot, 'content');
+    const filePath = path.resolve(contentRoot, normalized);
+    if (!filePath.startsWith(`${contentRoot}${path.sep}`)) throw new Error('Asset escapes build content');
+    return fs.readFileSync(filePath);
+}
+
 ipcMain.handle('player:bootstrap', () => {
     verifiedBuild = readBuild();
     return verifiedBuild;
@@ -93,6 +108,7 @@ ipcMain.handle('player:activate-scene', (event, requestedPath) => {
 });
 ipcMain.handle('player:read-json-asset', (_event, relativePath) => readJsonAsset(relativePath));
 ipcMain.handle('player:read-audio-asset', (_event, relativePath) => readAudioAsset(relativePath));
+ipcMain.handle('player:read-model-asset', (_event, relativePath) => readModelAsset(relativePath));
 ipcMain.handle('player:read-image-asset', (_event, relativePath) => {
     if (!verifiedBuild || typeof relativePath !== 'string') throw new Error('Player is not initialized');
     const normalized = relativePath.replaceAll('\\', '/');

@@ -616,6 +616,7 @@ export class AssetDatabase {
     private inferAssetType(assetPath: string, isDirectory: boolean): AssetType {
         if (isDirectory) return 'folder';
 
+        if (PathUtils.normalize(assetPath).toLowerCase().endsWith('.behaviour.json')) return 'script';
         const ext = PathUtils.extname(assetPath).toLowerCase();
 
         if (['.cs', '.ts'].includes(ext)) return 'script';

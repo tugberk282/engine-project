@@ -137,7 +137,7 @@ test('Game View camera discovery traverses active child hierarchies deterministi
     assert.match(editor, /left\.index - right\.index/);
 });
 
-test('CapsuleCollider Inspector authors bounded radius and height through undoable setters', () => {
+test('CapsuleCollider Inspector authors bounded radius, height, and direction through undoable setters', () => {
     const inspectors = source('src/editor/EditorInspectors.ts');
     const inspectorWindow = source('src/editor/InspectorWindow.ts');
     const capsule = source('src/engine/components/CapsuleCollider.ts');
@@ -149,8 +149,20 @@ test('CapsuleCollider Inspector authors bounded radius and height through undoab
     assert.match(inspectors, /Change Capsule Collider Height/);
     assert.match(inspectors, /collider\.setHeight\(newVal\)/);
     assert.match(inspectors, /recordOverride\(collider, 'height'\)/);
+    assert.match(inspectors, /Change Capsule Collider Direction/);
+    assert.match(inspectors, /collider\.setDirection\(newValue\)/);
+    assert.match(inspectors, /recordOverride\(collider, 'direction'\)/);
     assert.match(capsule, /this\.radius = Math\.max\(0\.0001, radius\)/);
     assert.match(capsule, /this\.height = Math\.max\(this\.radius \* 2, height\)/);
+    assert.match(capsule, /getShapeOrientation\(\)/);
+    assert.match(source('src/engine/components/RigidBody.ts'), /addShape\(shape, col\.getShapeOffset\(\), col\.getShapeOrientation\(\)\)/);
+});
+
+test('every supported primitive collider is registered for Add Component and scene loading', () => {
+    const registration = source('src/engine/BuiltinComponentRegistration.ts');
+    for (const type of ['BoxCollider', 'SphereCollider', 'CapsuleCollider']) {
+        assert.match(registration, new RegExp(`\\['${type}', ${type}, 'Physics'\\]`));
+    }
 });
 
 test('UIEventAction Inspector exposes an undoable authored LoadScene path', () => {
@@ -167,6 +179,53 @@ test('UIEventAction Inspector exposes an undoable authored LoadScene path', () =
     assert.match(component, /@serialize public scenePath: string/);
 });
 
+test('UIImage exposes serialized fill modes through undoable Inspector authoring', () => {
+    const image = fs.readFileSync(path.join(root, 'src/engine/components/UIImage.ts'), 'utf8');
+    const inspectors = fs.readFileSync(path.join(root, 'src/editor/EditorInspectors.ts'), 'utf8');
+    assert.match(image, /@serialize public imageType: 'Simple' \| 'Filled'/);
+    assert.match(image, /@serialize public fillMethod: 'Horizontal' \| 'Vertical' \| 'Radial360'/);
+    assert.match(image, /@serialize public fillAmount: number = 1/);
+    assert.match(inspectors, /createUIImageInspector[^]*'Image Type'[^]*'Fill Method'[^]*'Fill Amount'/);
+    assert.match(inspectors, /setValue\('fillAmount', value, 'Change UI Image Fill Amount'\)/);
+});
+
+test('BehaviourScript external assets resolve before Play Mode and build without stale inline bytes', () => {
+    const component = source('src/engine/components/BehaviourScript.ts');
+    const resolver = source('src/engine/BehaviourScriptAssets.ts');
+    const editor = source('src/editor/Editor.ts');
+    const playMode = source('src/engine/PlayModeManager.ts');
+    const inspector = source('src/editor/EditorInspectors.ts');
+    const buildWorker = source('electron/build/build-worker.js');
+
+    assert.match(component, /@serialize public assetPath: string/);
+    assert.match(resolver, /BEHAVIOUR_SCRIPT_ASSET_PATH_INVALID/);
+    assert.match(resolver, /component\.data\.program = source/);
+    assert.match(editor, /setSnapshotPreparer\(\(snapshot\) => this\.resolveRuntimeBehaviourScripts\(snapshot\)\)/);
+    assert.match(editor, /if \(!await this\.playMode\.enterPlayMode\(\)\)/);
+    assert.match(playMode, /public async enterPlayMode\(\): Promise<boolean>/);
+    assert.match(playMode, /reportedScriptDiagnostics = new Set<string>/);
+    assert.match(playMode, /\[BehaviourScript:\$\{diagnostic\.phase\}\]/);
+    assert.match(inspector, /Assets\/\*\.behaviour\.json/);
+    assert.match(buildWorker, /resolveBehaviourScriptAssetsForBuild\(scenes, request\.projectRoot\)/);
+});
+
+test('externally changed BehaviourScript assets trigger one safe Play Mode domain reload', () => {
+    const editor = source('src/editor/Editor.ts');
+    const project = source('src/editor/ProjectWindow.ts');
+    const playMode = source('src/engine/PlayModeManager.ts');
+
+    assert.match(editor, /window\.addEventListener\('focus', \(\) => void this\.projectWindow\.refreshExternalChanges\(\)\)/);
+    assert.match(project, /public async refreshExternalChanges\(\): Promise<void>/);
+    assert.match(project, /refreshResult\.added, \.\.\.refreshResult\.changed/);
+    assert.match(project, /reloadBehaviourScripts = Array\.from\(runtimeAssetPaths\)\.some/);
+    assert.match(project, /await this\.editor\.reloadRuntimeBehaviourScripts\(\)/);
+    assert.match(project, /endsWith\('\.behaviour\.json'\)/);
+    assert.match(playMode, /public async reloadBehaviourScripts\(\): Promise<boolean>/);
+    assert.match(playMode, /if \(this\.snapshotPreparer\) prepared = await this\.snapshotPreparer\(prepared\)/);
+    assert.match(playMode, /this\.runtime\.restart\(prepared\)/);
+    assert.match(playMode, /finally \{[^]*this\.scriptReloadInFlight = false/);
+});
+
 test('Play Mode LoadScene swaps only the runtime scene and preserves the edit snapshot', () => {
     const manager = source('src/engine/PlayModeManager.ts');
     const editor = source('src/editor/Editor.ts');
@@ -175,7 +234,7 @@ test('Play Mode LoadScene swaps only the runtime scene and preserves the edit sn
     assert.match(manager, /this\.runtime\.restart\(prepared\.snapshot\)/);
     assert.match(source('src/engine/RuntimeBridge.ts'), /this\.request\('runtime\.restart', \{ snapshot \}\)/);
     assert.match(manager, /this\.restoreScene\(this\.sceneSnapshot\)/);
-    assert.match(manager, /restartPlayMode\(\)[^]*?this\.runtime\.restart\(this\.runtimeSceneSnapshot\)/);
+    assert.match(manager, /restartPlayMode\(\)[^]*?this\.reloadBehaviourScripts\(\)/);
     assert.match(editor, /resolveRuntimeScenePath\(scenePath, BuildSettings\.scenes, projectScenes\)/);
     assert.match(editor, /prepareScene\(absolutePath\)/);
 });

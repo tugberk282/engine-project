@@ -1,4 +1,5 @@
 const PROTOCOL_VERSION = 1;
+importScripts('./behaviour-script.js');
 let sessionId = '';
 let state = 'idle';
 let frame = 0;
@@ -10,6 +11,8 @@ let lastUiEventPayload = null;
 let runtimeObjects = [];
 let runtimeCollisionMatrix = new Array(32).fill(0xFFFFFFFF);
 let runtimeFixedAccumulator = 0;
+let behaviourScripts = null;
+let runtimeContactPairs = new Map();
 
 const DEFAULT_FIXED_STEP = 1 / 50;
 
@@ -23,12 +26,23 @@ function allGameObjects(roots) {
     const result = [];
     const visit = (object, parentEnabled = true) => {
         if (!object || typeof object !== 'object') return;
-        object.enabled = parentEnabled && object.enabled !== false;
+        if (typeof object._runtimeSelfEnabled !== 'boolean') {
+            object._runtimeSelfEnabled = object.enabled !== false;
+        }
+        if (typeof object._runtimeDestroyed !== 'boolean') object._runtimeDestroyed = false;
+        object.enabled = parentEnabled && object._runtimeSelfEnabled && !object._runtimeDestroyed;
         result.push(object);
         if (Array.isArray(object.children)) object.children.forEach((child) => visit(child, object.enabled));
     };
     if (Array.isArray(roots)) roots.forEach((root) => visit(root, true));
     return result;
+}
+
+function refreshRuntimeActiveState(roots, parentEnabled = true) {
+    for (const object of roots || []) {
+        object.enabled = parentEnabled && object._runtimeSelfEnabled && object._runtimeDestroyed !== true;
+        refreshRuntimeActiveState(object.children, object.enabled);
+    }
 }
 
 function findComponent(object, type) {
@@ -43,6 +57,7 @@ function runtimeComponent(object, type) {
 
 function applyUiEventActions(name, value) {
     for (const object of runtimeObjects) {
+        if (object.enabled === false) continue;
         for (const component of object.components || []) {
             if (component?.data?.enabled === false || component?.type !== 'UIEventAction' || component.data?.eventName !== name) continue;
             if (component.data?.action === 'LoadScene') continue;
@@ -81,16 +96,35 @@ function applyUiEventActions(name, value) {
                 }
                 continue;
             }
-            target.enabled = component.data?.action === 'ToggleActive'
-                ? !target.enabled
+            target._runtimeSelfEnabled = component.data?.action === 'ToggleActive'
+                ? !target._runtimeSelfEnabled
                 : component.data?.active !== false;
         }
     }
+    refreshRuntimeActiveState(snapshot?.gameObjects);
 }
 
 function vector3(value, fallback) {
     if (!Array.isArray(value) || value.length < 3) return [...fallback];
     return value.slice(0, 3).map((entry, index) => Number.isFinite(Number(entry)) ? Number(entry) : fallback[index]);
+}
+
+function capsuleAxis(data) {
+    const direction = data?.direction;
+    if (direction === 'X' || direction === 0) return 0;
+    if (direction === 'Z' || direction === 2) return 2;
+    return 1;
+}
+
+function capsuleSize(data, scale) {
+    const axis = capsuleAxis(data);
+    const perpendicular = [0, 1, 2].filter((index) => index !== axis);
+    const radius = Math.max(0.05, Math.abs(Number(data?.radius) || 0.5)
+        * Math.max(scale[perpendicular[0]], scale[perpendicular[1]]));
+    const height = Math.max(radius * 2, Math.abs(Number(data?.height) || 2) * scale[axis]);
+    const size = [radius * 2, radius * 2, radius * 2];
+    size[axis] = height;
+    return { radius, height, size };
 }
 
 function runtimeCollider(object) {
@@ -112,8 +146,7 @@ function runtimeBounds(object, position, scaleBox = false) {
         const diameter = Math.max(0.1, Math.abs(Number(collider.radius) || 0.5) * Math.max(...scale) * 2);
         size = [diameter, diameter, diameter];
     } else if (source.type === 'CapsuleCollider') {
-        const diameter = Math.max(0.1, Math.abs(Number(collider.radius) || 0.5) * Math.max(scale[0], scale[2]) * 2);
-        size = [diameter, Math.max(diameter, Math.abs(Number(collider.height) || 2)), diameter];
+        size = capsuleSize(collider, scale).size;
     } else {
         size = vector3(collider.size, [1, 1, 1]).map((entry, index) =>
             Math.max(0.01, Math.abs(entry) * (scaleBox ? scale[index] : 1))
@@ -130,6 +163,49 @@ function runtimeBoundsOverlap(left, right) {
     return left.min[0] <= right.max[0] && left.max[0] >= right.min[0]
         && left.min[1] <= right.max[1] && left.max[1] >= right.min[1]
         && left.min[2] <= right.max[2] && left.max[2] >= right.min[2];
+}
+
+function processBehaviourContacts(input) {
+    const current = new Map();
+    const dispatch = (pair, suffix) => {
+        const prefix = pair.isTrigger ? 'trigger' : 'collision';
+        behaviourScripts?.eventForObject(pair.left.id, `${prefix}${suffix}`, {
+            otherId: pair.right.id,
+            otherName: pair.right.name || '',
+            otherTag: pair.right.tag || '',
+            isTrigger: pair.isTrigger
+        }, input);
+        behaviourScripts?.eventForObject(pair.right.id, `${prefix}${suffix}`, {
+            otherId: pair.left.id,
+            otherName: pair.left.name || '',
+            otherTag: pair.left.tag || '',
+            isTrigger: pair.isTrigger
+        }, input);
+    };
+    for (let leftIndex = 0; leftIndex < runtimeObjects.length; leftIndex += 1) {
+        const left = runtimeObjects[leftIndex];
+        const leftCollider = left.enabled !== false ? runtimeCollider(left) : null;
+        if (!leftCollider) continue;
+        for (let rightIndex = leftIndex + 1; rightIndex < runtimeObjects.length; rightIndex += 1) {
+            const right = runtimeObjects[rightIndex];
+            const rightCollider = right.enabled !== false ? runtimeCollider(right) : null;
+            if (!rightCollider || !runtimeLayersCollide(left, right)) continue;
+            const leftBounds = runtimeBounds(left, vector3(left.transform?.position, [0, 0, 0]), true);
+            const rightBounds = runtimeBounds(right, vector3(right.transform?.position, [0, 0, 0]), true);
+            if (!leftBounds || !rightBounds || !runtimeBoundsOverlap(leftBounds, rightBounds)) continue;
+            const key = `${left.id}\u0000${right.id}`;
+            const pair = {
+                left, right,
+                isTrigger: componentData(leftCollider).isTrigger === true || componentData(rightCollider).isTrigger === true
+            };
+            current.set(key, pair);
+            dispatch(pair, runtimeContactPairs.has(key) ? 'Stay' : 'Enter');
+        }
+    }
+    for (const [key, pair] of runtimeContactPairs) {
+        if (!current.has(key)) dispatch(pair, 'Exit');
+    }
+    runtimeContactPairs = current;
 }
 
 function runtimeLayersCollide(left, right) {
@@ -183,14 +259,11 @@ function createGameplay(scene) {
         const size = colliderSource.type === 'SphereCollider'
             ? [1, 1, 1].map(() => Math.max(0.01, Math.abs(Number(collider.radius) || 0.5) * 2))
             : colliderSource.type === 'CapsuleCollider'
-                ? [
-                    Math.max(0.1, Math.abs(Number(collider.radius) || 0.5) * Math.max(objectScale[0], objectScale[2]) * 2),
-                    Math.max(0.1, Math.abs(Number(collider.height) || 2)),
-                    Math.max(0.1, Math.abs(Number(collider.radius) || 0.5) * Math.max(objectScale[0], objectScale[2]) * 2)
-                ]
+                ? capsuleSize(collider, objectScale).size
                 : vector3(collider.size, [1, 1, 1]).map((entry) => Math.max(0.01, Math.abs(entry)));
         const box = {
             id: object.id || object.name || `trigger-${triggers.length}`,
+            object,
             min: position.map((entry, index) => entry + center[index] - size[index] / 2),
             max: position.map((entry, index) => entry + center[index] + size[index] / 2),
             kind: object.tag === 'Finish' ? 'finish'
@@ -211,6 +284,7 @@ function createGameplay(scene) {
         moveSpeed: Math.max(0, Number(controller.moveSpeed ?? controller.speed) || 5),
         jumpSpeed: Math.max(0, Number(controller.jumpForce ?? controller.jumpSpeed) || 6),
         lookSensitivity: Math.max(0, Number(controller.lookSensitivity) || 0.002),
+        maxLookPitch: Math.max(0, Math.min(Math.PI / 2, (Number(controller.maxLookPitch) || 85) * Math.PI / 180)),
         initialYaw: initialRotation[1],
         requiredCollectibles: Math.max(0, Math.floor(Number(controller.requiredCollectibles) || 0)),
         respawnY: Number.isFinite(Number(controller.respawnY)) ? Number(controller.respawnY) : -8,
@@ -223,6 +297,7 @@ function createGameplay(scene) {
         playerLayer: Number.isInteger(playerObject.layer) && playerObject.layer >= 0 && playerObject.layer < 32 ? playerObject.layer : 0,
         playerObject,
         rotation: [...initialRotation],
+        pitch: 0,
         position: [...spawn],
         velocity: [0, 0, 0],
         grounded: false,
@@ -290,6 +365,7 @@ function moveHorizontal(simulation, axis, amount) {
     const nextBounds = playerBounds(simulation, nextPosition);
 
     for (const box of simulation.boxes) {
+        if (box.object?.enabled === false) continue;
         if (!layersCollide(simulation, simulation.playerLayer, box.layer)) continue;
         if (!overlaps(nextBounds.min, nextBounds.max, box.min, box.max)) continue;
         // Merely touching a platform's top is support, not a horizontal wall.
@@ -310,10 +386,6 @@ function moveHorizontal(simulation, axis, amount) {
 function simulateFixedStep(simulation, input) {
     const horizontal = Math.max(-1, Math.min(1, Number(input.Horizontal) || 0));
     const vertical = Math.max(-1, Math.min(1, Number(input.Vertical) || 0));
-    const lookX = Number(input.LookX) || 0;
-    const sensitivity = Math.max(0, Number(simulation.lookSensitivity) || 0.002);
-    simulation.rotation[1] -= lookX * sensitivity;
-    simulation.playerObject.transform.rotation[1] = simulation.rotation[1];
     const sin = Math.sin(simulation.rotation[1]);
     const cos = Math.cos(simulation.rotation[1]);
     const length = Math.hypot(horizontal, vertical) || 1;
@@ -337,6 +409,7 @@ function simulateFixedStep(simulation, input) {
     simulation.grounded = false;
     let resolvedY = nextY;
     for (const box of simulation.boxes) {
+        if (box.object?.enabled === false) continue;
         const horizontalOverlap = nextBounds.min[0] <= box.max[0] && nextBounds.max[0] >= box.min[0]
             && nextBounds.min[2] <= box.max[2] && nextBounds.max[2] >= box.min[2];
         if (!horizontalOverlap) continue;
@@ -353,7 +426,7 @@ function simulateFixedStep(simulation, input) {
 
     const bounds = playerBounds(simulation, simulation.position);
     for (const trigger of simulation.triggers) {
-        if (!trigger.active) continue;
+        if (!trigger.active || trigger.object?.enabled === false) continue;
         if (!layersCollide(simulation, simulation.playerLayer, trigger.layer)) continue;
         if (!overlaps(bounds.min, bounds.max, trigger.min, trigger.max)) continue;
         if (trigger.kind === 'collect') {
@@ -373,6 +446,11 @@ function simulateFixedStep(simulation, input) {
 }
 
 function tickGameplay(simulation, deltaTime, input) {
+    const sensitivity = Math.max(0, Number(simulation.lookSensitivity) || 0.002);
+    simulation.rotation[1] -= (Number(input.LookX) || 0) * sensitivity;
+    simulation.pitch = Math.max(-simulation.maxLookPitch, Math.min(simulation.maxLookPitch,
+        simulation.pitch - (Number(input.LookY) || 0) * sensitivity));
+    simulation.playerObject.transform.rotation[1] = simulation.rotation[1];
     const jumpHeld = Boolean(input.Jump);
     if (jumpHeld && !simulation.jumpWasHeld) simulation.pendingJump = true;
     simulation.jumpWasHeld = jumpHeld;
@@ -456,6 +534,16 @@ function runRuntimeComponents(deltaTime, runUpdates = true, runPhysics = true) {
         const damping = Math.max(0, 1 - drag * deltaTime);
         settings.velocity = velocity.map((value) => value * damping);
         object.transform.position = position;
+        const angularVelocity = vector3(settings.angularVelocity, [0, 0, 0]);
+        const rotation = vector3(object.transform.rotation, [0, 0, 0]);
+        for (let axis = 0; axis < 3; axis += 1) {
+            if (settings[`freezeRotation${'XYZ'[axis]}`]) angularVelocity[axis] = 0;
+            else rotation[axis] += angularVelocity[axis] * deltaTime;
+        }
+        object.transform.rotation = rotation;
+        const angularDrag = Math.max(0, Number(settings.angularDrag) || 0);
+        const angularDamping = Math.max(0, 1 - angularDrag * deltaTime);
+        settings.angularVelocity = angularVelocity.map((value) => value * angularDamping);
     }
 }
 
@@ -488,10 +576,14 @@ function gameplayState() {
             position: (gameplay.camera.mode === 'follow'
                 ? (() => {
                     const yaw = Number(gameplay.rotation[1]) || 0;
+                    const pitch = Number(gameplay.pitch) || 0;
                     const sin = Math.sin(yaw);
                     const cos = Math.cos(yaw);
                     const offset = gameplay.camera.offset;
-                    const rotatedOffset = [offset[0] * cos + offset[2] * sin, offset[1], offset[0] * sin - offset[2] * cos];
+                    const yawOffset = [offset[0] * cos + offset[2] * sin, offset[1], offset[0] * sin - offset[2] * cos];
+                    const pitchSin = Math.sin(pitch);
+                    const pitchCos = Math.cos(pitch);
+                    const rotatedOffset = [yawOffset[0], yawOffset[1] * pitchCos - yawOffset[2] * pitchSin, yawOffset[1] * pitchSin + yawOffset[2] * pitchCos];
                     return gameplay.position.map((value, index) => value + rotatedOffset[index]);
                 })()
                 : gameplay.camera.position).map((value) => Number(value.toFixed(6))),
@@ -504,7 +596,13 @@ function emitState() {
     const uiText = runtimeObjects.flatMap((object) => (object.components || [])
         .filter((component) => component?.type === 'UIText' || component?.type === 'UIInputField')
         .map((component) => ({ id: `${object.id}:${component.type}`, text: String(component.data?.text ?? '') })));
-    self.postMessage({ type: 'state', sessionId, state, frame, time, transforms: runtimeTransformState(), gameplay: gameplayState(), uiText, lastUiEvent, lastUiEventPayload });
+    self.postMessage({
+        type: 'state', sessionId, state, frame, time, transforms: runtimeTransformState(), gameplay: gameplayState(), uiText,
+        lastUiEvent, lastUiEventPayload,
+        behaviourScripts: behaviourScripts
+            ? { instanceCount: behaviourScripts.instanceCount, diagnostics: behaviourScripts.diagnostics() }
+            : { instanceCount: 0, diagnostics: [] }
+    });
 }
 
 function fail(code, message) {
@@ -529,12 +627,17 @@ self.onmessage = (event) => {
             if (!snapshot || typeof snapshot !== 'object') throw new Error('invalid snapshot');
             runtimeObjects = allGameObjects(snapshot.gameObjects);
             runtimeFixedAccumulator = 0;
+            runtimeContactPairs = new Map();
             const authoredMatrix = snapshot.layerCollisionMatrix || snapshot.projectSettings?.collisionMatrix;
             runtimeCollisionMatrix = Array.from({ length: 32 }, (_, index) => {
                 const value = Array.isArray(authoredMatrix) ? Number(authoredMatrix[index]) : NaN;
                 return Number.isFinite(value) ? value >>> 0 : 0xFFFFFFFF;
             });
             gameplay = createGameplay(snapshot);
+            behaviourScripts = self.TugberkBehaviourScript.createBehaviourRuntime(runtimeObjects, {
+                refreshActiveState: () => refreshRuntimeActiveState(snapshot?.gameObjects)
+            });
+            behaviourScripts.start();
             lastUiEvent = null;
             lastUiEventPayload = null;
             state = 'running';
@@ -557,6 +660,7 @@ self.onmessage = (event) => {
             lastUiEvent = name;
             lastUiEventPayload = envelope.payload?.value === undefined ? null : envelope.payload.value;
             applyUiEventActions(name, envelope.payload?.value);
+            behaviourScripts?.event(name, envelope.payload?.value);
             if (gameplay && name.toLowerCase() === 'restart') restartGameplay(gameplay);
             emitState();
             break;
@@ -589,11 +693,14 @@ self.onmessage = (event) => {
             }
             frame += 1;
             time += deltaTime;
+            behaviourScripts?.update(deltaTime, envelope.payload?.input || {});
             runRuntimeComponents(deltaTime, true, false);
             runtimeFixedAccumulator += deltaTime;
             let runtimeFixedSteps = 0;
             while (runtimeFixedAccumulator + 1e-9 >= DEFAULT_FIXED_STEP && runtimeFixedSteps < 5) {
+                behaviourScripts?.fixedUpdate(DEFAULT_FIXED_STEP, envelope.payload?.input || {});
                 runRuntimeComponents(DEFAULT_FIXED_STEP, false, true);
+                processBehaviourContacts(envelope.payload?.input || {});
                 runtimeFixedAccumulator -= DEFAULT_FIXED_STEP;
                 runtimeFixedSteps += 1;
             }
@@ -607,6 +714,8 @@ self.onmessage = (event) => {
         case 'stop':
             snapshot = null;
             runtimeObjects = [];
+            behaviourScripts = null;
+            runtimeContactPairs = new Map();
             runtimeCollisionMatrix = new Array(32).fill(0xFFFFFFFF);
             runtimeFixedAccumulator = 0;
             gameplay = null;

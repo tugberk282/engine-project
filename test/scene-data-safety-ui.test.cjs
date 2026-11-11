@@ -57,6 +57,14 @@ test('New and every Open entry point preserve recovery until replacement commits
     assert.match(editor, /newScene\(\): Promise<void>[^]*confirmSceneReplacement\('create a new scene'\)/);
     assert.match(
         editor,
+        /newScene\(\): Promise<void>[^]*await this\.executeSceneSnapshotCommand\('New Scene', nextSnapshot, null\)[^]*discardRecovery\(this\.projectPath\)/
+    );
+    assert.match(
+        editor,
+        /private async executeSceneSnapshotCommand[^]*await CommandHistory\.execute\([^]*return true;/
+    );
+    assert.match(
+        editor,
         /openScene\(scenePath: string\): Promise<boolean>[^]*prepareScene\(scenePath\)[^]*confirmSceneReplacement\('open another scene'\)[^]*activatePreparedScene\(prepared\)[^]*setScene\(scene\)[^]*discardRecovery\(this\.projectPath\)/
     );
     assert.match(
@@ -106,4 +114,16 @@ test('nested recovery survives restart while a stale save leaves the canonical f
     );
     assert.deepEqual(fs.readFileSync(scenePath), canonicalBytes);
     assert.deepEqual(fs.readFileSync(recoveryPath(projectRoot)), recoveryBytes);
+});
+
+test('every scene replacement path rehydrates serialized model instances', () => {
+    const editor = source('src/editor/Editor.ts');
+    const projectWindow = source('src/editor/ProjectWindow.ts');
+    assert.match(editor, /applySceneSnapshot[^]*await this\.projectWindow\.rehydrateSceneModelInstances\(\)/);
+    assert.match(editor, /openScene\(scenePath: string\)[^]*setScene\(scene\)[^]*rehydrateSceneModelInstances\(\)/);
+    assert.match(editor, /showOpenSceneDialog[^]*setScene\(scene\)[^]*rehydrateSceneModelInstances\(\)/);
+    assert.match(editor, /restorePersistedSceneOnStartup[^]*setScene\(scene\)[^]*rehydrateSceneModelInstances\(\)/);
+    assert.match(editor, /offerRecovery[^]*loadFromJSON[^]*rehydrateSceneModelInstances\(\)/);
+    assert.match(projectWindow, /rehydrateSceneModelInstances\(\): Promise<number>/);
+    assert.match(projectWindow, /reloadModelInstancesForAsset[^]*AssetImporter\.rehydrateModelInstance/);
 });

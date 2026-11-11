@@ -158,6 +158,7 @@ export class ProjectWindow {
     private focusedFolderPath: string | null = null;
     private recentRepairHistory: AssetRepairHistoryEntry[] = [];
     private assetMutationBusy = false;
+    private externalRefreshInFlight = false;
 
     public applyAuthoritativeSelection(assetPath: string | null): void {
         this.selectedAssetPath = assetPath;
@@ -182,6 +183,18 @@ export class ProjectWindow {
         this.currentPath = this.rootPath;
         this.expandedPaths.add(this.rootPath); // Always expand root
         await this.refreshAssetDatabaseAndView();
+    }
+
+    public async refreshExternalChanges(): Promise<void> {
+        if (this.externalRefreshInFlight || !this.rootPath) return;
+        this.externalRefreshInFlight = true;
+        try {
+            await this.refreshAssetDatabaseAndView({ preserveSelection: true });
+        } catch (cause) {
+            console.warn('Failed to refresh externally changed project assets.', cause);
+        } finally {
+            this.externalRefreshInFlight = false;
+        }
     }
 
     public async refresh() {
@@ -911,6 +924,33 @@ export class ProjectWindow {
         await this.refreshAssetDatabaseAndView({ preserveSelection: true, runtimeAssetPaths: [assetPath] });
     }
 
+    public async rehydrateSceneModelInstances(): Promise<number> {
+        await AssetDatabase.getInstance().refresh(this.rootPath);
+        const targets = this.editor.scene.gameObjects.filter((go: GameObject) =>
+            !go.transform.parent && go.sourceAssetType === 'model' && !!go.sourceAssetPath
+        );
+        let hydratedMeshes = 0;
+        for (const target of targets) {
+            const assetPath = target.sourceAssetGuid
+                ? AssetDatabase.getInstance().getPath(target.sourceAssetGuid) ?? target.sourceAssetPath
+                : target.sourceAssetPath;
+            if (!assetPath || !await this.fs.exists(assetPath)) continue;
+            try {
+                await AssetImporter.importModel(assetPath, (importedRoot) => {
+                    hydratedMeshes += AssetImporter.rehydrateModelInstance(target, importedRoot);
+                    importedRoot.onDestroy();
+                });
+            } catch (error) {
+                console.warn(`Could not rehydrate model instance from ${assetPath}.`, error);
+            }
+        }
+        if (hydratedMeshes > 0) {
+            this.editor.hierarchyWindow.refresh();
+            this.editor.inspectorWindow.refresh();
+        }
+        return hydratedMeshes;
+    }
+
     public async auditAssetReferences(assetPath: string): Promise<AssetReferenceAuditResult | null> {
         const candidates = await this.getReferenceAuditCandidatePaths(assetPath);
         if (candidates.length === 0) return null;
@@ -1175,11 +1215,27 @@ export class ProjectWindow {
         }
 
         await this.refresh();
-        if (options?.runtimeAssetPaths?.length) {
-            for (const assetPath of Array.from(new Set(options.runtimeAssetPaths))) {
-                if (typeof assetPath !== 'string' || assetPath.length === 0) continue;
-                await this.applyRuntimeReimportEffects(assetPath);
-            }
+        const runtimeAssetPaths = new Set(
+            (options?.runtimeAssetPaths ?? []).filter((assetPath): assetPath is string => typeof assetPath === 'string' && assetPath.length > 0)
+        );
+        for (const assetPath of [...refreshResult.added, ...refreshResult.changed]) {
+            if (await this.isRuntimeRefreshCandidate(assetPath)) runtimeAssetPaths.add(assetPath);
+        }
+        for (const move of refreshResult.moved) {
+            if (await this.isRuntimeRefreshCandidate(move.to)) runtimeAssetPaths.add(move.to);
+            if (this.isBehaviourScriptAssetPath(move.from)) runtimeAssetPaths.add(move.from);
+        }
+        for (const assetPath of refreshResult.removed) {
+            if (this.isBehaviourScriptAssetPath(assetPath)) runtimeAssetPaths.add(assetPath);
+        }
+
+        const reloadBehaviourScripts = Array.from(runtimeAssetPaths).some((assetPath) => this.isBehaviourScriptAssetPath(assetPath));
+        for (const assetPath of runtimeAssetPaths) {
+            if (this.isBehaviourScriptAssetPath(assetPath)) continue;
+            await this.applyRuntimeReimportEffects(assetPath);
+        }
+        if (reloadBehaviourScripts) {
+            await this.editor.reloadRuntimeBehaviourScripts();
         }
 
         if (this.selectedAssetPath && await this.fs.exists(this.selectedAssetPath)) {
@@ -1720,15 +1776,17 @@ export class ProjectWindow {
         );
 
         for (const target of targets) {
-            await AssetImporter.importModel(assetPath, (importedGO) => {
-                PrefabManager.applySerializedData(target, importedGO.serialize(), {
-                    preserveTransform: true,
-                    preserveSourceLink: true
+            try {
+                await AssetImporter.importModel(assetPath, (importedGO) => {
+                    AssetImporter.rehydrateModelInstance(target, importedGO);
+                    target.sourceAssetPath = assetPath;
+                    target.sourceAssetGuid = assetGuid;
+                    target.sourceAssetType = 'model';
+                    importedGO.onDestroy();
                 });
-                target.sourceAssetPath = assetPath;
-                target.sourceAssetGuid = assetGuid;
-                target.sourceAssetType = 'model';
-            });
+            } catch (error) {
+                console.warn(`Could not reload model instance from ${assetPath}.`, error);
+            }
         }
     }
 
@@ -2631,7 +2689,12 @@ export class ProjectWindow {
             || assetType === 'material'
             || assetType === 'audio'
             || assetType === 'prefab'
-            || assetType === 'model';
+            || assetType === 'model'
+            || (assetType === 'script' && this.isBehaviourScriptAssetPath(assetPath));
+    }
+
+    private isBehaviourScriptAssetPath(assetPath: string): boolean {
+        return PathUtils.normalize(assetPath).toLowerCase().endsWith('.behaviour.json');
     }
 
     private async isFileAssetPath(assetPath: string): Promise<boolean> {

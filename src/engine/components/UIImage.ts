@@ -10,6 +10,12 @@ export class UIImage extends Component implements UIRaycastTarget {
     @serialize public color: string = '#ffffff';
     @serialize public spritePath: string | null = null;
     @serialize public raycastTarget: boolean = true;
+    @serialize public imageType: 'Simple' | 'Filled' = 'Simple';
+    @serialize public preserveAspect: boolean = false;
+    @serialize public fillMethod: 'Horizontal' | 'Vertical' | 'Radial360' = 'Horizontal';
+    @serialize public fillOrigin: number = 0;
+    @serialize public fillClockwise: boolean = true;
+    @serialize public fillAmount: number = 1;
 
     private element: HTMLDivElement | null = null;
     private canvas: Canvas | null = null;
@@ -60,10 +66,13 @@ export class UIImage extends Component implements UIRaycastTarget {
 
         if (this.spritePath) {
             this.element.style.backgroundImage = `url(${this.spritePath})`;
-            this.element.style.backgroundSize = 'cover';
+            this.element.style.backgroundSize = this.preserveAspect ? 'contain' : '100% 100%';
+            this.element.style.backgroundPosition = 'center';
+            this.element.style.backgroundRepeat = 'no-repeat';
         } else {
             this.element.style.backgroundImage = 'none';
         }
+        this.applyImageType();
     }
 
     public update(_dt: number): void {
@@ -114,5 +123,34 @@ export class UIImage extends Component implements UIRaycastTarget {
         if (this.raycaster) {
             this.raycaster.registerGraphic(this, this.element);
         }
+    }
+
+    private applyImageType(): void {
+        if (!this.element) return;
+        this.element.style.clipPath = 'none';
+        this.element.style.maskImage = 'none';
+        (this.element.style as any).webkitMaskImage = 'none';
+        if (this.imageType !== 'Filled') return;
+        const amount = Math.max(0, Math.min(1, Number(this.fillAmount) || 0));
+        if (this.fillMethod === 'Horizontal') {
+            const empty = (1 - amount) * 100;
+            this.element.style.clipPath = this.fillOrigin === 1
+                ? `inset(0 0 0 ${empty}%)`
+                : `inset(0 ${empty}% 0 0)`;
+            return;
+        }
+        if (this.fillMethod === 'Vertical') {
+            const empty = (1 - amount) * 100;
+            this.element.style.clipPath = this.fillOrigin === 1
+                ? `inset(0 0 ${empty}% 0)`
+                : `inset(${empty}% 0 0 0)`;
+            return;
+        }
+        const origin = [180, 270, 0, 90][Math.max(0, Math.min(3, Math.trunc(this.fillOrigin)))] ?? 180;
+        const sweep = amount * 360;
+        const start = this.fillClockwise ? origin : origin - sweep;
+        const mask = `conic-gradient(from ${start}deg, #000 0deg ${sweep}deg, transparent ${sweep}deg 360deg)`;
+        this.element.style.maskImage = mask;
+        (this.element.style as any).webkitMaskImage = mask;
     }
 }

@@ -370,11 +370,20 @@ export class UIInputField extends Selectable {
         }
         switch (this.contentType) {
             case 'IntegerNumber':
-                next = next.replace(/[^0-9-]/g, '');
+            case 'DecimalNumber': {
+                const negative = next.trimStart().startsWith('-');
+                next = next.replace(/[^0-9.]/g, '');
+                if (this.contentType === 'IntegerNumber') {
+                    next = next.replace(/\./g, '');
+                } else {
+                    const decimalIndex = next.indexOf('.');
+                    if (decimalIndex >= 0) {
+                        next = `${next.slice(0, decimalIndex + 1)}${next.slice(decimalIndex + 1).replace(/\./g, '')}`;
+                    }
+                }
+                if (negative) next = `-${next}`;
                 break;
-            case 'DecimalNumber':
-                next = next.replace(/[^0-9.\-]/g, '');
-                break;
+            }
             default:
                 break;
         }

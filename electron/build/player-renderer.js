@@ -1,7 +1,17 @@
 'use strict';
 import * as THREE from './three.module.js';
+import { GLTFLoader } from './gltf-loader.js';
 import { createPlayerScene } from './player-scene.mjs';
-import { collectPlayerSceneLoadActions, collectPlayerUiControls, collectPlayerUiText, mountPlayerUiControls } from './player-ui.mjs';
+import { applyPlayerUiImageStyle, applyPlayerUiLayout, collectPlayerSceneLoadActions, collectPlayerScrollRects, collectPlayerUiControls, collectPlayerUiImages, collectPlayerUiText, isPlayerUiActive, mountPlayerScrollRects, mountPlayerUiControls } from './player-ui.mjs';
+import { createPlayerInputMapper } from './player-input.mjs';
+import { collectPlayerAudioGraph, createWebAudioPlayback, isPlayerAudioActive } from './player-audio.mjs';
+import {
+    bindPlayerModelHierarchy,
+    collectPlayerModelResources,
+    collectPlayerModels,
+    selectPlayerAnimationClip
+} from './player-model.mjs';
+import { collectPlayerParticleSystems, createPlayerParticleEmitter } from './player-particles.mjs';
 
 (async () => {
     const { manifest, scenePath, scene, smoke, sceneSwitchSmoke } = await window.tugberkPlayer.bootstrap();
@@ -27,33 +37,14 @@ import { collectPlayerSceneLoadActions, collectPlayerUiControls, collectPlayerUi
         .find((component) => component.type === 'GameplayUI')?.data || {};
     const uiButtons = Array.isArray(gameplayUi.buttons) ? gameplayUi.buttons : [];
     const authoredUiControls = collectPlayerUiControls(scene);
+    const authoredUiImages = collectPlayerUiImages(scene);
     const authoredUiText = collectPlayerUiText(scene);
+    const authoredScrollRects = collectPlayerScrollRects(scene);
     const sceneLoadActions = collectPlayerSceneLoadActions(scene);
-    const rawInputMap = scene.inputMap && typeof scene.inputMap === 'object' ? scene.inputMap : {};
-    const inputAxes = Object.fromEntries(Object.entries(rawInputMap.axes || {}).map(([name, value]) => {
-        const axis = value && typeof value === 'object' ? value : {};
-        const normalize = (binding) => {
-            if (typeof binding !== 'string') return '';
-            const raw = binding.trim();
-            if (!raw) return '';
-            if (raw === ' ') return 'Space';
-            if (/^(Key|Arrow|Numpad|Mouse|Gamepad)/.test(raw)) return raw;
-            return /^[a-z]$/i.test(raw) ? `Key${raw.toUpperCase()}` : raw;
-        };
-        return [name, {
-            positive: normalize(axis.positive ?? axis.positiveButton),
-            negative: normalize(axis.negative ?? axis.negativeButton),
-            positiveAlt: normalize(axis.positiveAlt ?? axis.altPositiveButton),
-            negativeAlt: normalize(axis.negativeAlt ?? axis.altNegativeButton)
-        }];
-    }));
-    const inputActions = Object.fromEntries(Object.entries(rawInputMap.actions || {}).map(([name, bindings]) => [
-        name,
-        Array.isArray(bindings) ? bindings.filter((binding) => typeof binding === 'string').map((binding) => {
-            const raw = binding.trim();
-            return raw === ' ' ? 'Space' : /^[a-z]$/i.test(raw) ? `Key${raw.toUpperCase()}` : raw;
-        }) : []
-    ]));
+    const inputMapper = createPlayerInputMapper(scene.inputMap);
+    const authoredAudio = collectPlayerAudioGraph(scene);
+    const authoredModels = collectPlayerModels(scene);
+    const authoredParticles = collectPlayerParticleSystems(scene);
     const hud = document.createElement('section');
     hud.id = 'player-hud';
     hud.setAttribute('aria-live', 'polite');
@@ -61,13 +52,96 @@ import { collectPlayerSceneLoadActions, collectPlayerUiControls, collectPlayerUi
     root.replaceChildren(hud);
     const statusLayer = document.createElement('div');
     const controlsLayer = document.createElement('div');
+    const imageLayer = document.createElement('div');
     const textLayer = document.createElement('div');
     textLayer.id = 'player-ui-text';
+    imageLayer.id = 'player-ui-images';
     controlsLayer.id = 'player-ui-controls';
-    hud.append(statusLayer, textLayer, controlsLayer);
+    hud.append(statusLayer, imageLayer, textLayer, controlsLayer);
+    const uiElementsByObjectId = new Map();
     const view = createPlayerScene(THREE, scene);
+    const particleEmitters = authoredParticles
+        .map((descriptor) => {
+            const object = view.objects.get(descriptor.objectId);
+            return object ? createPlayerParticleEmitter(THREE, descriptor, object) : null;
+        })
+        .filter(Boolean);
+    const modelMixers = [];
+    const modelBindings = [];
+    const modelErrors = [];
+    let loadedModelCount = 0;
+    let loadedModelMeshCount = 0;
+    const parseWithLoader = (loader, raw, resourcePath = '') => new Promise((resolve, reject) => {
+        loader.parse(raw, resourcePath, resolve, reject);
+    });
+    const parseModel = async (descriptor, bytes) => {
+        const raw = bytes instanceof Uint8Array
+            ? bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength)
+            : bytes;
+        if (descriptor.path.toLowerCase().endsWith('.glb')) {
+            return await parseWithLoader(new GLTFLoader(), raw);
+        }
+
+        const source = new TextDecoder('utf-8', { fatal: true }).decode(raw);
+        const document = JSON.parse(source);
+        const resources = collectPlayerModelResources(descriptor.path, document);
+        const manager = new THREE.LoadingManager();
+        const objectUrls = new Map();
+        try {
+            for (const [uri, assetPath] of resources) {
+                const resourceBytes = await window.tugberkPlayer.readModelAsset(assetPath);
+                const extension = assetPath.split('.').pop()?.toLowerCase();
+                const mime = extension === 'png' ? 'image/png'
+                    : extension === 'jpg' || extension === 'jpeg' ? 'image/jpeg'
+                        : extension === 'webp' ? 'image/webp'
+                            : 'application/octet-stream';
+                objectUrls.set(uri, URL.createObjectURL(new Blob([resourceBytes], { type: mime })));
+            }
+            manager.setURLModifier((url) => objectUrls.get(url) || url);
+            return await parseWithLoader(new GLTFLoader(manager), source);
+        } finally {
+            for (const url of objectUrls.values()) URL.revokeObjectURL(url);
+        }
+    };
+    await Promise.all(authoredModels.map(async (descriptor) => {
+        try {
+            const bytes = await window.tugberkPlayer.readModelAsset(descriptor.path);
+            const gltf = await parseModel(descriptor, bytes);
+            const target = view.objects.get(descriptor.objectId);
+            if (!target) throw new Error(`Model target is missing: ${descriptor.objectId}`);
+            gltf.scene.traverse((entry) => {
+                if (!entry.isMesh) return;
+                loadedModelMeshCount += 1;
+                entry.castShadow = true;
+                entry.receiveShadow = true;
+            });
+            target.add(gltf.scene);
+            bindPlayerModelHierarchy(descriptor.nodes, gltf.scene, (objectId, object, authoredNode) => {
+                view.bindExternalObject(objectId, object);
+                modelBindings.push({ object, authoredNode });
+            });
+            loadedModelCount += 1;
+            if (descriptor.animation?.playOnAwake && gltf.animations?.length) {
+                const clip = selectPlayerAnimationClip(gltf.animations, descriptor.animation.clip);
+                if (clip) {
+                    const mixer = new THREE.AnimationMixer(gltf.scene);
+                    const action = mixer.clipAction(clip);
+                    action.setLoop(descriptor.animation.loop ? THREE.LoopRepeat : THREE.LoopOnce, Infinity);
+                    action.clampWhenFinished = !descriptor.animation.loop;
+                    action.timeScale = descriptor.animation.speed;
+                    action.play();
+                    modelMixers.push(mixer);
+                }
+            }
+        } catch (error) {
+            const message = `${descriptor.path}: ${error?.message || String(error)}`;
+            modelErrors.push(message);
+            console.warn(`Could not load authored model ${message}`);
+        }
+    }));
+    root.dataset.modelErrors = String(modelErrors.length);
     const audioSources = [];
-    const spatialAudio = [];
+    const audioLoads = [];
     const audioContext = typeof window.AudioContext === 'function' ? new window.AudioContext() : null;
     const audioMime = (audioPath) => {
         const extension = audioPath.split('.').pop()?.toLowerCase();
@@ -77,61 +151,88 @@ import { collectPlayerSceneLoadActions, collectPlayerUiControls, collectPlayerUi
                     : extension === 'flac' ? 'audio/flac'
                         : 'audio/mpeg';
     };
-    const visitAudio = (node) => {
-        for (const component of node.components || []) {
-            if (component.type !== 'AudioSource' || component.enabled === false) continue;
-            const settings = { ...(component.data || {}), ...component };
+    const loadAudioSource = (descriptor) => {
+            const { settings } = descriptor;
             const clipPath = typeof settings.clipPath === 'string' ? settings.clipPath.replaceAll('\\', '/') : '';
-            if (!clipPath.startsWith('Assets/') || clipPath.includes('..') || clipPath.includes(':')) continue;
-            audioSources.push(window.tugberkPlayer.readAudioAsset(clipPath).then(async (bytes) => {
+            if (!clipPath.startsWith('Assets/') || clipPath.includes('..') || clipPath.includes(':')) return;
+            audioLoads.push(window.tugberkPlayer.readAudioAsset(clipPath).then(async (bytes) => {
                 if (audioContext) {
                     const raw = bytes instanceof Uint8Array
                         ? bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength)
                         : bytes;
                     const buffer = await audioContext.decodeAudioData(raw);
-                    const source = audioContext.createBufferSource();
-                    const gain = audioContext.createGain();
-                    source.buffer = buffer;
-                    source.loop = settings.loop === true;
-                    const pitch = Number(settings.pitch);
-                    source.playbackRate.value = Math.max(0.01, Number.isFinite(pitch) ? pitch : 1);
-                    const volume = Number(settings.volume);
-                    gain.gain.value = Math.max(0, Math.min(1, Number.isFinite(volume) ? volume : 1));
-                    if (settings.spatial !== false) {
-                        const panner = audioContext.createPanner();
-                        panner.panningModel = 'HRTF';
-                        panner.distanceModel = 'inverse';
-                        panner.refDistance = 1;
-                        source.connect(gain).connect(panner).connect(audioContext.destination);
-                        spatialAudio.push({ panner, objectId: node.id });
-                    } else {
-                        source.connect(gain).connect(audioContext.destination);
-                    }
-                    audioSources.push({ stop: () => source.stop(), close: () => source.disconnect() });
-                    if (settings.playOnAwake !== false) {
-                        void audioContext.resume().catch(() => {});
-                        source.start();
-                    }
+                    const playback = createWebAudioPlayback(audioContext, buffer, descriptor);
+                    audioSources.push(playback);
+                    playback.sync(descriptor.active);
                     return;
                 }
-                const audio = new Audio(URL.createObjectURL(new Blob([bytes], { type: audioMime(clipPath) })));
+                const url = URL.createObjectURL(new Blob([bytes], { type: audioMime(clipPath) }));
+                const audio = new Audio(url);
                 const volume = Number(settings.volume);
                 audio.volume = Math.max(0, Math.min(1, Number.isFinite(volume) ? volume : 1));
                 audio.loop = settings.loop === true;
                 const pitch = Number(settings.pitch);
                 audio.playbackRate = Math.max(0.01, Number.isFinite(pitch) ? pitch : 1);
-                if (settings.playOnAwake !== false) void audio.play().catch(() => {});
-                audioSources.push(audio);
+                const playback = {
+                    descriptor,
+                    active: false,
+                    sync(active) {
+                        if (active === this.active) return;
+                        this.active = active;
+                        if (active && settings.playOnAwake !== false) void audio.play().catch(() => {});
+                        else { audio.pause(); audio.currentTime = 0; }
+                    },
+                    stop() { audio.pause(); audio.removeAttribute('src'); audio.load(); URL.revokeObjectURL(url); },
+                    get panner() { return null; }
+                };
+                audioSources.push(playback);
+                playback.sync(descriptor.active);
             }).catch(() => {}));
-        }
-        for (const child of node.children || []) visitAudio(child);
     };
-    for (const gameObject of scene.gameObjects || []) visitAudio(gameObject);
+    for (const source of authoredAudio.sources) loadAudioSource(source);
     const materialLoads = [];
     const imageMime = (assetPath) => {
         const extension = assetPath.split('.').pop()?.toLowerCase();
         return extension === 'jpg' || extension === 'jpeg' ? 'image/jpeg' : extension === 'webp' ? 'image/webp' : 'image/png';
     };
+    await Promise.all(particleEmitters.map(async (emitter) => {
+        const safePath = emitter.descriptor.texturePath || '';
+        if (!safePath.startsWith('Assets/') || safePath.includes('..') || safePath.includes(':')) return;
+        try {
+            const bytes = await window.tugberkPlayer.readImageAsset(safePath);
+            const raw = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+            const url = URL.createObjectURL(new Blob([raw], { type: imageMime(safePath) }));
+            try {
+                emitter.material.map = await new Promise((resolve, reject) => new THREE.TextureLoader().load(url, resolve, undefined, reject));
+                emitter.material.needsUpdate = true;
+            } finally { URL.revokeObjectURL(url); }
+        } catch (error) {
+            console.warn(`Could not load particle texture ${safePath}: ${error?.message || String(error)}`);
+        }
+    }));
+    const uiImageUrls = [];
+    for (const image of authoredUiImages) {
+        const element = document.createElement('div');
+        element.dataset.uiImageId = image.id;
+        element.dataset.uiObjectId = image.activePath.at(-1) || '';
+        element.dataset.uiActivePath = JSON.stringify(image.activePath);
+        element.hidden = !image.active;
+        applyPlayerUiLayout(element, image.layout, image.frame);
+        applyPlayerUiImageStyle(element, image);
+        imageLayer.append(element);
+        if (element.dataset.uiObjectId && !uiElementsByObjectId.has(element.dataset.uiObjectId)) {
+            uiElementsByObjectId.set(element.dataset.uiObjectId, element);
+        }
+        const safePath = image.spritePath || '';
+        if (!safePath.startsWith('Assets/') || safePath.includes('..') || safePath.includes(':')) continue;
+        try {
+            const bytes = await window.tugberkPlayer.readImageAsset(safePath);
+            const raw = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+            const url = URL.createObjectURL(new Blob([raw], { type: imageMime(safePath) }));
+            uiImageUrls.push(url);
+            element.style.backgroundImage = `url(${JSON.stringify(url)})`;
+        } catch {}
+    }
     const loadMaterialTexture = async (object, texturePath, slot = 'map') => {
         if (!texturePath || !object.material || typeof window.tugberkPlayer.readImageAsset !== 'function') return;
         const safePath = String(texturePath).replaceAll('\\', '/');
@@ -178,7 +279,7 @@ import { collectPlayerSceneLoadActions, collectPlayerUiControls, collectPlayerUi
             }).catch(() => {}));
     });
     await Promise.all(materialLoads);
-    await Promise.all(audioSources);
+    await Promise.all(audioLoads);
     const renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: smoke });
     renderer.shadowMap.enabled = true;
     renderer.shadowMap.type = THREE.PCFSoftShadowMap;
@@ -214,6 +315,7 @@ import { collectPlayerSceneLoadActions, collectPlayerUiControls, collectPlayerUi
     const worker = new Worker('./runtime.worker.js');
     const sessionId = `player-${Date.now().toString(36)}`;
     const keys = new Set();
+    const mouseButtons = new Set();
     const mouse = { deltaX: 0, deltaY: 0 };
     const gamepadAxis = (value) => {
         const axis = Number.isFinite(value) ? value : 0;
@@ -221,46 +323,41 @@ import { collectPlayerSceneLoadActions, collectPlayerUiControls, collectPlayerUi
     };
     const gamepadInput = () => {
         const pad = navigator.getGamepads?.().find((candidate) => candidate?.connected);
-        if (!pad) return { horizontal: 0, vertical: 0, jump: false };
+        if (!pad) return { horizontal: 0, vertical: 0, buttons: new Set() };
         return {
             horizontal: gamepadAxis(pad.axes?.[0]),
             vertical: -gamepadAxis(pad.axes?.[1]),
-            jump: pad.buttons?.[0]?.pressed === true || pad.buttons?.[1]?.pressed === true
+            buttons: new Set(Array.from(pad.buttons || [], (button, index) => button?.pressed ? index : -1).filter((index) => index >= 0))
         };
     };
     let lastState = null;
     let frame = 0;
+    let pendingAnimationDelta = 0;
     const mountedControls = new Set();
+    let mountedScrollRects = [];
     let sceneTransitionStarted = false;
 
-    const input = () => {
+    const input = (deltaTime = 0.02) => {
         const pad = gamepadInput();
-        const axisValue = (name, fallbackPositive, fallbackNegative, alternatePositive, alternateNegative) => {
-            const axis = inputAxes[name];
-            const positives = axis ? [axis.positive, axis.positiveAlt] : [fallbackPositive, alternatePositive];
-            const negatives = axis ? [axis.negative, axis.negativeAlt] : [fallbackNegative, alternateNegative];
-            return (positives.some((binding) => binding && keys.has(binding)) ? 1 : 0)
-                - (negatives.some((binding) => binding && keys.has(binding)) ? 1 : 0);
-        };
-        const actionValue = (name, fallback) => {
-            const bindings = inputActions[name];
-            return (bindings?.length ? bindings : fallback).some((binding) => keys.has(binding));
-        };
-        const keyboardHorizontal = axisValue('Horizontal', 'ArrowRight', 'ArrowLeft', 'KeyD', 'KeyA');
-        const keyboardVertical = axisValue('Vertical', 'ArrowUp', 'ArrowDown', 'KeyW', 'KeyS');
-        return {
-            Horizontal: keyboardHorizontal || pad.horizontal,
-            Vertical: keyboardVertical || pad.vertical,
-            Jump: actionValue('Jump', ['Space']) || pad.jump,
-            LookX: mouse.deltaX,
-            LookY: mouse.deltaY
-        };
+        return inputMapper.sample({
+            keys, mouseButtons, gamepadButtons: pad.buttons,
+            gamepadAxes: pad, mouseDelta: { x: mouse.deltaX, y: mouse.deltaY }
+        }, deltaTime);
     };
     const render = (state) => {
         lastState = state;
         view.update(state);
+        const simulationDelta = pendingAnimationDelta;
+        if (simulationDelta > 0) {
+            for (const mixer of modelMixers) mixer.update(simulationDelta);
+            for (const emitter of particleEmitters) {
+                emitter.update(simulationDelta, isPlayerUiActive(emitter.descriptor.activePath, state.transforms));
+            }
+            pendingAnimationDelta = 0;
+        }
         const loadAction = state.lastUiEvent
-            ? sceneLoadActions.find((entry) => entry.eventName === state.lastUiEvent)
+            ? sceneLoadActions.find((entry) => entry.eventName === state.lastUiEvent
+                && isPlayerUiActive(entry.activePath, state.transforms))
             : null;
         if (loadAction && !sceneTransitionStarted) {
             sceneTransitionStarted = true;
@@ -271,22 +368,32 @@ import { collectPlayerSceneLoadActions, collectPlayerUiControls, collectPlayerUi
                 statusLayer.textContent = `Scene load failed: ${error.message}`;
             });
         }
-        for (const entry of spatialAudio) {
-            const object = view.objects.get(entry.objectId);
-            if (!object) continue;
+        for (const entry of audioSources) {
+            entry.sync(isPlayerAudioActive(entry.descriptor.activePath, state.transforms));
+            const object = view.objects.get(entry.descriptor.objectId);
+            const panner = entry.panner;
+            if (!object || !panner) continue;
             const position = new THREE.Vector3();
             object.getWorldPosition(position);
-            entry.panner.positionX.value = position.x;
-            entry.panner.positionY.value = position.y;
-            entry.panner.positionZ.value = position.z;
+            panner.positionX.value = position.x;
+            panner.positionY.value = position.y;
+            panner.positionZ.value = position.z;
         }
         if (audioContext?.listener) {
             const listener = audioContext.listener;
+            const activeListener = authoredAudio.listeners.find((entry) => isPlayerAudioActive(entry.activePath, state.transforms));
+            const listenerObject = activeListener
+                ? view.objects.get(activeListener.objectId)
+                : null;
+            const listenerTransform = listenerObject || view.camera;
             const cameraPosition = new THREE.Vector3();
-            const cameraForward = new THREE.Vector3();
+            const cameraForward = new THREE.Vector3(0, 0, -1);
             const cameraUp = new THREE.Vector3(0, 1, 0);
-            view.camera.getWorldPosition(cameraPosition);
-            view.camera.getWorldDirection(cameraForward);
+            const listenerRotation = new THREE.Quaternion();
+            listenerTransform.getWorldPosition(cameraPosition);
+            listenerTransform.getWorldQuaternion(listenerRotation);
+            cameraForward.applyQuaternion(listenerRotation).normalize();
+            cameraUp.applyQuaternion(listenerRotation).normalize();
             const setListenerValue = (modern, value) => {
                 if (modern && typeof modern.value === 'number') modern.value = value;
             };
@@ -355,18 +462,21 @@ import { collectPlayerSceneLoadActions, collectPlayerUiControls, collectPlayerUi
                 element.dataset.uiTextId = text.id;
                 const authored = authoredUiText.find((entry) => entry.id === text.id);
                 if (authored) {
-                    element.style.position = 'absolute';
-                    element.style.width = `${Math.max(1, authored.layout.width)}px`;
-                    element.style.minHeight = `${Math.max(1, authored.layout.height)}px`;
-                    element.style.left = `calc(${Math.max(0, Math.min(1, authored.layout.anchorX)) * 100}% + ${authored.layout.x}px)`;
-                    element.style.top = `calc(${(1 - Math.max(0, Math.min(1, authored.layout.anchorY))) * 100}% - ${authored.layout.y}px)`;
+                    element.dataset.uiObjectId = authored.activePath.at(-1) || '';
+                    element.dataset.uiActivePath = JSON.stringify(authored.activePath);
+                    element.hidden = !authored.active;
+                    applyPlayerUiLayout(element, authored.layout, authored.frame);
                     element.style.pointerEvents = 'none';
                     element.style.fontSize = `${Math.max(1, authored.fontSize)}px`;
                     element.style.color = authored.color;
                     element.style.textAlign = authored.alignment;
                     element.style.whiteSpace = 'nowrap';
+                    element.style.opacity = String(authored.interaction.alpha);
                 }
                 textLayer.append(element);
+                if (element.dataset.uiObjectId && !uiElementsByObjectId.has(element.dataset.uiObjectId)) {
+                    uiElementsByObjectId.set(element.dataset.uiObjectId, element);
+                }
             }
             element.textContent = text.text;
         }
@@ -383,14 +493,26 @@ import { collectPlayerSceneLoadActions, collectPlayerUiControls, collectPlayerUi
             }
         }
         if (!mountedControls.size && authoredUiControls.length) {
-            mountPlayerUiControls(document, controlsLayer, authoredUiControls, worker, sessionId);
+            const mountedByObjectId = mountPlayerUiControls(document, controlsLayer, authoredUiControls, worker, sessionId);
+            for (const [objectId, element] of mountedByObjectId) {
+                if (!uiElementsByObjectId.has(objectId)) uiElementsByObjectId.set(objectId, element);
+            }
             for (const control of authoredUiControls) mountedControls.add(control.id);
+        }
+        if (!mountedScrollRects.length && authoredScrollRects.length) {
+            mountedScrollRects = mountPlayerScrollRects(document, controlsLayer, authoredScrollRects, uiElementsByObjectId);
+        }
+        for (const element of root.querySelectorAll('[data-ui-active-path]')) {
+            let path = [];
+            try { path = JSON.parse(element.dataset.uiActivePath || '[]'); } catch {}
+            element.hidden = !isPlayerUiActive(path, state.transforms);
         }
         root.dataset.status = gameplay?.status || 'running';
         root.dataset.score = String(gameplay?.score ?? 0);
         root.dataset.lastUiEvent = state.lastUiEvent || '';
     };
     const sendTick = (mappedInput) => new Promise((resolve, reject) => {
+        pendingAnimationDelta += 0.02;
         const expectedFrame = ++frame;
         const listener = (event) => {
             if (event.data?.type === 'error') { worker.removeEventListener('message', listener); reject(new Error(event.data.error.message)); }
@@ -412,6 +534,8 @@ import { collectPlayerSceneLoadActions, collectPlayerUiControls, collectPlayerUi
     worker.onmessage = (event) => { if (event.data?.type === 'state') render(event.data); };
     window.addEventListener('keydown', (event) => { keys.add(event.code); event.preventDefault(); });
     window.addEventListener('keyup', (event) => { keys.delete(event.code); event.preventDefault(); });
+    window.addEventListener('mousedown', (event) => mouseButtons.add(event.button));
+    window.addEventListener('mouseup', (event) => mouseButtons.delete(event.button));
     window.addEventListener('mousemove', (event) => {
         if (document.pointerLockElement === root || event.buttons !== 0) {
             mouse.deltaX += Number.isFinite(event.movementX) ? event.movementX : 0;
@@ -424,21 +548,18 @@ import { collectPlayerSceneLoadActions, collectPlayerUiControls, collectPlayerUi
             result?.catch?.(() => {});
         }
     });
-    window.addEventListener('blur', () => keys.clear());
-    document.addEventListener('visibilitychange', () => { if (document.hidden) keys.clear(); });
+    const clearInput = () => { keys.clear(); mouseButtons.clear(); inputMapper.clear(); };
+    window.addEventListener('blur', clearInput);
+    document.addEventListener('visibilitychange', () => { if (document.hidden) clearInput(); });
     window.addEventListener('pagehide', () => {
         worker.terminate(); observer.disconnect(); view.dispose(); renderer.dispose();
+        for (const url of uiImageUrls) URL.revokeObjectURL(url);
         for (const audio of audioSources) {
-            if (audio?.stop) {
-                try { audio.stop(); } catch {}
-                audio.close?.();
-                continue;
-            }
-            if (audio instanceof HTMLAudioElement) {
-                audio.pause(); audio.removeAttribute('src'); audio.load();
-            }
+            try { audio.stop(); } catch {}
         }
         audioContext?.close();
+        for (const mixer of modelMixers) mixer.stopAllAction();
+        for (const emitter of particleEmitters) emitter.dispose();
     }, { once: true });
     root.focus();
 
@@ -472,6 +593,28 @@ import { collectPlayerSceneLoadActions, collectPlayerUiControls, collectPlayerUi
         }
         const renderedScene = view.meshCount > 0 && renderer.info.render.triangles > 0 && distinctPixels;
         const shadowPipeline = renderer.shadowMap.enabled === true && renderer.shadowMap.type === THREE.PCFSoftShadowMap;
+        const layoutFirst = hud.querySelector('[data-ui-object-id="object-layout-restart"]');
+        const layoutSecond = hud.querySelector('[data-ui-object-id="object-layout-secondary"]');
+        const firstRect = layoutFirst?.getBoundingClientRect();
+        const secondRect = layoutSecond?.getBoundingClientRect();
+        const authoredLayout = Boolean(firstRect && secondRect
+            && Math.abs(firstRect.width - 280) < 0.5
+            && Math.abs(firstRect.height - 30) < 0.5
+            && Math.abs(secondRect.top - firstRect.top - 35) < 0.5);
+        const scrollViewport = hud.querySelector('[data-ui-scroll-rect="object-scroll-viewport:UIScrollRect"]');
+        scrollViewport?.dispatchEvent(new WheelEvent('wheel', { deltaY: 50, bubbles: true, cancelable: true }));
+        const scrollItem = hud.querySelector('[data-ui-object-id="object-scroll-item"]');
+        const scrollInput = hud.querySelector('[data-ui-object-id="object-scrollbar"] input');
+        const authoredScrollRect = Boolean(scrollViewport && scrollItem && scrollInput
+            && Number(scrollViewport.dataset.verticalNormalizedPosition) < 1
+            && scrollItem.style.translate === '0px -50px'
+            && Math.abs(Number(scrollInput.value) - 0.75) < 0.0001);
+        const filledImage = hud.querySelector('[data-ui-object-id="object-filled-image"]');
+        const authoredFilledImage = Boolean(filledImage
+            && filledImage.style.clipPath.startsWith('inset(')
+            && filledImage.style.clipPath.includes('60%')
+            && filledImage.style.backgroundSize === 'contain'
+            && filledImage.style.pointerEvents === 'none');
         const authoredButton = hud.querySelector('[data-ui-event="Restart"]');
         let authoredUiEvent = false;
         if (authoredButton) {
@@ -510,26 +653,62 @@ import { collectPlayerSceneLoadActions, collectPlayerUiControls, collectPlayerUi
         const looked = mappedLook.LookX === 12 && mappedLook.LookY === -4 && lookEndY < lookStartY;
         // Exercise the same browser event and mapping path used by the live player loop.
         window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', code: 'ArrowRight', bubbles: true }));
-        const configuredInput = input().Horizontal === 1;
+        const configuredInput = input().Horizontal > 0;
         let observedTrigger = false;
         for (let index = 0; index < 110; index += 1) {
             await sendTick(input());
             observedTrigger ||= lastState?.gameplay?.status !== 'playing';
         }
         window.dispatchEvent(new KeyboardEvent('keyup', { key: 'ArrowRight', code: 'ArrowRight', bubbles: true }));
+        const authoredModel = authoredModels.length === 0 || (
+            modelErrors.length === 0
+            && loadedModelCount === authoredModels.length
+            && loadedModelMeshCount > 0
+            && (!authoredModels.some((entry) => entry.animation?.playOnAwake)
+                || modelMixers.some((mixer) => mixer.time > 0))
+        );
+        const authoredModelHierarchy = modelBindings.every(({ object, authoredNode }) => {
+            const scale = authoredNode.transform?.scale;
+            return !Array.isArray(scale) || scale.length < 3
+                || (Math.abs(object.scale.x - scale[0]) < 0.0001
+                    && Math.abs(object.scale.y - scale[1]) < 0.0001
+                    && Math.abs(object.scale.z - scale[2]) < 0.0001);
+        });
+        const liveParticleCount = particleEmitters.reduce((total, emitter) => total + emitter.simulation.particles.length, 0);
+        const authoredParticleSystem = authoredParticles.length === 0
+            || (particleEmitters.length === authoredParticles.length && liveParticleCount > 0);
         await window.tugberkPlayer.smokeComplete({
-            ok: renderedScene && shadowPipeline && authoredMaterial && authoredUiEvent && configuredInput && configuredJump && jumped && looked && grounded && lastState?.gameplay?.player?.position?.[0] > startX && observedTrigger,
+            ok: renderedScene && shadowPipeline && authoredMaterial && authoredUiEvent && authoredLayout && authoredScrollRect && authoredFilledImage && authoredModel && authoredModelHierarchy && authoredParticleSystem && configuredInput && configuredJump && jumped && looked && grounded && lastState?.gameplay?.player?.position?.[0] > startX && observedTrigger,
             sceneId: scene.sceneId,
             objectCount: scene.gameObjects.length,
+            modelCount: loadedModelCount,
+            modelMeshCount: loadedModelMeshCount,
+            modelErrors,
+            animatedModelCount: modelMixers.filter((mixer) => mixer.time > 0).length,
+            modelBindingCount: modelBindings.length,
+            scrollRectState: {
+                normalized: scrollViewport?.dataset.verticalNormalizedPosition || null,
+                translate: scrollItem?.style.translate || null,
+                scrollbarValue: scrollInput?.value || null,
+                scrollbarBound: scrollViewport?.dataset.verticalScrollbarBound || null
+            },
+            filledImageState: filledImage ? {
+                clipPath: filledImage.style.clipPath,
+                backgroundSize: filledImage.style.backgroundSize,
+                pointerEvents: filledImage.style.pointerEvents
+            } : null,
+            particleSystemCount: particleEmitters.length,
+            liveParticleCount,
             gameplay: lastState.gameplay,
-            checks: { renderedScene, shadowPipeline, authoredMaterial, authoredUiEvent, configuredInput, configuredJump, movement: lastState.gameplay.player.position[0] > startX, jump: jumped, look: looked, collision: grounded, trigger: observedTrigger, ui: root.dataset.status === lastState.gameplay.status }
+            checks: { renderedScene, shadowPipeline, authoredMaterial, authoredUiEvent, authoredLayout, authoredScrollRect, authoredFilledImage, authoredModel, authoredModelHierarchy, authoredParticleSystem, configuredInput, configuredJump, movement: lastState.gameplay.player.position[0] > startX, jump: jumped, look: looked, collision: grounded, trigger: observedTrigger, ui: root.dataset.status === lastState.gameplay.status }
         });
         return;
     }
     let previous = performance.now();
     const loop = (now) => {
         const deltaTime = Math.min(0.1, Math.max(0, (now - previous) / 1000)); previous = now;
-        const mappedInput = input();
+        pendingAnimationDelta += deltaTime;
+        const mappedInput = input(deltaTime);
         mouse.deltaX = 0;
         mouse.deltaY = 0;
         worker.postMessage({ protocolVersion: 1, sessionId, command: 'tick', payload: { deltaTime, input: mappedInput } });

@@ -2,6 +2,7 @@
 
 const { createHash } = require('node:crypto');
 const { validateRuntimeSnapshot } = require('./snapshot-validator');
+const { createBehaviourRuntime } = require('./behaviour-script');
 
 const PROTOCOL_VERSION = 1;
 let sessionId = '';
@@ -26,14 +27,36 @@ function vector3(value, fallback) {
     return [finiteNumber(value[0], fallback[0]), finiteNumber(value[1], fallback[1]), finiteNumber(value[2], fallback[2])];
 }
 
+function capsuleAxis(data) {
+    const direction = data?.direction;
+    if (direction === 'X' || direction === 0) return 0;
+    if (direction === 'Z' || direction === 2) return 2;
+    return 1;
+}
+
+function capsuleSize(data, scale) {
+    const axis = capsuleAxis(data);
+    const perpendicular = [0, 1, 2].filter((index) => index !== axis);
+    const radius = Math.max(0.05, finiteNumber(data?.radius, 0.5)
+        * Math.max(scale[perpendicular[0]], scale[perpendicular[1]]));
+    const height = Math.max(radius * 2, finiteNumber(data?.height, 2) * scale[axis]);
+    const size = [radius * 2, radius * 2, radius * 2];
+    size[axis] = height;
+    return { axis, radius, height, size };
+}
+
 function createRuntimeObject(source, parentActive = true) {
     const transform = source.transform && typeof source.transform === 'object' ? source.transform : {};
-    const active = parentActive && source.enabled !== false;
+    const selfActive = source.enabled !== false;
+    const active = parentActive && selfActive;
     const runtimeObject = {
         id: typeof source.id === 'string' ? source.id : '',
+        name: typeof source.name === 'string' ? source.name : '',
         tag: typeof source.tag === 'string' ? source.tag : '',
         layer: Number.isInteger(source.layer) && source.layer >= 0 && source.layer < 32 ? source.layer : 0,
+        selfActive,
         active,
+        destroyed: false,
         transform: {
             position: vector3(transform.position, [0, 0, 0]),
             rotation: vector3(transform.rotation, [0, 0, 0]),
@@ -52,6 +75,7 @@ function createRuntimeObject(source, parentActive = true) {
         runtimeObject.controllerState = {
             velocity: [0, 0, 0], grounded: false, jumpWasHeld: false,
             yaw: finiteNumber(runtimeObject.transform.rotation[1], 0),
+            pitch: 0,
             spawn: [...runtimeObject.transform.position]
         };
     }
@@ -59,6 +83,13 @@ function createRuntimeObject(source, parentActive = true) {
         ? source.children.map((child) => createRuntimeObject(child, active))
         : [];
     return runtimeObject;
+}
+
+function refreshRuntimeActiveState(objects, parentActive = true) {
+    for (const object of objects || []) {
+        object.active = parentActive && object.selfActive && object.destroyed !== true;
+        refreshRuntimeActiveState(object.children, object.active);
+    }
 }
 
 function flattenRuntimeObjects(objects, target = []) {
@@ -78,18 +109,23 @@ function createWorld(root) {
     const ui = uiObject ? componentOf(uiObject, 'GameplayUI') : null;
     const cameraObject = objects.find((object) => componentOf(object, 'GameplayCamera')) || null;
     const cameraComponent = cameraObject ? componentOf(cameraObject, 'GameplayCamera') : null;
-    const triggers = objects.filter((object) => object.active && worldCollider(object)?.data?.isTrigger === true)
+    const triggers = objects.filter((object) => worldCollider(object)?.data?.isTrigger === true)
         .map((object) => ({ object, active: true, kind: object.tag === 'Finish' ? 'finish' : object.tag === 'Lose' ? 'lose' : object.tag === 'Collect' ? 'collect' : 'trigger' }));
     const authoredMatrix = root.layerCollisionMatrix || root.projectSettings?.collisionMatrix;
     const collisionMatrix = Array.from({ length: 32 }, (_, index) => {
         const value = Array.isArray(authoredMatrix) ? Number(authoredMatrix[index]) : NaN;
         return Number.isFinite(value) ? value >>> 0 : 0xFFFFFFFF;
     });
-    return {
-        roots, objects, updateCount: 0, fixedUpdateCount: 0, player, triggers, cameraObject, collisionMatrix,
+    const world = {
+        roots, objects, updateCount: 0, fixedUpdateCount: 0, player, triggers, cameraObject, collisionMatrix, contactPairs: new Map(),
         camera: cameraComponent ? { mode: cameraComponent.data?.mode === 'fixed' ? 'fixed' : 'follow', offset: vector3(cameraComponent.data?.offset, [0, 6, 8]), position: [...cameraObject.transform.position] } : null,
         gameplay: player ? { status: 'playing', collectedCount: 0, respawnCount: 0, requiredCollectibles: Math.max(0, Math.floor(finiteNumber(controller?.data?.requiredCollectibles, 0))), scorePerCollectible: Math.max(0, finiteNumber(ui?.data?.scorePerCollectible, 100)) } : null
     };
+    world.behaviourScripts = createBehaviourRuntime(objects, {
+        refreshActiveState: () => refreshRuntimeActiveState(roots)
+    });
+    world.behaviourScripts.start();
+    return world;
 }
 
 function layersCollide(world, left, right) {
@@ -104,6 +140,7 @@ function componentDataNumber(component, key, fallback) {
 
 function applyUiEventActions(world, name, value) {
     for (const object of world?.objects || []) {
+        if (!object.active) continue;
         for (const component of object.components) {
             if (!component.enabled || component.type !== 'UIEventAction' || component.data?.eventName !== name) continue;
             if (component.data?.action === 'LoadScene') continue;
@@ -143,11 +180,12 @@ function applyUiEventActions(world, name, value) {
                 continue;
             }
             const action = component.data?.action === 'ToggleActive'
-                ? !target.active
+                ? !target.selfActive
                 : component.data?.active !== false;
-            target.active = action;
+            target.selfActive = action;
         }
     }
+    refreshRuntimeActiveState(world.roots);
 }
 
 function componentOf(runtimeObject, type) {
@@ -179,14 +217,11 @@ function boundsFor(object, position) {
         const max = position.map((value, index) => value + center[index] + size[index] / 2);
         return { min, max, halfHeight: size[1] / 2 };
     }
-    const radius = Math.max(0.05, (finiteNumber(collider?.data?.radius, 0.45)) * Math.max(scale[0], scale[2]));
-    // Capsule height is authored in world units in the scene contract; the
-    // horizontal radius still follows the object's X/Z scale.
-    const height = Math.max(radius * 2, finiteNumber(collider?.data?.height, 1.8));
+    const { radius, height, size } = capsuleSize(collider?.data, scale);
     const center = vector3(collider?.data?.center, [0, 0, 0]);
     return {
-        min: [position[0] + center[0] - radius, position[1] + center[1] - height / 2, position[2] + center[2] - radius],
-        max: [position[0] + center[0] + radius, position[1] + center[1] + height / 2, position[2] + center[2] + radius],
+        min: position.map((value, index) => value + center[index] - size[index] / 2),
+        max: position.map((value, index) => value + center[index] + size[index] / 2),
         radius,
         halfHeight: height / 2
     };
@@ -203,20 +238,11 @@ function boxBounds(object) {
     }
     if (!collider && !sphere && capsule) {
         const scale = object.transform.scale.map((value) => Math.abs(value));
-        const radius = Math.max(0.05, finiteNumber(capsule.data?.radius, 0.5) * Math.max(scale[0], scale[2]));
-        const height = Math.max(radius * 2, finiteNumber(capsule.data?.height, 2));
+        const { size } = capsuleSize(capsule.data, scale);
         const center = vector3(capsule.data?.center, [0, 0, 0]);
         return {
-            min: [
-                object.transform.position[0] + center[0] - radius,
-                object.transform.position[1] + center[1] - height / 2,
-                object.transform.position[2] + center[2] - radius
-            ],
-            max: [
-                object.transform.position[0] + center[0] + radius,
-                object.transform.position[1] + center[1] + height / 2,
-                object.transform.position[2] + center[2] + radius
-            ]
+            min: object.transform.position.map((value, index) => value + center[index] - size[index] / 2),
+            max: object.transform.position.map((value, index) => value + center[index] + size[index] / 2)
         };
     }
     if (!collider) return null;
@@ -227,6 +253,43 @@ function boxBounds(object) {
 
 function overlapsBounds(a, b) {
     return a.min[0] <= b.max[0] && a.max[0] >= b.min[0] && a.min[1] <= b.max[1] && a.max[1] >= b.min[1] && a.min[2] <= b.max[2] && a.max[2] >= b.min[2];
+}
+
+function processBehaviourContacts(world, input) {
+    const current = new Map();
+    const dispatch = (pair, suffix) => {
+        const prefix = pair.isTrigger ? 'trigger' : 'collision';
+        world.behaviourScripts.eventForObject(pair.left.id, `${prefix}${suffix}`, {
+            otherId: pair.right.id, otherName: pair.right.name, otherTag: pair.right.tag, isTrigger: pair.isTrigger
+        }, input);
+        world.behaviourScripts.eventForObject(pair.right.id, `${prefix}${suffix}`, {
+            otherId: pair.left.id, otherName: pair.left.name, otherTag: pair.left.tag, isTrigger: pair.isTrigger
+        }, input);
+    };
+    for (let leftIndex = 0; leftIndex < world.objects.length; leftIndex += 1) {
+        const left = world.objects[leftIndex];
+        const leftCollider = left.active ? worldCollider(left) : null;
+        if (!leftCollider) continue;
+        for (let rightIndex = leftIndex + 1; rightIndex < world.objects.length; rightIndex += 1) {
+            const right = world.objects[rightIndex];
+            const rightCollider = right.active ? worldCollider(right) : null;
+            if (!rightCollider || !layersCollide(world, left, right)) continue;
+            const leftBounds = boundsFor(left, left.transform.position);
+            const rightBounds = boundsFor(right, right.transform.position);
+            if (!leftBounds || !rightBounds || !overlapsBounds(leftBounds, rightBounds)) continue;
+            const key = `${left.id}\u0000${right.id}`;
+            const pair = {
+                left, right,
+                isTrigger: leftCollider.data?.isTrigger === true || rightCollider.data?.isTrigger === true
+            };
+            current.set(key, pair);
+            dispatch(pair, world.contactPairs.has(key) ? 'Stay' : 'Enter');
+        }
+    }
+    for (const [key, pair] of world.contactPairs) {
+        if (!current.has(key)) dispatch(pair, 'Exit');
+    }
+    world.contactPairs = current;
 }
 
 function updateGameplay(world) {
@@ -251,17 +314,34 @@ function updateCamera(world) {
     if (!world.camera || !world.cameraObject || !world.player) return;
     if (world.camera.mode === 'follow') {
         const yaw = finiteNumber(world.player.transform.rotation?.[1], 0);
+        const pitch = finiteNumber(world.player.controllerState?.pitch, 0);
         const sin = Math.sin(yaw);
         const cos = Math.cos(yaw);
         const offset = world.camera.offset;
-        const rotatedOffset = [
+        const yawOffset = [
             offset[0] * cos + offset[2] * sin,
             offset[1],
             offset[0] * sin - offset[2] * cos
         ];
+        const pitchSin = Math.sin(pitch);
+        const pitchCos = Math.cos(pitch);
+        const rotatedOffset = [yawOffset[0], yawOffset[1] * pitchCos - yawOffset[2] * pitchSin, yawOffset[1] * pitchSin + yawOffset[2] * pitchCos];
         world.cameraObject.transform.position = world.player.transform.position.map((value, index) => value + rotatedOffset[index]);
     }
     world.camera.position = [...world.cameraObject.transform.position];
+}
+
+function applyPlayerLook(object, input) {
+    const controller = componentOf(object, 'PlayerController');
+    if (!controller || !object.controllerState) return;
+    const stateData = object.controllerState;
+    const controllerData = controller.data || {};
+    const sensitivity = Math.max(0, finiteNumber(controllerData.lookSensitivity, 0.002));
+    stateData.yaw -= finiteNumber(input?.LookX, 0) * sensitivity;
+    const maxPitch = Math.max(0, Math.min(Math.PI / 2, finiteNumber(controllerData.maxLookPitch, 85) * Math.PI / 180));
+    stateData.pitch = Math.max(-maxPitch, Math.min(maxPitch,
+        stateData.pitch - finiteNumber(input?.LookY, 0) * sensitivity));
+    object.transform.rotation[1] = stateData.yaw;
 }
 
 function runPlayerController(object, fixedDeltaTime, input, world) {
@@ -271,10 +351,6 @@ function runPlayerController(object, fixedDeltaTime, input, world) {
     const vertical = Math.max(-1, Math.min(1, finiteNumber(input?.Vertical, 0)));
     const controllerData = controller.data || {};
     const speed = Math.max(0, finiteNumber(controllerData.moveSpeed ?? controllerData.speed, 5));
-    const lookX = finiteNumber(input?.LookX, 0);
-    const lookSensitivity = Math.max(0, finiteNumber(controllerData.lookSensitivity, 0.002));
-    stateData.yaw -= lookX * lookSensitivity;
-    object.transform.rotation[1] = stateData.yaw;
     const sin = Math.sin(stateData.yaw);
     const cos = Math.cos(stateData.yaw);
     stateData.velocity[0] = (horizontal * cos + vertical * sin) * speed;
@@ -395,6 +471,16 @@ function runFixedUpdate(runtimeObject, fixedDeltaTime, input, world) {
         const drag = Math.max(0, finiteNumber(component.data?.drag, 0));
         const damping = Math.max(0, 1 - drag * fixedDeltaTime);
         component.data.velocity = velocity.map((value) => value * damping);
+        const angularVelocity = vector3(component.data?.angularVelocity, [0, 0, 0]);
+        const rotation = vector3(runtimeObject.transform.rotation, [0, 0, 0]);
+        for (let axis = 0; axis < 3; axis += 1) {
+            if (component.data?.[`freezeRotation${'XYZ'[axis]}`] === true) angularVelocity[axis] = 0;
+            else rotation[axis] += angularVelocity[axis] * fixedDeltaTime;
+        }
+        runtimeObject.transform.rotation = rotation;
+        const angularDrag = Math.max(0, finiteNumber(component.data?.angularDrag, 0.05));
+        const angularDamping = Math.max(0, 1 - angularDrag * fixedDeltaTime);
+        component.data.angularVelocity = angularVelocity.map((value) => value * angularDamping);
     }
 }
 
@@ -413,7 +499,11 @@ function runtimeFrame() {
             scale: object.transform.scale
         })) : [],
         lastUiEvent,
-        lastUiEventPayload
+        lastUiEventPayload,
+        behaviourScripts: world ? {
+            instanceCount: world.behaviourScripts.instanceCount,
+            diagnostics: world.behaviourScripts.diagnostics()
+        } : { instanceCount: 0, diagnostics: [] }
     };
     result.uiText = world ? world.objects.flatMap((object) => object.components
         .filter((component) => component.type === 'UIText' || component.type === 'UIInputField')
@@ -436,14 +526,18 @@ function advance(deltaTime, input = {}) {
     frame += 1;
     timeMicros += deltaMicros;
     fixedAccumulatorMicros += deltaMicros;
+    for (const object of world.objects) applyPlayerLook(object, input);
     let fixedSteps = 0;
     while (fixedAccumulatorMicros >= FIXED_DELTA_MICROS && fixedSteps < MAX_FIXED_STEPS_PER_FRAME) {
+        world.behaviourScripts.fixedUpdate(FIXED_DELTA_MICROS / 1_000_000, input);
         for (const object of world.objects) runFixedUpdate(object, FIXED_DELTA_MICROS / 1_000_000, input, world);
+        processBehaviourContacts(world, input);
         world.fixedUpdateCount += 1;
         fixedAccumulatorMicros -= FIXED_DELTA_MICROS;
         fixedSteps += 1;
     }
     if (fixedSteps === MAX_FIXED_STEPS_PER_FRAME) fixedAccumulatorMicros = 0;
+    world.behaviourScripts.update(deltaTime, input);
     for (const object of world.objects) runUpdate(object, deltaTime);
     updateCamera(world);
     world.updateCount += 1;
@@ -493,6 +587,7 @@ process.on('message', (message) => {
         lastUiEvent = payload.name;
         lastUiEventPayload = payload.value === undefined ? null : payload.value;
         applyUiEventActions(world, payload.name, payload.value);
+        world.behaviourScripts.event(payload.name, payload.value);
         if (payload.name.toLowerCase() === 'restart' && snapshot) {
             world = createWorld(snapshot);
             fixedAccumulatorMicros = 0;

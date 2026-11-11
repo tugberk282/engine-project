@@ -7,5 +7,6 @@ contextBridge.exposeInMainWorld('tugberkPlayer', Object.freeze({
     readJsonAsset: (relativePath) => ipcRenderer.invoke('player:read-json-asset', relativePath),
     readAudioAsset: (relativePath) => ipcRenderer.invoke('player:read-audio-asset', relativePath),
     readImageAsset: (relativePath) => ipcRenderer.invoke('player:read-image-asset', relativePath),
+    readModelAsset: (relativePath) => ipcRenderer.invoke('player:read-model-asset', relativePath),
     smokeComplete: (result) => ipcRenderer.invoke('player:smoke-complete', result)
 }));

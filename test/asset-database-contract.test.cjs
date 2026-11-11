@@ -45,3 +45,10 @@ test('minimal texture importer consumes deterministic metadata settings', () => 
   assert.match(importerSource, /texture\.minFilter\s*=/);
   assert.match(importerSource, /texture\.userData\.importSettings\s*=/);
 });
+
+test('reusable BehaviourScript JSON assets are classified as scripts before generic JSON scenes', () => {
+  const behaviourCheck = databaseSource.indexOf("endsWith('.behaviour.json')");
+  const genericJsonCheck = databaseSource.indexOf("ext === '.scene' || ext === '.json'");
+  assert.ok(behaviourCheck >= 0);
+  assert.ok(genericJsonCheck > behaviourCheck);
+});

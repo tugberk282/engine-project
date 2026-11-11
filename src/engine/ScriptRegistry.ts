@@ -49,6 +49,7 @@ export class ScriptRegistry {
         'HorizontalLayoutGroup': 'UI',
         'ContentSizeFitter': 'UI',
         'UIEventAction': 'Utility',
+        'BehaviourScript': 'Scripting',
 
         // Audio
         'AudioSource': 'Audio',

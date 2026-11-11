@@ -126,23 +126,33 @@ export class Input {
 
     public static configureProjectAxes(axes: Iterable<[string, { positiveButton: string; negativeButton: string; altPositiveButton?: string; altNegativeButton?: string; sensitivity: number; gravity: number }]>): void {
         const bindings: Record<string, InputAxisBinding> = {};
+        const actionBindings: Record<string, string[]> = {};
         for (const [name, axis] of axes) {
+            const positive = this.normalizeKeyCode(axis.positiveButton);
+            const negative = this.normalizeKeyCode(axis.negativeButton);
+            const positiveAlt = this.normalizeKeyCode(axis.altPositiveButton ?? '');
+            const negativeAlt = this.normalizeKeyCode(axis.altNegativeButton ?? '');
             bindings[name] = {
-                positive: this.normalizeKeyCode(axis.positiveButton),
-                negative: this.normalizeKeyCode(axis.negativeButton),
-                positiveAlt: this.normalizeKeyCode(axis.altPositiveButton ?? ''),
-                negativeAlt: this.normalizeKeyCode(axis.altNegativeButton ?? ''),
+                positive,
+                negative,
+                positiveAlt,
+                negativeAlt,
                 sensitivity: Number.isFinite(axis.sensitivity) ? Math.max(0, axis.sensitivity) : 3,
                 gravity: Number.isFinite(axis.gravity) ? Math.max(0, axis.gravity) : 3
             };
+            if (!negative && !negativeAlt) actionBindings[name] = [positive, positiveAlt].filter(Boolean);
         }
-        this.configure({ axes: bindings });
+        this.configure({ axes: bindings, actions: { ...this.actions, ...actionBindings } });
     }
 
     public static snapshot(): Record<string, number | boolean> {
         const frame: Record<string, number | boolean> = {};
         for (const name of Object.keys(this.axes)) frame[name] = this.GetAxis(name);
-        for (const name of Object.keys(this.actions)) frame[name] = this.getButton(name);
+        for (const name of Object.keys(this.actions)) {
+            frame[name] = this.getButton(name);
+            frame[`__buttonDown:${name}`] = this.getButtonDown(name);
+            frame[`__buttonUp:${name}`] = this.getButtonUp(name);
+        }
         frame.LookX = this.mouseDelta.x;
         frame.LookY = this.mouseDelta.y;
         return frame;
@@ -193,10 +203,14 @@ export class Input {
     public static resetDelta() { this.lateUpdate(); }
 
     private static normalizeKeyCode(value: string): string {
+        if (value === ' ') return 'Space';
         const raw = value.trim();
         if (!raw) return '';
-        if (raw === ' ') return 'Space';
-        if (/^(Key|Arrow|Numpad|Mouse|Gamepad)/.test(raw)) return raw;
+        const mouse = /^mouse(\d+)$/i.exec(raw);
+        if (mouse) return `Mouse${mouse[1]}`;
+        const gamepad = /^gamepad(\d+)$/i.exec(raw);
+        if (gamepad) return `Gamepad${gamepad[1]}`;
+        if (/^(Key|Arrow|Numpad)/.test(raw)) return raw;
         if (/^[a-z]$/i.test(raw)) return `Key${raw.toUpperCase()}`;
         return raw;
     }

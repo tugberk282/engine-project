@@ -32,42 +32,82 @@ export class AssetImporter {
             await AssetImporter.assertAssetWithinLimit(normalizedPath, AssetImporter.MAX_MODEL_SOURCE_BYTES, 'Model');
         } catch (error) {
             onError?.(error);
-            return;
+            throw error;
         }
         const url = AssetImporter.getVersionedAssetUrl(normalizedPath);
 
-        loader.load(url, (gltf) => {
-            const modelName = normalizedPath.split(/[\/\\]/).pop()?.replace(/\.(gltf|glb)$/i, '') || 'Model';
-            const rootGO = new GameObject(modelName);
-            rootGO.sourceAssetPath = normalizedPath;
-            rootGO.sourceAssetGuid = AssetDatabase.getInstance().getGuid(normalizedPath) ?? null;
-            rootGO.sourceAssetType = 'model';
-            const scaleFactor = typeof settings.scaleFactor === 'number' && Number.isFinite(settings.scaleFactor)
-                ? settings.scaleFactor
-                : 1;
+        await new Promise<void>((resolve, reject) => {
+            loader.load(url, (gltf) => {
+                try {
+                    const modelName = normalizedPath.split(/[\/\\]/).pop()?.replace(/\.(gltf|glb)$/i, '') || 'Model';
+                    const rootGO = new GameObject(modelName);
+                    rootGO.sourceAssetPath = normalizedPath;
+                    rootGO.sourceAssetGuid = AssetDatabase.getInstance().getGuid(normalizedPath) ?? null;
+                    rootGO.sourceAssetType = 'model';
+                    const scaleFactor = typeof settings.scaleFactor === 'number' && Number.isFinite(settings.scaleFactor)
+                        ? settings.scaleFactor
+                        : 1;
 
-            rootGO.transform.scale.multiplyScalar(scaleFactor);
+                    rootGO.transform.scale.multiplyScalar(scaleFactor);
+                    AssetImporter.processNode(gltf.scene, rootGO, settings);
 
-            // Process the loaded scene
-            AssetImporter.processNode(gltf.scene, rootGO, settings);
+                    if (settings.importAnimations !== false && gltf.animations && gltf.animations.length > 0) {
+                        const animator = rootGO.addComponent(Animator);
+                        gltf.animations.forEach(clip => animator.addAnimation(clip.name || 'default', clip));
+                        animator.modelPath = normalizedPath;
+                        animator.modelGuid = AssetDatabase.getInstance().getGuid(normalizedPath) ?? null;
+                        console.log(`Loaded ${gltf.animations.length} animation(s) from ${modelName}`);
+                    }
 
-            // Handle animations
-            if (settings.importAnimations !== false && gltf.animations && gltf.animations.length > 0) {
-                const animator = rootGO.addComponent(Animator);
-                gltf.animations.forEach(clip => {
-                    animator.addAnimation(clip.name || 'default', clip);
-                });
-                animator.modelPath = normalizedPath;
-                animator.modelGuid = AssetDatabase.getInstance().getGuid(normalizedPath) ?? null;
-                console.log(`Loaded ${gltf.animations.length} animation(s) from ${modelName}`);
-            }
-
-            console.log(`Model imported: ${modelName} (${AssetImporter.countMeshes(gltf.scene)} meshes)`);
-            onComplete(rootGO);
-        }, undefined, (error) => {
-            console.error(`Failed to import model: ${normalizedPath}`, error);
-            onError?.(error);
+                    console.log(`Model imported: ${modelName} (${AssetImporter.countMeshes(gltf.scene)} meshes)`);
+                    onComplete(rootGO);
+                    resolve();
+                } catch (error) {
+                    onError?.(error);
+                    reject(error);
+                }
+            }, undefined, (error) => {
+                console.error(`Failed to import model: ${normalizedPath}`, error);
+                onError?.(error);
+                reject(error);
+            });
         });
+    }
+
+    public static rehydrateModelInstance(targetRoot: GameObject, importedRoot: GameObject): number {
+        let hydratedMeshes = 0;
+        const pairChildren = (target: GameObject, source: GameObject) => {
+            const targetChildren = target.transform.children.map((entry) => entry.gameObject);
+            const sourceChildren = source.transform.children.map((entry) => entry.gameObject);
+            const used = new Set<GameObject>();
+            targetChildren.forEach((targetChild, index) => {
+                const sourceChild = sourceChildren.find((candidate) => !used.has(candidate) && candidate.name === targetChild.name)
+                    ?? sourceChildren[index]
+                    ?? null;
+                if (!sourceChild) return;
+                used.add(sourceChild);
+
+                const targetRenderer = targetChild.getComponent(MeshRenderer);
+                const sourceRenderer = sourceChild.getComponent(MeshRenderer);
+                if (targetRenderer && sourceRenderer && sourceRenderer.mesh.geometry) {
+                    const authoredColor = targetRenderer.color;
+                    targetRenderer.mesh.geometry.dispose();
+                    targetRenderer.mesh.geometry = sourceRenderer.mesh.geometry.clone();
+                    if (!targetRenderer.materialPath) {
+                        targetRenderer.mesh.material = Array.isArray(sourceRenderer.mesh.material)
+                            ? sourceRenderer.mesh.material.map((material) => material.clone())
+                            : sourceRenderer.mesh.material.clone();
+                        targetRenderer.color = authoredColor;
+                    }
+                    targetRenderer.castShadow = sourceRenderer.castShadow;
+                    targetRenderer.receiveShadow = sourceRenderer.receiveShadow;
+                    hydratedMeshes += 1;
+                }
+                pairChildren(targetChild, sourceChild);
+            });
+        };
+        pairChildren(targetRoot, importedRoot);
+        return hydratedMeshes;
     }
 
     /**

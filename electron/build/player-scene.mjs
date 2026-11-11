@@ -13,6 +13,7 @@ export function createPlayerScene(THREE, document) {
             );
     }
     const objects = new Map();
+    const externalObjects = new Map();
     const cameras = [];
     let player = null;
     let meshCount = 0;
@@ -201,6 +202,13 @@ export function createPlayerScene(THREE, document) {
             object.position.fromArray(transform.position);
             object.rotation.fromArray(transform.rotation);
             object.scale.fromArray(transform.scale);
+            const external = externalObjects.get(transform.id);
+            if (external) {
+                if (typeof transform.active === 'boolean') external.visible = transform.active;
+                external.position.fromArray(transform.position);
+                external.rotation.fromArray(transform.rotation);
+                external.scale.fromArray(transform.scale);
+            }
         }
         if (player && state.gameplay?.player) player.position.fromArray(state.gameplay.player.position);
         const view = state.gameplay?.camera;
@@ -216,5 +224,8 @@ export function createPlayerScene(THREE, document) {
         object.geometry?.dispose();
         if (object.material) object.material.dispose();
     });
-    return { scene, camera, renderPasses, environmentBackground, objects, meshCount, resize, viewportPixels, update, dispose };
+    const bindExternalObject = (objectId, object) => {
+        if (typeof objectId === 'string' && object) externalObjects.set(objectId, object);
+    };
+    return { scene, camera, renderPasses, environmentBackground, objects, meshCount, resize, viewportPixels, update, bindExternalObject, dispose };
 }

@@ -27,6 +27,10 @@ export class PlayModeManager {
     private runtimeSceneSnapshot: string | null = null;
     private runtimeScenePath: string | null = null;
     private sceneTransitionInFlight = false;
+    private enteringPlayMode = false;
+    private snapshotPreparer: ((snapshot: string) => Promise<string>) | null = null;
+    private readonly reportedScriptDiagnostics = new Set<string>();
+    private scriptReloadInFlight = false;
 
     private sceneSnapshot: any = null;
     private editorState: any = null;
@@ -87,6 +91,7 @@ export class PlayModeManager {
             this.time = 0;
             this.deltaTime = 0;
             this.runtimeError = null;
+            this.reportedScriptDiagnostics.clear();
             editor.onRuntimeSceneChanged?.(prepared.path);
             this.runtime.restart(prepared.snapshot);
             console.log(`[PlayMode] Loaded runtime scene: ${prepared.path}`);
@@ -117,8 +122,9 @@ export class PlayModeManager {
      * Enter Play Mode
      * Saves editor state and starts execution
      */
-    public enterPlayMode(): void {
-        if (this.mode === 'play') return;
+    public async enterPlayMode(): Promise<boolean> {
+        if (this.mode === 'play' || this.enteringPlayMode) return false;
+        this.enteringPlayMode = true;
 
         // Save editor state
         this.saveEditorState();
@@ -127,7 +133,21 @@ export class PlayModeManager {
         const scene = SceneManager.getInstance().getActiveScene();
         if (scene) {
             this.sceneSnapshot = this.snapshotScene(scene);
-            this.runtimeSceneSnapshot = this.sceneSnapshot;
+            try {
+                this.runtimeSceneSnapshot = this.snapshotPreparer
+                    ? await this.snapshotPreparer(this.sceneSnapshot)
+                    : this.sceneSnapshot;
+            } catch (cause) {
+                this.runtimeError = {
+                    code: typeof (cause as any)?.code === 'string' ? (cause as any).code : 'RUNTIME_SNAPSHOT_PREPARE_FAILED',
+                    message: typeof (cause as any)?.message === 'string' ? (cause as any).message : 'Play Mode snapshot preparation failed.'
+                };
+                this.sceneSnapshot = null;
+                this.runtimeSceneSnapshot = null;
+                this.enteringPlayMode = false;
+                console.error(`[PlayMode] ${this.runtimeError.code}: ${this.runtimeError.message}`);
+                return false;
+            }
             this.runtimeScenePath = SceneManager.getInstance().getActiveScenePath();
         }
 
@@ -139,14 +159,21 @@ export class PlayModeManager {
         this.lastFrameTime = performance.now() / 1000;
 
         this.runtimeError = null;
+        this.reportedScriptDiagnostics.clear();
         this.lastRuntimeUiEvent = null;
         this.sceneTransitionInFlight = false;
-        if (this.sceneSnapshot) this.runtime.start(this.sceneSnapshot);
+        if (this.runtimeSceneSnapshot) this.runtime.start(this.runtimeSceneSnapshot);
 
         // Trigger callbacks
         this.onPlayCallbacks.forEach(cb => cb());
 
         console.log('[PlayMode] Entered Play Mode');
+        this.enteringPlayMode = false;
+        return true;
+    }
+
+    public setSnapshotPreparer(preparer: ((snapshot: string) => Promise<string>) | null): void {
+        this.snapshotPreparer = preparer;
     }
 
     /**
@@ -158,6 +185,7 @@ export class PlayModeManager {
 
         this.runtime.stop();
         this.lastRuntimeUiEvent = null;
+        this.reportedScriptDiagnostics.clear();
 
         // Restore scene from snapshot
         if (this.sceneSnapshot) {
@@ -330,16 +358,45 @@ export class PlayModeManager {
     }
 
     public restartPlayMode(): void {
-        if (this.mode === 'edit' || !this.runtimeSceneSnapshot) return;
-        this.frame = 0;
-        this.time = 0;
-        this.deltaTime = 0;
-        this.isPaused = false;
-        this.runtimeError = null;
-        const scene = SceneManager.getInstance().getActiveScene();
-        if (scene) scene.loadFromJSON(this.runtimeSceneSnapshot);
-        this.lastRuntimeUiEvent = null;
-        this.runtime.restart(this.runtimeSceneSnapshot);
+        void this.reloadBehaviourScripts();
+    }
+
+    public async reloadBehaviourScripts(): Promise<boolean> {
+        if (this.mode === 'edit' || !this.runtimeSceneSnapshot || this.scriptReloadInFlight) return false;
+        this.scriptReloadInFlight = true;
+        try {
+            let prepared = this.runtimeSceneSnapshot;
+            try {
+                if (this.snapshotPreparer) prepared = await this.snapshotPreparer(prepared);
+            } catch (cause) {
+                const code = typeof (cause as any)?.code === 'string' ? (cause as any).code : 'BEHAVIOUR_SCRIPT_RELOAD_FAILED';
+                const message = typeof (cause as any)?.message === 'string' ? (cause as any).message : 'BehaviourScript reload failed.';
+                console.error(`[PlayMode] ${code}: ${message}`);
+                return false;
+            }
+            if (this.getMode() === 'edit') return false;
+
+            this.runtimeSceneSnapshot = prepared;
+            this.frame = 0;
+            this.time = 0;
+            this.deltaTime = 0;
+            this.isPaused = false;
+            this.runtimeError = null;
+            this.reportedScriptDiagnostics.clear();
+            const scene = SceneManager.getInstance().getActiveScene();
+            if (scene) scene.loadFromJSON(prepared);
+            this.lastRuntimeUiEvent = null;
+            this.runtime.restart(prepared);
+            (window as any).Editor?.instance?.onRuntimeSceneChanged?.(this.runtimeScenePath || '');
+            console.info('[PlayMode] BehaviourScript domain reload completed.');
+            return true;
+        } catch (cause) {
+            const message = typeof (cause as any)?.message === 'string' ? (cause as any).message : String(cause);
+            console.error(`[PlayMode] BehaviourScript domain reload could not restart the runtime: ${message}`);
+            return false;
+        } finally {
+            this.scriptReloadInFlight = false;
+        }
     }
 
     public getRuntimeState(): RuntimeState {
@@ -363,6 +420,12 @@ export class PlayModeManager {
         if (this.mode !== 'play') return;
         this.frame = runtimeFrame.frame;
         this.time = runtimeFrame.timeMicros / 1_000_000;
+        for (const diagnostic of runtimeFrame.behaviourScripts?.diagnostics || []) {
+            const key = `${diagnostic.objectId}\u0000${diagnostic.phase}\u0000${diagnostic.message}`;
+            if (this.reportedScriptDiagnostics.has(key)) continue;
+            this.reportedScriptDiagnostics.add(key);
+            console.error(`[BehaviourScript:${diagnostic.phase}] ${diagnostic.objectId || '(unknown object)'}: ${diagnostic.message}`);
+        }
         const scene = SceneManager.getInstance().getActiveScene();
         if (!scene) return;
         for (const transformState of runtimeFrame.transforms) {

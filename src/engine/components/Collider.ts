@@ -14,6 +14,12 @@ export abstract class Collider extends Component {
     public abstract getBounds(): THREE.Box3 | THREE.Sphere; // simplified return type for now
     public abstract createGizmo(): THREE.Object3D;
     public abstract updateGizmo(mesh: THREE.Object3D): void;
+    public getShapeOffset(): CANNON.Vec3 {
+        return new CANNON.Vec3(this.center.x, this.center.y, this.center.z);
+    }
+    public getShapeOrientation(): CANNON.Quaternion | undefined {
+        return undefined;
+    }
     public setCenter(center: THREE.Vector3): void {
         this.center.copy(center);
         this.updateCollider();

@@ -19,9 +19,24 @@ test('runtime diagnostics is empty for the supported gameplay contract', () => {
     assert.deepEqual(collectRuntimeDiagnostics([{
         path: 'Scenes/Main.scene', value: { gameObjects: [
             { id: 'camera', components: [{ type: 'Camera' }] },
-            { components: [{ type: 'PlayerController' }, { type: 'RigidBody' }, { type: 'BoxCollider' }, { type: 'AudioSource' }, { type: 'UIEventAction' }] }
+            { components: [{ type: 'PlayerController' }, { type: 'RigidBody' }, { type: 'BoxCollider' }, { type: 'AudioSource' }, { type: 'UIEventAction' }, { type: 'BehaviourScript', data: { program: '{}' } }] },
+            { components: [{ type: 'Canvas' }], children: [
+                { components: [{ type: 'RectTransform', data: { sizeDelta: [160, 30] } }, { type: 'VerticalLayoutGroup' }, { type: 'HorizontalLayoutGroup' }, { type: 'ContentSizeFitter' }, { type: 'UIScrollbar' }, { type: 'UIScrollRect', data: { movementType: 'Clamped', inertia: false } }, { type: 'UIButton', data: { eventName: 'Start' } }] }
+            ] }
         ] }
     }]), []);
+});
+
+test('runtime diagnostics reports ScrollRect behavior outside the standalone contract', () => {
+    const diagnostics = collectRuntimeDiagnostics([{
+        path: 'Assets/Scenes/Menu.scene.json', value: { gameObjects: [
+            { id: 'camera', components: [{ type: 'Camera' }] },
+            { id: 'inventory', name: 'Inventory', components: [{ type: 'UIScrollRect', data: { movementType: 'Elastic', inertia: true } }] }
+        ] }
+    }]);
+    assert.equal(diagnostics.length, 1);
+    assert.equal(diagnostics[0].type, 'PartialScrollRectBehavior');
+    assert.match(diagnostics[0].message, /clamped non-inertial/);
 });
 
 test('runtime diagnostics exposes missing cameras and invalid overlay stacks', () => {
@@ -56,4 +71,33 @@ test('runtime diagnostics reports LoadScene targets excluded from the build', ()
     assert.equal(diagnostics[0].type, 'InvalidSceneReference');
     assert.equal(diagnostics[0].count, 1);
     assert.match(diagnostics[0].message, /not selected in Build Settings/);
+});
+
+test('runtime diagnostics distinguishes supported GLB/GLTF models from unsupported model references', () => {
+    const diagnostics = collectRuntimeDiagnostics([{
+        path: 'Assets/Scenes/Models.scene.json', value: { gameObjects: [
+            { id: 'camera', components: [{ type: 'Camera' }] },
+            { id: 'hero', sourceAssetType: 'model', sourceAssetPath: 'Assets/Models/Hero.glb', components: [{ type: 'Animator' }] },
+            { id: 'gltf', sourceAssetType: 'model', sourceAssetPath: 'Assets/Models/Hero.gltf', components: [{ type: 'Animator' }] },
+            { id: 'legacy', sourceAssetType: 'model', sourceAssetPath: 'Assets/Models/Legacy.fbx', components: [{ type: 'Animator' }] },
+            { id: 'missing', sourceAssetType: 'model', sourceAssetPath: null, components: [] }
+        ] }
+    }]);
+    assert.equal(diagnostics.length, 1);
+    assert.equal(diagnostics[0].type, 'UnsupportedModelFormat');
+    assert.equal(diagnostics[0].count, 2);
+    assert.match(diagnostics[0].message, /Legacy\.fbx/);
+    assert.match(diagnostics[0].message, /missing model path/);
+});
+
+test('runtime diagnostics rejects malformed BehaviourScript programs before packaging', () => {
+    const diagnostics = collectRuntimeDiagnostics([{
+        path: 'Assets/Scenes/Scripted.scene.json', value: { gameObjects: [
+            { id: 'camera', components: [{ type: 'Camera' }] },
+            { id: 'actor', name: 'Actor', components: [{ type: 'BehaviourScript', data: { program: '{' } }] }
+        ] }
+    }]);
+    assert.equal(diagnostics.length, 1);
+    assert.equal(diagnostics[0].type, 'InvalidBehaviourScript');
+    assert.match(diagnostics[0].message, /Actor: Invalid JSON/);
 });

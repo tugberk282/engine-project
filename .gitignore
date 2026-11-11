@@ -15,10 +15,12 @@ desktop.ini
 
 .vscode/
 .idea/
+.codex/
 
 coverage/
 tmp/
 temp/
+graphify-out/
 
 *.local
 *.cache

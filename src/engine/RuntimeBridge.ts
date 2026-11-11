@@ -24,6 +24,10 @@ export interface RuntimeFrame {
     lastUiEvent?: string | null;
     lastUiEventPayload?: unknown;
     uiText?: Array<{ id: string; text: string }>;
+    behaviourScripts?: {
+        instanceCount: number;
+        diagnostics: Array<{ objectId: string; phase: string; message: string }>;
+    };
 }
 
 export interface RuntimeBridgeOptions {

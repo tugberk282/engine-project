@@ -80,6 +80,7 @@ import { EditorSelection, type EditorSelectionSource } from './EditorSelection';
 import { BuildSettingsWindow } from './BuildSettingsWindow';
 import { BuildSettings } from '../engine/BuildSettings';
 import { resolveRuntimeScenePath } from '../engine/RuntimeSceneTransition';
+import { resolveBehaviourScriptAssets } from '../engine/BehaviourScriptAssets';
 
 type FloatingDockTarget = {
     panelId: Exclude<EditorPanelId, 'viewport-panel'>;
@@ -246,6 +247,7 @@ export class Editor {
         ScriptRegistry.initialize();
         this.desktopBridge = new DesktopBridge();
         this.fs = new DesktopFileSystem();
+        this.playMode.setSnapshotPreparer((snapshot) => this.resolveRuntimeBehaviourScripts(snapshot));
 
         // @ts-ignore
         window.Editor = {
@@ -287,6 +289,7 @@ export class Editor {
 
         this.projectWindow = new ProjectWindow(this);
         this.projectWindow.initialize();
+        window.addEventListener('focus', () => void this.projectWindow.refreshExternalChanges());
 
         // Initialize Asset Database
         AssetDatabase.getInstance().refresh(this.rootPath);
@@ -4339,12 +4342,16 @@ export class Editor {
         const stepBtn = document.getElementById('step-btn');
 
         if (playBtn) {
-            playBtn.onclick = () => {
+            playBtn.onclick = async () => {
                 if (this.isPlaying) {
                     this.playMode.exitPlayMode();
                     return;
                 }
-                this.playMode.enterPlayMode();
+                if (!await this.playMode.enterPlayMode()) {
+                    this.setBottomTab('console', false);
+                    this.consoleWindow.onGUI();
+                    return;
+                }
                 this.isPlaying = true;
                 this.isPaused = false;
                 this.updatePlayModeButtons();
@@ -4494,13 +4501,17 @@ export class Editor {
                     const file = e.dataTransfer!.files[i];
                     const filePath = (file as any).path;
                     if (filePath && AssetImporter.isModelFile(file.name)) {
-                        await AssetImporter.importModel(filePath, (rootGO) => {
-                            const cmd = new CreateGameObjectCommand(rootGO, this.scene);
-                            CommandHistory.execute(cmd);
-                            this.selectGameObject(rootGO);
-                            this.hierarchyWindow.refresh();
-                            console.log(`Imported external model: ${file.name}`);
-                        });
+                        try {
+                            await AssetImporter.importModel(filePath, (rootGO) => {
+                                const cmd = new CreateGameObjectCommand(rootGO, this.scene);
+                                CommandHistory.execute(cmd);
+                                this.selectGameObject(rootGO);
+                                this.hierarchyWindow.refresh();
+                                console.log(`Imported external model: ${file.name}`);
+                            });
+                        } catch (error) {
+                            console.error(`Could not import external model ${file.name}.`, error);
+                        }
                     }
                 }
             }
@@ -6316,21 +6327,23 @@ export class Editor {
         this.hierarchyWindow.refresh();
         this.inspectorWindow.refresh();
         await this.projectWindow.refresh();
+        await this.projectWindow.rehydrateSceneModelInstances();
         this.syncWindowMenuState();
     }
 
-    private executeSceneSnapshotCommand(name: string, nextSnapshot: string, nextPath: string | null): void {
+    private async executeSceneSnapshotCommand(name: string, nextSnapshot: string, nextPath: string | null): Promise<boolean> {
         const previousSnapshot = this.scene.toJSON();
         const previousPath = SceneManager.getInstance().getActiveScenePath();
         if (previousSnapshot === nextSnapshot && previousPath === nextPath) {
-            return;
+            return true;
         }
 
-        CommandHistory.execute({
+        await CommandHistory.execute({
             name,
             execute:  async() => await this.applySceneSnapshot(nextSnapshot, nextPath),
             undo:  async() => await this.applySceneSnapshot(previousSnapshot, previousPath)
         });
+        return true;
     }
 
     private captureSelectionSnapshot(): { selectedIds: string[]; activeId: string | null } {
@@ -6490,8 +6503,9 @@ export class Editor {
         if (!await this.confirmSceneReplacement('create a new scene')) return;
 
         const nextSnapshot = this.buildDefaultSceneSnapshot();
-        this.executeSceneSnapshotCommand('New Scene', nextSnapshot, null);
-        await this.desktopBridge.discardRecovery(this.projectPath);
+        if (await this.executeSceneSnapshotCommand('New Scene', nextSnapshot, null)) {
+            await this.desktopBridge.discardRecovery(this.projectPath);
+        }
     }
 
     public async openScene(scenePath: string): Promise<boolean> {
@@ -6502,6 +6516,7 @@ export class Editor {
 
             const scene = sceneManager.activatePreparedScene(prepared);
             this.setScene(scene);
+            await this.projectWindow.rehydrateSceneModelInstances();
             await this.desktopBridge.discardRecovery(this.projectPath);
             return true;
         } catch (error) {
@@ -6535,7 +6550,14 @@ export class Editor {
 
         const absolutePath = PathUtils.join(this.projectPath, ...resolvedPath.split('/'));
         const prepared = await SceneManager.getInstance().prepareScene(absolutePath);
-        return { path: resolvedPath, snapshot: prepared.scene.toJSON() };
+        return { path: resolvedPath, snapshot: await this.resolveRuntimeBehaviourScripts(prepared.scene.toJSON()) };
+    }
+
+    private async resolveRuntimeBehaviourScripts(snapshot: string): Promise<string> {
+        return resolveBehaviourScriptAssets(snapshot, this.projectPath, async (absolutePath) => {
+            const value = await this.fs.readFile(absolutePath, 'utf8');
+            return typeof value === 'string' ? value : null;
+        });
     }
 
     public onRuntimeSceneChanged(_scenePath: string): void {
@@ -6543,6 +6565,10 @@ export class Editor {
         this.hierarchyWindow.refresh();
         this.inspectorWindow.refresh();
         this.updatePostProcessing();
+    }
+
+    public async reloadRuntimeBehaviourScripts(): Promise<boolean> {
+        return await this.playMode.reloadBehaviourScripts();
     }
 
     private async showOpenSceneDialog() {
@@ -6567,6 +6593,7 @@ export class Editor {
 
                 const scene = sceneManager.activatePreparedScene(prepared);
                 this.setScene(scene);
+                await this.projectWindow.rehydrateSceneModelInstances();
                 await this.desktopBridge.discardRecovery(this.projectPath);
             } catch (error) {
                 console.error(`Invalid scene file '${selectedPath}':`, error);
@@ -9121,6 +9148,7 @@ export class Editor {
         try {
             const scene = await SceneManager.getInstance().loadScene(defaultPath);
             this.setScene(scene);
+            await this.projectWindow.rehydrateSceneModelInstances();
         } catch (error) {
             console.error('The last saved scene could not be reopened:', error);
         }
@@ -9139,6 +9167,7 @@ export class Editor {
         if (shouldRestore) {
             try {
                 this.scene.loadFromJSON(JSON.stringify(recovery.scene));
+                await this.projectWindow.rehydrateSceneModelInstances();
                 this.hierarchyWindow.refresh();
                 this.inspectorWindow.refresh();
                 this.dirtyState.markChanged();

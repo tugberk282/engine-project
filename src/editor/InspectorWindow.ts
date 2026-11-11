@@ -869,6 +869,8 @@ export class InspectorWindow extends EditorWindow {
                     this.inspectors.createEventSystemInspector(sectionContent, comp);
                 } else if (compName === 'UIEventAction') {
                     this.inspectors.createUIEventActionInspector(sectionContent, comp);
+                } else if (compName === 'BehaviourScript') {
+                    this.inspectors.createBehaviourScriptInspector(sectionContent, comp);
                 } else if (compName === 'UIImage') {
                     this.inspectors.createUIImageInspector(sectionContent, comp);
                 } else if (compName === 'UIButton') {

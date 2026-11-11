@@ -12,11 +12,13 @@ export class PlayerController extends Component {
     @serialize public sprintMultiplier: number = 1.5;
     @serialize public jumpForce: number = 6.0;
     @serialize public lookSensitivity: number = 0.002;
+    @serialize public maxLookPitch: number = 85;
     @serialize public maxGroundSlope: number = 50;
     @serialize public respawnY: number = -8;
 
     private rigidBody: RigidBody | undefined;
     private rotationY: number = 0;
+    private rotationX: number = 0;
     private spawnPosition = new THREE.Vector3();
     private finishBanner: HTMLElement | null = null;
     public grounded: boolean = false;
@@ -50,11 +52,8 @@ export class PlayerController extends Component {
 
         if (mouseX !== 0 || mouseY !== 0) {
             this.rotationY -= mouseX * this.lookSensitivity;
-
-            // Optional: Vertical look (clamped) - Only affects camera if we had a dedicated camera setup here
-            // For now, we mainly rotate the player body horizontally
-            // this.rotationX -= mouseY * this.lookSensitivity;
-            // this.rotationX = Math.max(-Math.PI / 2, Math.min(Math.PI / 2, this.rotationX));
+            const maxPitch = THREE.MathUtils.degToRad(Math.max(0, Math.min(90, this.maxLookPitch)));
+            this.rotationX = Math.max(-maxPitch, Math.min(maxPitch, this.rotationX - mouseY * this.lookSensitivity));
 
             // Apply rotation to GameObject
             this.gameObject.transform.rotation.y = this.rotationY;

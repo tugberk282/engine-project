@@ -102,7 +102,7 @@ export class RigidBody extends Component {
                     friction: col.friction,
                     restitution: col.restitution
                 });
-                this.body.addShape(shape, undefined, undefined);
+                this.body.addShape(shape, col.getShapeOffset(), col.getShapeOrientation());
                 // Assign material to the shape (Cannon 0.20+)
                 shape.material = mat;
                 if (col.isTrigger) hasTrigger = true;

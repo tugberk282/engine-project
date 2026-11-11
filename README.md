@@ -6,7 +6,7 @@ Engine Project is a full-scale game engine and runtime built as an Electron-base
 
 - Faz 9 aktif: Desktop App Productization
 - Usable-core durumu: editor authoring, runtime gameplay, persistence ve Windows export cekirdegi testlerle dogrulaniyor
-- `npm test`: 92/92 test basarili
+- `npm test`: 195/195 test basarili
 - Paketli smoke: 43/43 kontrol basarili
 
 ## Teknoloji
@@ -64,6 +64,10 @@ npm run test:security
 npm run test:diagnostics
 ```
 
+Sinirli ve export edilebilir gameplay scripting sozlesmesi:
+
+- `docs/behaviour-script.md`
+
 ## Mimari ve Handoff
 
 Projeyi devralacak kisi icin ana dokuman:
@@ -80,6 +84,23 @@ Bu dosya:
 - bir sonraki gelistirici icin ilerleme sirasini
 
 tek yerde toplar.
+
+### Yerel kod grafigi
+
+Agentlarin buyuk dosyalari tekrar tekrar okumasi yerine proje iliskilerini dar
+sorgularla bulmak icin istege bagli Graphify entegrasyonu bulunur. Bu arac oyun
+motorunun veya player build'inin runtime bagimliligi degildir.
+
+```powershell
+uv tool install graphifyy==0.9.105
+uv tool update-shell
+graphify update . --no-cluster
+graphify query "PlayModeManager RuntimeBridge input flow"
+```
+
+`graphify-out/` yerel ve gitignore kapsamindadir. Kod degisikliklerinden sonra
+`graphify update . --no-cluster` yalnizca yerel AST indeksini gunceller; Cloud,
+API anahtari veya LLM kredisi kullanmaz.
 
 ## Paketleme
 

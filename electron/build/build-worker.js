@@ -11,6 +11,7 @@ const { BUILD_MANIFEST_VERSION, BuildError, STAGES, assertBuildRequest, serializ
 const { stableStringify, contentHash, migrateProject, migrateScene, normalizeDocument, validateDocument } =
     require('../architecture/persistence');
 const { collectRuntimeDiagnostics } = require('./runtime-support');
+const { resolveBehaviourScriptAssetsForBuild } = require('./behaviour-script-assets');
 
 let cancelled = false;
 process.on('message', (message) => {
@@ -114,6 +115,10 @@ async function run(rawRequest) {
             scenes.push({ sceneId: entry.sceneId, path: entry.path.replaceAll('\\', '/'), value: parsed });
         }
         if (scenes.length === 0) throw new BuildError('SCENE_MISSING', 'At least one scene is required');
+        const scripts = await resolveBehaviourScriptAssetsForBuild(scenes, request.projectRoot);
+        if (scripts.resolvedAssetCount > 0) {
+            emit('log', { level: 'info', message: `Resolved ${scripts.resolvedAssetCount} reusable BehaviourScript asset${scripts.resolvedAssetCount === 1 ? '' : 's'}.` });
+        }
     });
 
     const assets = await stage('import', async () => {
@@ -158,11 +163,20 @@ async function run(rawRequest) {
             await fs.promises.rename(path.join(workspace, 'electron.exe'), path.join(workspace, 'Tugberk Player.exe'));
             const appRoot = path.join(workspace, 'resources', 'app');
             await fs.promises.mkdir(appRoot, { recursive: true });
-            for (const file of ['player-main.js', 'player-preload.js', 'player-content.js', 'player.html', 'player-renderer.js', 'player-scene.mjs', 'player-ui.mjs', 'player.css']) {
+            for (const file of ['player-main.js', 'player-preload.js', 'player-content.js', 'player.html', 'player-renderer.js', 'player-scene.mjs', 'player-ui.mjs', 'player-input.mjs', 'player-audio.mjs', 'player-model.mjs', 'player-particles.mjs', 'player.css']) {
                 await fs.promises.copyFile(path.join(__dirname, file), path.join(appRoot, file));
             }
             await fs.promises.copyFile(path.resolve(__dirname, '..', '..', 'src', 'engine', 'runtime.worker.js'), path.join(appRoot, 'runtime.worker.js'));
+            await fs.promises.copyFile(path.resolve(__dirname, '..', 'runtime', 'behaviour-script.js'), path.join(appRoot, 'behaviour-script.js'));
             await fs.promises.copyFile(path.join(path.dirname(require.resolve('three')), 'three.module.js'), path.join(appRoot, 'three.module.js'));
+            const threeExamples = path.resolve(path.dirname(require.resolve('three')), '..', 'examples', 'jsm');
+            const gltfLoader = (await fs.promises.readFile(path.join(threeExamples, 'loaders', 'GLTFLoader.js'), 'utf8'))
+                .replace("from 'three';", "from './three.module.js';")
+                .replace("from '../utils/BufferGeometryUtils.js';", "from './buffer-geometry-utils.js';");
+            const bufferGeometryUtils = (await fs.promises.readFile(path.join(threeExamples, 'utils', 'BufferGeometryUtils.js'), 'utf8'))
+                .replace("from 'three';", "from './three.module.js';");
+            await fs.promises.writeFile(path.join(appRoot, 'gltf-loader.js'), gltfLoader, 'utf8');
+            await fs.promises.writeFile(path.join(appRoot, 'buffer-geometry-utils.js'), bufferGeometryUtils, 'utf8');
             await fs.promises.writeFile(path.join(appRoot, 'package.json'), stableStringify({
                 name: 'tugberk-standalone-player', version: '1.0.0', private: true, main: 'player-main.js'
             }), 'utf8');

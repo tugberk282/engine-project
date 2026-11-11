@@ -345,7 +345,11 @@ export class PrefabManager {
         if (gameObject.scene) {
             gameObject.scene.gameObjects.forEach((go: GameObject) => idMap.set(go.id, go));
         }
-        const pendingComponents: Array<{ component: any; data: Record<string, unknown> }> = [];
+        const pendingComponents: Array<{
+            component: any;
+            data: Record<string, unknown>;
+            template: SerializedComponentData;
+        }> = [];
         const createdChildren: GameObject[] = [];
         idMap.set(normalizedData.id, gameObject);
 
@@ -376,17 +380,23 @@ export class PrefabManager {
         const toDestroy = gameObject.components.filter((component) => component !== gameObject.transform);
         toDestroy.forEach(c => gameObject.removeComponent(c));
 
+        const unknownComponents: SerializedComponentData[] = [];
         normalizedData.components.forEach((compData: SerializedComponentData) => {
             const ComponentClass = ScriptRegistry.getComponentClass(compData.type);
-            if (!ComponentClass) return;
+            if (!ComponentClass) {
+                unknownComponents.push(compData);
+                return;
+            }
             const component = gameObject.addComponent(ComponentClass, { invokeLifecycle: false });
             pendingComponents.push({
                 component,
-                data: compData.data
+                data: compData.data,
+                template: compData
             });
         });
+        gameObject.preserveSerializedData(normalizedData, unknownComponents);
 
-            const children = [...gameObject.transform.children];
+        const children = [...gameObject.transform.children];
         children.forEach(child => {
             child.gameObject.onDestroy();
             if (gameObject.scene) {
@@ -417,15 +427,21 @@ export class PrefabManager {
             );
             child.transform.scale.fromArray(serializedChild.transform.scale);
 
+            const unknownChildComponents: SerializedComponentData[] = [];
             serializedChild.components.forEach((componentData: SerializedComponentData) => {
                 const ComponentClass = ScriptRegistry.getComponentClass(componentData.type);
-                if (!ComponentClass) return;
+                if (!ComponentClass) {
+                    unknownChildComponents.push(componentData);
+                    return;
+                }
                 const component = child.addComponent(ComponentClass, { invokeLifecycle: false });
                 pendingComponents.push({
                     component,
-                    data: componentData.data
+                    data: componentData.data,
+                    template: componentData
                 });
             });
+            child.preserveSerializedData(serializedChild, unknownChildComponents);
             createdChildren.push(child);
 
             if (gameObject.scene) {
@@ -446,6 +462,7 @@ export class PrefabManager {
         });
 
         pendingComponents.forEach((entry) => {
+            entry.component.preserveSerializedData?.(entry.template);
             const resolvedData = resolveSerializedReferences(entry.data, idMap);
             const payload = (resolvedData && typeof resolvedData === 'object' && !Array.isArray(resolvedData))
                 ? resolvedData as Record<string, unknown>

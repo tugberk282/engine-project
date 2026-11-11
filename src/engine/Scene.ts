@@ -458,8 +458,10 @@ export class Scene {
 
     private serializeInputMap(): Record<string, unknown> {
         const axes = Object.fromEntries(ProjectSettings.inputAxes.entries());
-        const jump = ProjectSettings.inputAxes.get('Jump')?.positiveButton ?? ' ';
-        return { axes, actions: { Jump: [jump] } };
+        const actions = Object.fromEntries([...ProjectSettings.inputAxes.entries()]
+            .filter(([, axis]) => !axis.negativeButton && !axis.altNegativeButton)
+            .map(([name, axis]) => [name, [axis.positiveButton, axis.altPositiveButton].filter(Boolean)]));
+        return { axes, actions };
     }
 
     private applySerializedInputMap(): void {
