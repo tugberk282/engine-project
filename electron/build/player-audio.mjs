@@ -30,13 +30,34 @@ export function isPlayerAudioActive(activePath, transforms) {
     return !(activePath || []).some((id) => activeById.get(id) === false);
 }
 
+export function consumePlayerAudioCommands(commands, lastSequence, playbacks, pendingByObject = null) {
+    let consumedSequence = Number.isInteger(lastSequence) ? lastSequence : 0;
+    for (const command of commands || []) {
+        if (!Number.isInteger(command?.sequence) || command.sequence <= consumedSequence) continue;
+        if (command.command === 'play' || command.command === 'stop') {
+            if (pendingByObject instanceof Map && typeof command.objectId === 'string') {
+                pendingByObject.set(command.objectId, command.command);
+            }
+            for (const playback of playbacks || []) {
+                if (playback?.descriptor?.objectId === command.objectId) {
+                    playback.command?.(command.command);
+                    pendingByObject?.delete?.(command.objectId);
+                }
+            }
+        }
+        consumedSequence = Math.max(consumedSequence, command.sequence);
+    }
+    return consumedSequence;
+}
+
 export function createWebAudioPlayback(audioContext, buffer, descriptor) {
     const settings = descriptor.settings;
     let source = null;
     let gain = null;
     let panner = null;
     let generation = 0;
-    let desiredActive = false;
+    let hierarchyActive = false;
+    let wantsPlayback = settings.playOnAwake !== false;
     const clearNodes = (stopSource) => {
         generation += 1;
         const previous = source;
@@ -53,7 +74,7 @@ export function createWebAudioPlayback(audioContext, buffer, descriptor) {
         panner = null;
     };
     const start = () => {
-        if (source || settings.playOnAwake === false) return;
+        if (source || !hierarchyActive || !wantsPlayback) return;
         const currentGeneration = ++generation;
         source = audioContext.createBufferSource();
         gain = audioContext.createGain();
@@ -81,11 +102,15 @@ export function createWebAudioPlayback(audioContext, buffer, descriptor) {
     return {
         descriptor,
         sync(active) {
-            if (active === desiredActive) return;
-            desiredActive = active;
+            if (active === hierarchyActive) return;
+            hierarchyActive = active;
             if (active) start(); else clearNodes(true);
         },
-        stop() { desiredActive = false; clearNodes(true); },
+        command(command) {
+            wantsPlayback = command === 'play';
+            if (wantsPlayback) start(); else clearNodes(true);
+        },
+        stop() { wantsPlayback = false; clearNodes(true); },
         get panner() { return panner; }
     };
 }

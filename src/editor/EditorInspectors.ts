@@ -5,6 +5,7 @@ import { AssetImporter } from '../engine/AssetImporter';
 import { AssetDatabase } from '../engine/AssetDatabase';
 import { describeObjectReference, parseObjectReferenceDropPayload, sameObjectReference } from './ObjectReference';
 import { ScriptRegistry } from '../engine/ScriptRegistry';
+import { BEHAVIOUR_SCRIPT_TEMPLATES, createBehaviourScriptTemplate, type BehaviourScriptTemplateId } from '../engine/BehaviourScriptTemplates';
 
 export class EditorInspectors {
     public refreshSelected: (() => void) | null = null;
@@ -5936,6 +5937,33 @@ export class EditorInspectors {
         help.style.cssText = 'margin-bottom:6px;color:var(--unity-text-muted);font-size:11px;line-height:1.35;';
         parent.appendChild(help);
 
+        const reference = document.createElement('details');
+        reference.style.cssText = 'margin:0 0 7px;color:var(--unity-text-muted);font-size:11px;line-height:1.4;';
+        const referenceSummary = document.createElement('summary');
+        referenceSummary.textContent = 'Gameplay program quick reference';
+        referenceSummary.style.cursor = 'pointer';
+        const referenceBody = document.createElement('pre');
+        referenceBody.textContent = [
+            'Lifecycle: start, update, fixedUpdate, events',
+            'Actions: if, setVariable, addVariable, sendEvent,',
+            '  translate, moveTowards, setPosition, addRotation, setRotation,',
+            '  setScale, setVelocity, addVelocity, addForce, setActive,',
+            '  toggleActive, destroy, setText, playAudio, stopAudio,',
+            '  playParticles, stopParticles',
+            '  playAnimation, stopAnimation',
+            '  spawnPooled (pool, position?, rotation?, resetVelocity?, store?)',
+            '  instantiatePrefab (prefabPath, position?, rotation?, store?)',
+            'Input: { input }, { button }, { buttonDown }, { buttonUp }',
+            'Values: variable, deltaTime, eventValue, eventField,',
+            '  objectProperty, distanceTo, add, subtract, multiply, divide, modulo,',
+            '  min, max, abs, clamp, concat, equals, comparisons, not/and/or',
+            'Targets: self (default), object ID/name, tag:Player, or an expression',
+            '  Example dynamic target: { "variable": "spawnedId" }'
+        ].join('\n');
+        referenceBody.style.cssText = 'margin:5px 0 0;padding:6px;overflow:auto;white-space:pre-wrap;background:var(--unity-bg-input);border:1px solid var(--unity-border);font:10px/1.45 Consolas,monospace;';
+        reference.append(referenceSummary, referenceBody);
+        parent.appendChild(reference);
+
         this.createUnityField(parent, 'Asset Path', 'text', script.assetPath || '', (rawPath) => {
             const nextPath = rawPath.replaceAll('\\', '/').trim();
             if (nextPath === script.assetPath) return;
@@ -5989,6 +6017,50 @@ export class EditorInspectors {
             }
         };
         validate();
+
+        const templateRow = document.createElement('div');
+        templateRow.style.cssText = 'display:grid;grid-template-columns:1fr auto;gap:5px;margin-top:6px;';
+        const templateSelect = document.createElement('select');
+        templateSelect.setAttribute('aria-label', 'Behaviour Script template');
+        for (const template of BEHAVIOUR_SCRIPT_TEMPLATES) {
+            const option = document.createElement('option');
+            option.value = template.id;
+            option.textContent = template.label;
+            option.title = template.description;
+            templateSelect.appendChild(option);
+        }
+        const applyTemplate = document.createElement('button');
+        applyTemplate.type = 'button';
+        applyTemplate.textContent = 'Apply Template';
+        applyTemplate.disabled = editor.readOnly;
+        applyTemplate.title = editor.readOnly
+            ? 'Clear the external Asset Path before applying an inline template.'
+            : 'Replace the inline program with the selected bounded gameplay template.';
+        applyTemplate.addEventListener('click', () => {
+            if (editor.readOnly) return;
+            const templateId = templateSelect.value as BehaviourScriptTemplateId;
+            const newValue = createBehaviourScriptTemplate(templateId);
+            const oldValue = script.program;
+            if (newValue === oldValue) return;
+            CommandHistory.execute({
+                name: `Apply Behaviour Template: ${templateSelect.selectedOptions[0]?.textContent || templateId}`,
+                execute: () => {
+                    script.program = newValue;
+                    editor.value = newValue;
+                    this.recordOverride(script, 'program');
+                    this.notifyChange(script);
+                    validate();
+                },
+                undo: () => {
+                    script.program = oldValue;
+                    editor.value = oldValue;
+                    this.notifyChange(script);
+                    validate();
+                }
+            });
+        });
+        templateRow.append(templateSelect, applyTemplate);
+        parent.appendChild(templateRow);
         if (editor.readOnly) {
             status.textContent = 'External program is resolved from Assets when Play Mode or Build starts.';
             status.style.color = 'var(--unity-text-muted)';

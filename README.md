@@ -6,7 +6,8 @@ Engine Project is a full-scale game engine and runtime built as an Electron-base
 
 - Faz 9 aktif: Desktop App Productization
 - Usable-core durumu: editor authoring, runtime gameplay, persistence ve Windows export cekirdegi testlerle dogrulaniyor
-- `npm test`: 195/195 test basarili
+- `npm test`: guncel sessiz tam test paketi
+- `npm run test:fast`: gelistirme sirasinda odakli hizli test paketi
 - Paketli smoke: 43/43 kontrol basarili
 
 ## Teknoloji

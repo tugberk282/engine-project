@@ -87,7 +87,9 @@ async function smokeExecutable(executable, options = {}) {
       ENGINE_AUTO_OPEN_PROJECT_PATH: project,
       ENGINE_USER_DATA_PATH: userData,
     },
-    timeoutMs: options.timeoutMs,
+    // The packaged renderer performs the full authoring transaction suite and
+    // is consistently slower than the source-built host on Windows CI/AV.
+    timeoutMs: options.timeoutMs ?? 90_000,
   });
 
   assert.ok(fs.existsSync(output), `packaged application did not write ${output}`);

@@ -1,7 +1,99 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import * as THREE from 'three';
-import { createPlayerScene } from '../electron/build/player-scene.mjs';
+import { consumePlayerSpawnCommands, createPlayerScene } from '../electron/build/player-scene.mjs';
+
+test('player scene consumes each sequenced runtime prefab spawn once', () => {
+    const materialized = [];
+    let sequence = consumePlayerSpawnCommands([
+        { sequence: 1, node: { id: 'clone-a' } }
+    ], 0, (node) => materialized.push(node.id));
+    sequence = consumePlayerSpawnCommands([
+        { sequence: 1, node: { id: 'clone-a' } },
+        { sequence: 2, node: { id: 'clone-b' } }
+    ], sequence, (node) => materialized.push(node.id));
+    assert.equal(sequence, 2);
+    assert.deepEqual(materialized, ['clone-a', 'clone-b']);
+});
+
+test('player scene materializes a runtime prefab primitive and accepts transform frames', () => {
+    const view = createPlayerScene(THREE, { gameObjects: [] });
+    const object = view.materialize({
+        id: 'runtime-prefab-1-1', name: 'Runtime Cube', enabled: true,
+        transform: { position: [1, 2, 3], rotation: [0, 0, 0], scale: [1, 1, 1] },
+        components: [
+            { type: 'MeshFilter', data: { primitiveType: 'Cube' } },
+            { type: 'MeshRenderer', data: { color: '#ff4400' } }
+        ], children: []
+    });
+    assert.ok(object);
+    assert.equal(object.children.some((child) => child.isMesh), true);
+    view.update({ transforms: [{
+        id: 'runtime-prefab-1-1', position: [5, 4, 3], rotation: [0, 1, 0], scale: [2, 2, 2]
+    }] });
+    assert.deepEqual(object.position.toArray(), [5, 4, 3]);
+    assert.deepEqual(object.scale.toArray(), [2, 2, 2]);
+    view.dispose();
+});
+
+test('player scene rebuilds camera passes for a runtime prefab and preserves its active hierarchy', () => {
+    const view = createPlayerScene(THREE, { gameObjects: [] });
+    const fallbackCamera = view.camera;
+    view.materialize({
+        id: 'runtime-camera-root', name: 'Disabled Camera Prefab', enabled: false,
+        transform: {}, components: [], children: [{
+            id: 'runtime-camera', name: 'Runtime Camera', enabled: true, tag: 'MainCamera',
+            transform: {}, components: [{
+                type: 'Camera', data: { isMain: true, depth: 7, viewportRect: { x: 0, y: 0, width: 0.5, height: 1 } }
+            }], children: []
+        }]
+    });
+    try {
+        assert.notEqual(view.camera, fallbackCamera);
+        assert.equal(view.renderPasses.length, 1);
+        assert.equal(view.renderPasses[0].objectId, 'runtime-camera');
+        assert.deepEqual(view.renderPasses[0].activePath, ['runtime-camera-root', 'runtime-camera']);
+        assert.deepEqual(view.camera.userData.viewportRect, { x: 0, y: 0, width: 0.5, height: 1 });
+    } finally {
+        view.dispose();
+    }
+});
+
+test('player scene materializes runtime prefab lights with authored settings and active transforms', () => {
+    const view = createPlayerScene(THREE, { gameObjects: [] });
+    const root = view.materialize({
+        id: 'runtime-light-root', name: 'Runtime Light Prefab', enabled: true,
+        transform: {}, components: [], children: [{
+            id: 'runtime-light', name: 'Runtime Point Light', enabled: true, layer: 4,
+            transform: { position: [1, 2, 3] }, components: [{
+                type: 'Light', data: {
+                    lightType: 'Point', color: '#336699', intensity: 2.5, range: 18,
+                    castShadows: true, cullingMask: 1 << 4, shadowResolution: 512
+                }
+            }], children: []
+        }]
+    });
+    try {
+        const lightObject = view.objects.get('runtime-light');
+        const light = lightObject.children.find((child) => child.isLight);
+        assert.ok(root);
+        assert.ok(light?.isPointLight);
+        assert.equal(light.color.getHexString(), '336699');
+        assert.equal(light.intensity, 2.5);
+        assert.equal(light.distance, 18);
+        assert.equal(light.castShadow, true);
+        assert.equal(light.layers.mask, 1 << 4);
+        assert.deepEqual(light.shadow.mapSize.toArray(), [512, 512]);
+        view.update({ transforms: [{
+            id: 'runtime-light-root', active: false,
+            position: [4, 5, 6], rotation: [0, 0, 0], scale: [1, 1, 1]
+        }] });
+        assert.equal(root.visible, false);
+        assert.deepEqual(root.position.toArray(), [4, 5, 6]);
+    } finally {
+        view.dispose();
+    }
+});
 
 test('player scene materializes authored primitives and updates runtime transforms', () => {
   const authored = {

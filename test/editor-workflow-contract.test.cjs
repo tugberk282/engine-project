@@ -199,7 +199,8 @@ test('BehaviourScript external assets resolve before Play Mode and build without
 
     assert.match(component, /@serialize public assetPath: string/);
     assert.match(resolver, /BEHAVIOUR_SCRIPT_ASSET_PATH_INVALID/);
-    assert.match(resolver, /component\.data\.program = source/);
+    assert.match(resolver, /component\.data\.program = await resolvePrefabActions\(source\)/);
+    assert.match(resolver, /RUNTIME_PREFAB_PATH_INVALID/);
     assert.match(editor, /setSnapshotPreparer\(\(snapshot\) => this\.resolveRuntimeBehaviourScripts\(snapshot\)\)/);
     assert.match(editor, /if \(!await this\.playMode\.enterPlayMode\(\)\)/);
     assert.match(playMode, /public async enterPlayMode\(\): Promise<boolean>/);
@@ -207,6 +208,17 @@ test('BehaviourScript external assets resolve before Play Mode and build without
     assert.match(playMode, /\[BehaviourScript:\$\{diagnostic\.phase\}\]/);
     assert.match(inspector, /Assets\/\*\.behaviour\.json/);
     assert.match(buildWorker, /resolveBehaviourScriptAssetsForBuild\(scenes, request\.projectRoot\)/);
+});
+
+test('BehaviourScript Inspector applies bounded templates through undoable inline edits', () => {
+    const inspector = source('src/editor/EditorInspectors.ts');
+    const templates = source('src/engine/BehaviourScriptTemplates.ts');
+    assert.match(inspector, /BEHAVIOUR_SCRIPT_TEMPLATES/);
+    assert.match(inspector, /Apply Behaviour Template:/);
+    assert.match(inspector, /applyTemplate\.disabled = editor\.readOnly/);
+    assert.match(inspector, /script\.program = newValue[^]*editor\.value = newValue[^]*recordOverride\(script, 'program'\)/);
+    assert.match(templates, /'input-movement'/);
+    assert.match(templates, /'trigger-deactivator'/);
 });
 
 test('externally changed BehaviourScript assets trigger one safe Play Mode domain reload', () => {
@@ -256,4 +268,13 @@ test('broken prefab sources expose safe repair and undoable unpack actions', () 
     assert.match(inspector, /openBtn\.disabled = !connected/);
     assert.match(inspector, /applyBtn\.disabled = !connected/);
     assert.match(inspector, /revertBtn\.disabled = !connected/);
+});
+
+test('exported player mounts supported UI and scene actions from runtime prefab spawns', () => {
+    const renderer = source('electron/build/player-renderer.js');
+    assert.match(renderer, /mergePlayerRuntimeUi\(\{/);
+    assert.match(renderer, /for \(const descriptor of spawnedUi\.images\) void mountUiImage\(descriptor\)/);
+    assert.match(renderer, /authoredUiControls\.filter\(\(control\) => !mountedControls\.has\(control\.id\)\)/);
+    assert.match(renderer, /authoredScrollRects\.filter\(\(descriptor\) => !mountedScrollRectIds\.has\(descriptor\.id\)\)/);
+    assert.match(renderer, /sceneLoadActions\.find\(\(entry\) => entry\.eventName === state\.lastUiEvent/);
 });

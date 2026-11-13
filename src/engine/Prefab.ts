@@ -46,12 +46,12 @@ export class Prefab {
     /**
      * Recursively create a GameObject from serialized data
      */
-    public static instantiateData(data: any, options?: { externalIdMap?: Map<string, GameObject> }): GameObject {
+    public static instantiateData(data: any, options?: { externalIdMap?: Map<string, GameObject>; preserveIds?: boolean }): GameObject {
         const roots = this.instantiateManyData([data], options);
         return roots[0] ?? new GameObject('GameObject');
     }
 
-    public static instantiateManyData(dataList: any[], options?: { externalIdMap?: Map<string, GameObject> }): GameObject[] {
+    public static instantiateManyData(dataList: any[], options?: { externalIdMap?: Map<string, GameObject>; preserveIds?: boolean }): GameObject[] {
         const idMap = options?.externalIdMap ?? new Map<string, GameObject>();
         const pendingComponents: Array<{
             component: any;
@@ -63,7 +63,7 @@ export class Prefab {
 
         dataList.forEach((rawData) => {
             const normalizedRoot = normalizeSerializedGameObject(rawData);
-            const root = this.instantiateNode(normalizedRoot, null, idMap, pendingComponents, instantiated);
+            const root = this.instantiateNode(normalizedRoot, null, idMap, pendingComponents, instantiated, options?.preserveIds === true);
             roots.push(root);
         });
 
@@ -113,10 +113,11 @@ export class Prefab {
             data: Record<string, unknown>;
             template: SerializedComponentData;
         }>,
-        instantiated: GameObject[]
+        instantiated: GameObject[],
+        preserveIds: boolean
     ): GameObject {
         const go = new GameObject(data.name);
-        go.id = crypto.randomUUID();
+        go.id = preserveIds ? data.id : crypto.randomUUID();
         go.tag = data.tag;
         go.layer = data.layer;
         go.enabled = data.enabled;
@@ -160,7 +161,7 @@ export class Prefab {
         }
 
         data.children.forEach((childData) => {
-            this.instantiateNode(childData, go, idMap, pendingComponents, instantiated);
+            this.instantiateNode(childData, go, idMap, pendingComponents, instantiated, preserveIds);
         });
 
         go.setActive(go.enabled);

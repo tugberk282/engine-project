@@ -153,6 +153,271 @@ test('supervised Play Mode executes BehaviourScript lifecycle, input and UI even
     }
 });
 
+test('supervised Play Mode routes bounded BehaviourScript events between authored objects', async () => {
+    const supervisor = new RuntimeSupervisor({ heartbeatIntervalMs: 60_000 });
+    const senderProgram = JSON.stringify({
+        version: 1,
+        update: [{
+            op: 'if', condition: { buttonDown: 'Fire' },
+            then: [{ op: 'sendEvent', target: 'Target', name: 'Hit', value: 4 }]
+        }]
+    });
+    const receiverProgram = JSON.stringify({
+        version: 1, variables: { health: 10 },
+        events: { Hit: [
+            { op: 'addVariable', name: 'health', value: { negate: { eventValue: true } } },
+            { op: 'setText', value: { concat: ['HP ', { variable: 'health' }] } }
+        ] }
+    });
+    const authored = JSON.stringify({ formatVersion: 1, gameObjects: [
+        { id: 'sender', name: 'Sender', transform: {}, components: [{ type: 'BehaviourScript', data: { program: senderProgram } }] },
+        { id: 'target', name: 'Target', transform: {}, components: [
+            { type: 'UIText', data: { text: '' } },
+            { type: 'BehaviourScript', data: { program: receiverProgram } }
+        ] }
+    ] });
+    try {
+        await supervisor.start(authored);
+        const frame = await supervisor.tick(0.02, { Fire: true, '__buttonDown:Fire': true });
+        assert.equal(frame.uiText[0].text, 'HP 6');
+        assert.deepEqual(frame.behaviourScripts.diagnostics, []);
+    } finally {
+        await supervisor.shutdown();
+    }
+});
+
+test('supervised Play Mode starts an ID-activated pooled BehaviourScript exactly once', async () => {
+    const supervisor = new RuntimeSupervisor({ heartbeatIntervalMs: 60_000 });
+    const activator = JSON.stringify({
+        version: 1,
+        events: { Spawn: [{ op: 'setActive', target: 'pooled', value: true }] }
+    });
+    const pooled = JSON.stringify({
+        version: 1,
+        variables: { starts: 0 },
+        start: [
+            { op: 'addVariable', name: 'starts', value: 1 },
+            { op: 'setText', value: { concat: ['Started ', { variable: 'starts' }] } }
+        ],
+        update: [{ op: 'translate', value: [1, 0, 0] }]
+    });
+    const authored = JSON.stringify({ formatVersion: 1, gameObjects: [
+        { id: 'activator', transform: {}, components: [{ type: 'BehaviourScript', data: { program: activator } }] },
+        { id: 'pooled', name: 'Pooled Enemy', enabled: false, transform: {}, components: [
+            { type: 'UIText', data: { text: '' } },
+            { type: 'BehaviourScript', data: { program: pooled } }
+        ] }
+    ] });
+    try {
+        await supervisor.start(authored);
+        const activated = await supervisor.uiEvent('Spawn');
+        assert.notEqual(activated.transforms.find(({ id }) => id === 'pooled').active, false);
+        assert.equal(activated.uiText.find(({ id }) => id === 'pooled:UIText').text, 'Started 1');
+        const first = await supervisor.tick(0.02);
+        const second = await supervisor.tick(0.02);
+        assert.equal(first.transforms.find(({ id }) => id === 'pooled').position[0], 1);
+        assert.equal(second.transforms.find(({ id }) => id === 'pooled').position[0], 2);
+        assert.equal(second.uiText.find(({ id }) => id === 'pooled:UIText').text, 'Started 1');
+    } finally {
+        await supervisor.shutdown();
+    }
+});
+
+test('supervised Play Mode advances authored AI toward its target at frame-rate-independent speed', async () => {
+    const supervisor = new RuntimeSupervisor({ heartbeatIntervalMs: 60_000 });
+    const program = JSON.stringify({
+        version: 1,
+        update: [{
+            op: 'if', condition: { greaterThan: [{ distanceTo: 'Player' }, 0.1] },
+            then: [{ op: 'moveTowards', destination: 'Player', speed: 4 }]
+        }]
+    });
+    const authored = JSON.stringify({ formatVersion: 1, gameObjects: [
+        { id: 'enemy', name: 'Enemy', transform: { position: [0, 0, 0] }, components: [{ type: 'BehaviourScript', data: { program } }] },
+        { id: 'player', name: 'Player', tag: 'Player', transform: { position: [5, 0, 0] }, components: [] }
+    ] });
+    try {
+        await supervisor.start(authored);
+        const frame = await supervisor.tick(0.1);
+        assert.equal(frame.transforms.find(({ id }) => id === 'enemy').position[0], 0.4);
+        assert.deepEqual(frame.behaviourScripts.diagnostics, []);
+    } finally {
+        await supervisor.shutdown();
+    }
+});
+
+test('supervised Play Mode applies authored rigidbody impulse before fixed-step integration', async () => {
+    const supervisor = new RuntimeSupervisor({ heartbeatIntervalMs: 60_000 });
+    const program = JSON.stringify({
+        version: 1,
+        fixedUpdate: [{ op: 'addForce', value: [4, 0, 0], mode: 'Impulse' }]
+    });
+    const authored = JSON.stringify({ formatVersion: 1, gameObjects: [{
+        id: 'body', transform: { position: [0, 0, 0] }, components: [
+            { type: 'RigidBody', data: { mass: 2, useGravity: false, drag: 0, velocity: [0, 0, 0] } },
+            { type: 'BehaviourScript', data: { program } }
+        ]
+    }] });
+    try {
+        await supervisor.start(authored);
+        const frame = await supervisor.tick(0.02);
+        assert.equal(frame.transforms[0].position[0], 0.04);
+        assert.deepEqual(frame.behaviourScripts.diagnostics, []);
+    } finally {
+        await supervisor.shutdown();
+    }
+});
+
+test('supervised Play Mode publishes ordered BehaviourScript audio commands', async () => {
+    const supervisor = new RuntimeSupervisor({ heartbeatIntervalMs: 60_000 });
+    const program = JSON.stringify({
+        version: 1,
+        events: {
+            PlaySfx: [{ op: 'playAudio', target: 'speaker' }],
+            StopSfx: [{ op: 'stopAudio', target: 'speaker' }]
+        }
+    });
+    const authored = JSON.stringify({ formatVersion: 1, gameObjects: [
+        { id: 'controller', transform: {}, components: [{ type: 'BehaviourScript', data: { program } }] },
+        { id: 'speaker', transform: {}, components: [{ type: 'AudioSource', data: { playOnAwake: false } }] }
+    ] });
+    try {
+        await supervisor.start(authored);
+        const played = await supervisor.uiEvent('PlaySfx');
+        assert.deepEqual(played.audioCommands, [{ sequence: 1, objectId: 'speaker', command: 'play' }]);
+        const stopped = await supervisor.uiEvent('StopSfx');
+        assert.deepEqual(stopped.audioCommands, [
+            { sequence: 1, objectId: 'speaker', command: 'play' },
+            { sequence: 2, objectId: 'speaker', command: 'stop' }
+        ]);
+    } finally {
+        await supervisor.shutdown();
+    }
+});
+
+test('supervised Play Mode publishes ordered BehaviourScript particle commands', async () => {
+    const supervisor = new RuntimeSupervisor({ heartbeatIntervalMs: 60_000 });
+    const program = JSON.stringify({
+        version: 1,
+        events: {
+            PlayFx: [{ op: 'playParticles', target: 'fx' }],
+            StopFx: [{ op: 'stopParticles', target: 'fx' }]
+        }
+    });
+    const authored = JSON.stringify({ formatVersion: 1, gameObjects: [
+        { id: 'controller', transform: {}, components: [{ type: 'BehaviourScript', data: { program } }] },
+        { id: 'fx', transform: {}, components: [{ type: 'ParticleSystem', data: { playOnAwake: false } }] }
+    ] });
+    try {
+        await supervisor.start(authored);
+        const played = await supervisor.uiEvent('PlayFx');
+        assert.deepEqual(played.particleCommands, [{ sequence: 1, objectId: 'fx', command: 'play' }]);
+        const stopped = await supervisor.uiEvent('StopFx');
+        assert.deepEqual(stopped.particleCommands, [
+            { sequence: 1, objectId: 'fx', command: 'play' },
+            { sequence: 2, objectId: 'fx', command: 'stop' }
+        ]);
+    } finally {
+        await supervisor.shutdown();
+    }
+});
+
+test('supervised Play Mode publishes ordered BehaviourScript animation commands', async () => {
+    const supervisor = new RuntimeSupervisor({ heartbeatIntervalMs: 60_000 });
+    const program = JSON.stringify({
+        version: 1,
+        events: {
+            PlayAnim: [{ op: 'playAnimation', target: 'character', clip: 'Run' }],
+            StopAnim: [{ op: 'stopAnimation', target: 'character' }]
+        }
+    });
+    const authored = JSON.stringify({ formatVersion: 1, gameObjects: [
+        { id: 'controller', transform: {}, components: [{ type: 'BehaviourScript', data: { program } }] },
+        { id: 'character', transform: {}, components: [{ type: 'Animator', data: { currentAnimation: 'Idle' } }] }
+    ] });
+    try {
+        await supervisor.start(authored);
+        const played = await supervisor.uiEvent('PlayAnim');
+        assert.deepEqual(played.animationCommands, [
+            { sequence: 1, objectId: 'character', command: 'play', clip: 'Run' }
+        ]);
+        const stopped = await supervisor.uiEvent('StopAnim');
+        assert.deepEqual(stopped.animationCommands, [
+            { sequence: 1, objectId: 'character', command: 'play', clip: 'Run' },
+            { sequence: 2, objectId: 'character', command: 'stop' }
+        ]);
+    } finally {
+        await supervisor.shutdown();
+    }
+});
+
+test('supervised Play Mode activates authored pooled objects at the requested spawn transform', async () => {
+    const supervisor = new RuntimeSupervisor({ heartbeatIntervalMs: 60_000 });
+    const program = JSON.stringify({
+        version: 1,
+        events: { Fire: [{ op: 'spawnPooled', pool: 'tag:Projectile', position: [4, 1, -2] }] }
+    });
+    const authored = JSON.stringify({ formatVersion: 1, gameObjects: [
+        { id: 'spawner', transform: {}, components: [{ type: 'BehaviourScript', data: { program } }] },
+        { id: 'projectile', name: 'Projectile', tag: 'Projectile', enabled: false, transform: { position: [0, 0, 0] }, components: [
+            { type: 'RigidBody', data: { useGravity: false, velocity: [5, 0, 0] } }
+        ] }
+    ] });
+    try {
+        await supervisor.start(authored);
+        const frame = await supervisor.uiEvent('Fire');
+        const projectile = frame.transforms.find(({ id }) => id === 'projectile');
+        assert.equal(projectile.active, undefined);
+        assert.deepEqual(projectile.position, [4, 1, -2]);
+        assert.deepEqual(frame.behaviourScripts.diagnostics, []);
+    } finally {
+        await supervisor.shutdown();
+    }
+});
+
+test('supervised Play Mode instantiates a resolved prefab with runtime lifecycle and spawn descriptor', async () => {
+    const supervisor = new RuntimeSupervisor({ heartbeatIntervalMs: 60_000 });
+    const cloneProgram = JSON.stringify({ version: 1, start: [{ op: 'setText', value: 'Spawned' }] });
+    const prefabData = {
+        id: 'prefab-root', name: 'Projectile', tag: 'Projectile', enabled: true,
+        transform: { position: [0, 0, 0], rotation: [0, 0, 0], scale: [1, 1, 1] },
+        components: [
+            { type: 'UIText', data: { text: '' } },
+            { type: 'BehaviourScript', data: { program: cloneProgram } },
+            { type: 'RigidBody', data: { mass: 1, useGravity: false, velocity: [0, 0, 0] } },
+            { type: 'MeshFilter', data: { primitiveType: 'Sphere' } },
+            { type: 'MeshRenderer', data: { color: '#ff4400' } }
+        ], children: []
+    };
+    const program = JSON.stringify({ version: 1, events: {
+        Fire: [
+            { op: 'instantiatePrefab', prefabData, position: [4, 2, -1], store: 'spawned' },
+            { op: 'setVelocity', target: { variable: 'spawned' }, value: [2, 0, 0] }
+        ],
+        RemoveLast: [{ op: 'destroy', target: { variable: 'spawned' } }]
+    } });
+    const authored = JSON.stringify({ formatVersion: 1, gameObjects: [
+        { id: 'spawner', transform: {}, components: [{ type: 'BehaviourScript', data: { program } }] }
+    ] });
+    try {
+        await supervisor.start(authored);
+        const frame = await supervisor.uiEvent('Fire');
+        const command = frame.spawnCommands[0];
+        assert.equal(command.sequence, 1);
+        assert.equal(command.node.id, 'runtime-prefab-1-1');
+        assert.deepEqual(command.node.transform.position, [4, 2, -1]);
+        assert.equal(frame.uiText.find(({ id }) => id === `${command.node.id}:UIText`).text, 'Spawned');
+        assert.equal(frame.behaviourScripts.instanceCount, 2);
+        assert.deepEqual(frame.behaviourScripts.diagnostics, []);
+        const moved = await supervisor.tick(0.02);
+        assert.equal(moved.transforms.find(({ id }) => id === command.node.id).position[0], 4.04);
+        const removed = await supervisor.uiEvent('RemoveLast');
+        assert.equal(removed.transforms.find(({ id }) => id === command.node.id).active, false);
+    } finally {
+        await supervisor.shutdown();
+    }
+});
+
 test('supervised BehaviourScript preserves authored action press and release edges', async () => {
     const supervisor = new RuntimeSupervisor({ heartbeatIntervalMs: 60_000 });
     const program = JSON.stringify({

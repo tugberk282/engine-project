@@ -4,8 +4,11 @@ import {
     bindPlayerModelHierarchy,
     collectPlayerModelResources,
     collectPlayerModels,
+    consumePlayerAnimationCommands,
+    createPlayerAnimationController,
     resolvePlayerModelResource,
-    selectPlayerAnimationClip
+    selectPlayerAnimationClip,
+    updatePlayerAnimationControllers
 } from '../electron/build/player-model.mjs';
 
 test('player model collector preserves GLB/GLTF source, activity, and Animator playback', () => {
@@ -40,6 +43,24 @@ test('player model collector includes authored GLTF roots', () => {
     assert.equal(collectPlayerModels(scene)[0].path, 'Assets/Models/Props/Crate.gltf');
 });
 
+test('player model collector preserves runtime prefab clone IDs and active hierarchy', () => {
+    const scene = { gameObjects: [{
+        id: 'runtime-prefab-4-1', enabled: false, components: [], children: [{
+            id: 'runtime-prefab-4-2', name: 'Runtime Model', enabled: true,
+            sourceAssetType: 'model', sourceAssetPath: 'Assets/Models/Runtime.glb',
+            components: [{ type: 'Animator', data: { currentAnimation: 'Idle', playOnAwake: true } }],
+            children: [{ id: 'runtime-prefab-4-3', name: 'MeshNode', components: [], children: [] }]
+        }]
+    }] };
+    const [descriptor] = collectPlayerModels(scene);
+    assert.equal(descriptor.objectId, 'runtime-prefab-4-2');
+    assert.equal(descriptor.path, 'Assets/Models/Runtime.glb');
+    assert.equal(descriptor.active, false);
+    assert.deepEqual(descriptor.activePath, ['runtime-prefab-4-1', 'runtime-prefab-4-2']);
+    assert.equal(descriptor.nodes[0].objectId, 'runtime-prefab-4-3');
+    assert.equal(descriptor.animation.clip, 'Idle');
+});
+
 test('GLTF dependencies resolve inside Assets and reject unsafe resources', () => {
     const resources = collectPlayerModelResources('Assets/Models/Hero/Hero.gltf', {
         buffers: [{ uri: 'mesh.bin?cache=1' }],
@@ -72,4 +93,82 @@ test('player animation selection uses the authored clip with deterministic fallb
     assert.equal(selectPlayerAnimationClip(clips, 'Run'), clips[1]);
     assert.equal(selectPlayerAnimationClip(clips, 'Missing'), clips[0]);
     assert.equal(selectPlayerAnimationClip([], 'Run'), null);
+});
+
+test('player animation controller executes sequenced play and stop commands once', () => {
+    const actions = new Map();
+    class AnimationMixer {
+        clipAction(clip) {
+            const action = {
+                clip, played: 0, stopped: 0,
+                setLoop(mode, repetitions) { this.loop = [mode, repetitions]; },
+                play() { this.played += 1; },
+                stop() { this.stopped += 1; }
+            };
+            actions.set(clip.name, action);
+            return action;
+        }
+    }
+    const THREE = { AnimationMixer, LoopRepeat: 'repeat', LoopOnce: 'once' };
+    const descriptor = { objectId: 'hero', animation: { clip: 'Idle', speed: 1.5, loop: false } };
+    const controller = createPlayerAnimationController(THREE, descriptor, {
+        scene: {}, animations: [{ name: 'Idle' }, { name: 'Run' }]
+    });
+    let sequence = consumePlayerAnimationCommands([
+        { sequence: 1, objectId: 'hero', command: 'play', clip: 'Run' }
+    ], 0, [controller]);
+    assert.equal(sequence, 1);
+    assert.equal(actions.get('Run').played, 1);
+    assert.equal(actions.get('Run').timeScale, 1.5);
+    assert.equal(actions.get('Run').clampWhenFinished, true);
+    assert.deepEqual(actions.get('Run').loop, ['once', Infinity]);
+    sequence = consumePlayerAnimationCommands([
+        { sequence: 1, objectId: 'hero', command: 'play', clip: 'Idle' },
+        { sequence: 2, objectId: 'hero', command: 'stop' }
+    ], sequence, [controller]);
+    assert.equal(sequence, 2);
+    assert.equal(actions.has('Idle'), false, 'an already consumed command must not replay');
+    assert.equal(actions.get('Run').stopped, 1);
+});
+
+test('player retains the latest animation command until a spawned model controller loads', () => {
+    const pending = new Map();
+    let sequence = consumePlayerAnimationCommands([
+        { sequence: 1, objectId: 'spawned-model', command: 'play', clip: 'Run' },
+        { sequence: 2, objectId: 'spawned-model', command: 'stop' },
+        { sequence: 3, objectId: 'spawned-model', command: 'play', clip: 'Idle' }
+    ], 0, [], pending);
+    assert.equal(sequence, 3);
+    assert.deepEqual(pending.get('spawned-model'), { command: 'play', clip: 'Idle' });
+
+    const received = [];
+    const controller = {
+        descriptor: { objectId: 'spawned-model' },
+        play: (clip) => received.push(['play', clip]),
+        stop: () => received.push(['stop'])
+    };
+    const pendingCommand = pending.get(controller.descriptor.objectId);
+    if (pendingCommand.command === 'play') controller.play(pendingCommand.clip);
+    else controller.stop();
+    pending.delete(controller.descriptor.objectId);
+    assert.deepEqual(received, [['play', 'Idle']]);
+    assert.equal(pending.size, 0);
+
+    sequence = consumePlayerAnimationCommands([
+        { sequence: 4, objectId: 'spawned-model', command: 'stop' }
+    ], sequence, [controller], pending);
+    assert.equal(sequence, 4);
+    assert.deepEqual(received, [['play', 'Idle'], ['stop']]);
+    assert.equal(pending.size, 0);
+});
+
+test('player animation mixers freeze while their authored hierarchy is inactive', () => {
+    const updates = [];
+    const controllers = [
+        { descriptor: { objectId: 'active' }, mixer: { update: (delta) => updates.push(['active', delta]) } },
+        { descriptor: { objectId: 'inactive' }, mixer: { update: (delta) => updates.push(['inactive', delta]) } }
+    ];
+    updatePlayerAnimationControllers(controllers, 0.25, (descriptor) => descriptor.objectId === 'active');
+    updatePlayerAnimationControllers(controllers, 0, () => true);
+    assert.deepEqual(updates, [['active', 0.25]]);
 });

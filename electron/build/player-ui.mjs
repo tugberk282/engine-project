@@ -591,6 +591,39 @@ export function collectPlayerSceneLoadActions(scene) {
     return actions;
 }
 
+export function mergePlayerRuntimeUi(target, scene) {
+    const collected = {
+        controls: collectPlayerUiControls(scene),
+        images: collectPlayerUiImages(scene),
+        text: collectPlayerUiText(scene),
+        scrollRects: collectPlayerScrollRects(scene),
+        sceneLoadActions: collectPlayerSceneLoadActions(scene)
+    };
+    const merge = (destination, entries, keyOf) => {
+        const known = new Set(destination.map(keyOf));
+        const added = [];
+        for (const entry of entries) {
+            const key = keyOf(entry);
+            if (known.has(key)) continue;
+            known.add(key);
+            destination.push(entry);
+            added.push(entry);
+        }
+        return added;
+    };
+    return {
+        controls: merge(target.controls, collected.controls, (entry) => entry.id),
+        images: merge(target.images, collected.images, (entry) => entry.id),
+        text: merge(target.text, collected.text, (entry) => entry.id),
+        scrollRects: merge(target.scrollRects, collected.scrollRects, (entry) => entry.id),
+        sceneLoadActions: merge(
+            target.sceneLoadActions,
+            collected.sceneLoadActions,
+            (entry) => `${entry.eventName}\0${entry.scenePath}\0${(entry.activePath || []).join('/')}`
+        )
+    };
+}
+
 function postControlEvent(worker, sessionId, control, value) {
     if (!control.eventName) return;
     worker.postMessage({

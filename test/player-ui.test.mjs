@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { applyPlayerUiImageStyle, collectPlayerSceneLoadActions, collectPlayerScrollRects, collectPlayerUiControls, collectPlayerUiImages, collectPlayerUiText, isPlayerUiActive, mountPlayerScrollRects, mountPlayerUiControls, normalizePlayerInputText, resolvePlayerUiFrames } from '../electron/build/player-ui.mjs';
+import { applyPlayerUiImageStyle, collectPlayerSceneLoadActions, collectPlayerScrollRects, collectPlayerUiControls, collectPlayerUiImages, collectPlayerUiText, isPlayerUiActive, mergePlayerRuntimeUi, mountPlayerScrollRects, mountPlayerUiControls, normalizePlayerInputText, resolvePlayerUiFrames } from '../electron/build/player-ui.mjs';
 
 test('player UI collector preserves authored control values and RectTransform layout', () => {
     const scene = {
@@ -435,4 +435,38 @@ test('player scene action collector finds enabled nested LoadScene actions', () 
     assert.deepEqual(actions, [{
         eventName: 'Play', scenePath: 'Assets/Scenes/Level.scene.json', active: true, activePath: ['menu', 'play']
     }]);
+});
+
+test('runtime prefab UI merge adds supported descriptors once with cloned hierarchy paths', () => {
+    const target = { controls: [], images: [], text: [], scrollRects: [], sceneLoadActions: [] };
+    const spawnedScene = { gameObjects: [{
+        id: 'runtime-ui-root', enabled: false,
+        components: [{ type: 'RectTransform', data: { sizeDelta: [320, 180] } }],
+        children: [{
+            id: 'runtime-ui-button', components: [
+                { type: 'RectTransform', data: { sizeDelta: [120, 40] } },
+                { type: 'UIButton', data: { label: 'Next', eventName: 'NextScene' } },
+                { type: 'UIImage', data: { color: '#123456' } },
+                { type: 'UIText', data: { text: 'Ready' } },
+                { type: 'UIEventAction', data: {
+                    action: 'LoadScene', eventName: 'NextScene', scenePath: 'Assets\\Scenes\\Next.scene.json'
+                } }
+            ], children: []
+        }, {
+            id: 'runtime-ui-scroll', components: [
+                { type: 'UIScrollRect', data: { content: { __ref: 'runtime-ui-content' } } }
+            ], children: [{ id: 'runtime-ui-content', components: [{ type: 'RectTransform', data: { sizeDelta: [300, 500] } }], children: [] }]
+        }]
+    }] };
+    const first = mergePlayerRuntimeUi(target, spawnedScene);
+    const second = mergePlayerRuntimeUi(target, spawnedScene);
+    assert.deepEqual(Object.fromEntries(Object.entries(first).map(([key, entries]) => [key, entries.length])), {
+        controls: 1, images: 1, text: 1, scrollRects: 1, sceneLoadActions: 1
+    });
+    assert.deepEqual(Object.fromEntries(Object.entries(second).map(([key, entries]) => [key, entries.length])), {
+        controls: 0, images: 0, text: 0, scrollRects: 0, sceneLoadActions: 0
+    });
+    assert.deepEqual(target.controls[0].activePath, ['runtime-ui-root', 'runtime-ui-button']);
+    assert.equal(target.controls[0].active, false);
+    assert.equal(target.sceneLoadActions[0].scenePath, 'Assets/Scenes/Next.scene.json');
 });

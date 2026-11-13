@@ -108,3 +108,58 @@ export function selectPlayerAnimationClip(clips, requestedName) {
     if (!Array.isArray(clips) || clips.length === 0) return null;
     return clips.find((clip) => clip?.name === requestedName) || clips[0] || null;
 }
+
+export function createPlayerAnimationController(THREE, descriptor, gltf) {
+    const mixer = new THREE.AnimationMixer(gltf.scene);
+    let currentAction = null;
+    return {
+        descriptor,
+        mixer,
+        play(requestedName) {
+            const clip = selectPlayerAnimationClip(gltf.animations, requestedName || descriptor.animation?.clip);
+            if (!clip) return null;
+            currentAction?.stop?.();
+            currentAction = mixer.clipAction(clip);
+            currentAction.setLoop(descriptor.animation?.loop ? THREE.LoopRepeat : THREE.LoopOnce, Infinity);
+            currentAction.clampWhenFinished = descriptor.animation?.loop !== true;
+            currentAction.timeScale = descriptor.animation?.speed ?? 1;
+            currentAction.play();
+            return clip.name || null;
+        },
+        stop() {
+            currentAction?.stop?.();
+            currentAction = null;
+        }
+    };
+}
+
+export function consumePlayerAnimationCommands(commands, lastSequence, controllers, pendingByObject = null) {
+    let consumedSequence = Number.isInteger(lastSequence) ? lastSequence : 0;
+    for (const command of commands || []) {
+        if (!Number.isInteger(command?.sequence) || command.sequence <= consumedSequence) continue;
+        if (command.command === 'play' || command.command === 'stop') {
+            if (pendingByObject instanceof Map && typeof command.objectId === 'string') {
+                pendingByObject.set(command.objectId, {
+                    command: command.command,
+                    ...(typeof command.clip === 'string' ? { clip: command.clip } : {})
+                });
+            }
+            for (const controller of controllers || []) {
+                if (controller?.descriptor?.objectId !== command.objectId) continue;
+                if (command.command === 'play') controller.play?.(command.clip);
+                else controller.stop?.();
+                pendingByObject?.delete?.(command.objectId);
+            }
+        }
+        consumedSequence = Math.max(consumedSequence, command.sequence);
+    }
+    return consumedSequence;
+}
+
+export function updatePlayerAnimationControllers(controllers, deltaTime, isActive) {
+    if (!(typeof deltaTime === 'number' && Number.isFinite(deltaTime) && deltaTime > 0)) return;
+    for (const controller of controllers || []) {
+        if (!controller?.mixer || isActive?.(controller.descriptor) === false) continue;
+        controller.mixer.update(deltaTime);
+    }
+}

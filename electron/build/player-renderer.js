@@ -1,17 +1,19 @@
 'use strict';
 import * as THREE from './three.module.js';
 import { GLTFLoader } from './gltf-loader.js';
-import { createPlayerScene } from './player-scene.mjs';
-import { applyPlayerUiImageStyle, applyPlayerUiLayout, collectPlayerSceneLoadActions, collectPlayerScrollRects, collectPlayerUiControls, collectPlayerUiImages, collectPlayerUiText, isPlayerUiActive, mountPlayerScrollRects, mountPlayerUiControls } from './player-ui.mjs';
+import { consumePlayerSpawnCommands, createPlayerScene } from './player-scene.mjs';
+import { applyPlayerUiImageStyle, applyPlayerUiLayout, collectPlayerSceneLoadActions, collectPlayerScrollRects, collectPlayerUiControls, collectPlayerUiImages, collectPlayerUiText, isPlayerUiActive, mergePlayerRuntimeUi, mountPlayerScrollRects, mountPlayerUiControls } from './player-ui.mjs';
 import { createPlayerInputMapper } from './player-input.mjs';
-import { collectPlayerAudioGraph, createWebAudioPlayback, isPlayerAudioActive } from './player-audio.mjs';
+import { collectPlayerAudioGraph, consumePlayerAudioCommands, createWebAudioPlayback, isPlayerAudioActive } from './player-audio.mjs';
 import {
     bindPlayerModelHierarchy,
     collectPlayerModelResources,
     collectPlayerModels,
-    selectPlayerAnimationClip
+    consumePlayerAnimationCommands,
+    createPlayerAnimationController,
+    updatePlayerAnimationControllers
 } from './player-model.mjs';
-import { collectPlayerParticleSystems, createPlayerParticleEmitter } from './player-particles.mjs';
+import { collectPlayerParticleSystems, consumePlayerParticleCommands, createPlayerParticleEmitter } from './player-particles.mjs';
 
 (async () => {
     const { manifest, scenePath, scene, smoke, sceneSwitchSmoke } = await window.tugberkPlayer.bootstrap();
@@ -67,10 +69,13 @@ import { collectPlayerParticleSystems, createPlayerParticleEmitter } from './pla
         })
         .filter(Boolean);
     const modelMixers = [];
+    const modelAnimationControllers = [];
+    const pendingAnimationCommands = new Map();
     const modelBindings = [];
     const modelErrors = [];
     let loadedModelCount = 0;
     let loadedModelMeshCount = 0;
+    let playerDisposed = false;
     const parseWithLoader = (loader, raw, resourcePath = '') => new Promise((resolve, reject) => {
         loader.parse(raw, resourcePath, resolve, reject);
     });
@@ -103,10 +108,17 @@ import { collectPlayerParticleSystems, createPlayerParticleEmitter } from './pla
             for (const url of objectUrls.values()) URL.revokeObjectURL(url);
         }
     };
-    await Promise.all(authoredModels.map(async (descriptor) => {
+    const loadModelDescriptor = async (descriptor, source = 'authored') => {
         try {
             const bytes = await window.tugberkPlayer.readModelAsset(descriptor.path);
             const gltf = await parseModel(descriptor, bytes);
+            if (playerDisposed) {
+                gltf.scene.traverse((entry) => {
+                    entry.geometry?.dispose();
+                    if (entry.material) entry.material.dispose();
+                });
+                return;
+            }
             const target = view.objects.get(descriptor.objectId);
             if (!target) throw new Error(`Model target is missing: ${descriptor.objectId}`);
             gltf.scene.traverse((entry) => {
@@ -121,27 +133,27 @@ import { collectPlayerParticleSystems, createPlayerParticleEmitter } from './pla
                 modelBindings.push({ object, authoredNode });
             });
             loadedModelCount += 1;
-            if (descriptor.animation?.playOnAwake && gltf.animations?.length) {
-                const clip = selectPlayerAnimationClip(gltf.animations, descriptor.animation.clip);
-                if (clip) {
-                    const mixer = new THREE.AnimationMixer(gltf.scene);
-                    const action = mixer.clipAction(clip);
-                    action.setLoop(descriptor.animation.loop ? THREE.LoopRepeat : THREE.LoopOnce, Infinity);
-                    action.clampWhenFinished = !descriptor.animation.loop;
-                    action.timeScale = descriptor.animation.speed;
-                    action.play();
-                    modelMixers.push(mixer);
-                }
+            if (descriptor.animation && gltf.animations?.length) {
+                const controller = createPlayerAnimationController(THREE, descriptor, gltf);
+                modelAnimationControllers.push(controller);
+                modelMixers.push(controller.mixer);
+                const pendingCommand = pendingAnimationCommands.get(descriptor.objectId);
+                if (pendingCommand?.command === 'play') controller.play(pendingCommand.clip);
+                else if (pendingCommand?.command === 'stop') controller.stop();
+                else if (descriptor.animation.playOnAwake) controller.play(descriptor.animation.clip);
+                pendingAnimationCommands.delete(descriptor.objectId);
             }
         } catch (error) {
             const message = `${descriptor.path}: ${error?.message || String(error)}`;
             modelErrors.push(message);
-            console.warn(`Could not load authored model ${message}`);
+            console.warn(`Could not load ${source} model ${message}`);
         }
-    }));
+    };
+    await Promise.all(authoredModels.map((descriptor) => loadModelDescriptor(descriptor)));
     root.dataset.modelErrors = String(modelErrors.length);
     const audioSources = [];
     const audioLoads = [];
+    const pendingAudioCommands = new Map();
     const audioContext = typeof window.AudioContext === 'function' ? new window.AudioContext() : null;
     const audioMime = (audioPath) => {
         const extension = audioPath.split('.').pop()?.toLowerCase();
@@ -162,8 +174,14 @@ import { collectPlayerParticleSystems, createPlayerParticleEmitter } from './pla
                         : bytes;
                     const buffer = await audioContext.decodeAudioData(raw);
                     const playback = createWebAudioPlayback(audioContext, buffer, descriptor);
+                    if (playerDisposed) return playback.stop();
                     audioSources.push(playback);
                     playback.sync(descriptor.active);
+                    const pendingCommand = pendingAudioCommands.get(descriptor.objectId);
+                    if (pendingCommand) {
+                        playback.command(pendingCommand);
+                        pendingAudioCommands.delete(descriptor.objectId);
+                    }
                     return;
                 }
                 const url = URL.createObjectURL(new Blob([bytes], { type: audioMime(clipPath) }));
@@ -176,17 +194,29 @@ import { collectPlayerParticleSystems, createPlayerParticleEmitter } from './pla
                 const playback = {
                     descriptor,
                     active: false,
+                    wantsPlayback: settings.playOnAwake !== false,
                     sync(active) {
                         if (active === this.active) return;
                         this.active = active;
-                        if (active && settings.playOnAwake !== false) void audio.play().catch(() => {});
+                        if (active && this.wantsPlayback) void audio.play().catch(() => {});
+                        else { audio.pause(); audio.currentTime = 0; }
+                    },
+                    command(command) {
+                        this.wantsPlayback = command === 'play';
+                        if (this.active && this.wantsPlayback) void audio.play().catch(() => {});
                         else { audio.pause(); audio.currentTime = 0; }
                     },
                     stop() { audio.pause(); audio.removeAttribute('src'); audio.load(); URL.revokeObjectURL(url); },
                     get panner() { return null; }
                 };
+                if (playerDisposed) return playback.stop();
                 audioSources.push(playback);
                 playback.sync(descriptor.active);
+                const pendingCommand = pendingAudioCommands.get(descriptor.objectId);
+                if (pendingCommand) {
+                    playback.command(pendingCommand);
+                    pendingAudioCommands.delete(descriptor.objectId);
+                }
             }).catch(() => {}));
     };
     for (const source of authoredAudio.sources) loadAudioSource(source);
@@ -195,7 +225,7 @@ import { collectPlayerParticleSystems, createPlayerParticleEmitter } from './pla
         const extension = assetPath.split('.').pop()?.toLowerCase();
         return extension === 'jpg' || extension === 'jpeg' ? 'image/jpeg' : extension === 'webp' ? 'image/webp' : 'image/png';
     };
-    await Promise.all(particleEmitters.map(async (emitter) => {
+    const loadParticleTexture = async (emitter) => {
         const safePath = emitter.descriptor.texturePath || '';
         if (!safePath.startsWith('Assets/') || safePath.includes('..') || safePath.includes(':')) return;
         try {
@@ -203,15 +233,21 @@ import { collectPlayerParticleSystems, createPlayerParticleEmitter } from './pla
             const raw = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
             const url = URL.createObjectURL(new Blob([raw], { type: imageMime(safePath) }));
             try {
-                emitter.material.map = await new Promise((resolve, reject) => new THREE.TextureLoader().load(url, resolve, undefined, reject));
+                const texture = await new Promise((resolve, reject) => new THREE.TextureLoader().load(url, resolve, undefined, reject));
+                if (playerDisposed) return texture.dispose();
+                emitter.material.map = texture;
                 emitter.material.needsUpdate = true;
             } finally { URL.revokeObjectURL(url); }
         } catch (error) {
             console.warn(`Could not load particle texture ${safePath}: ${error?.message || String(error)}`);
         }
-    }));
+    };
+    await Promise.all(particleEmitters.map(loadParticleTexture));
     const uiImageUrls = [];
-    for (const image of authoredUiImages) {
+    const mountedUiImages = new Set();
+    const mountUiImage = async (image) => {
+        if (mountedUiImages.has(image.id)) return;
+        mountedUiImages.add(image.id);
         const element = document.createElement('div');
         element.dataset.uiImageId = image.id;
         element.dataset.uiObjectId = image.activePath.at(-1) || '';
@@ -224,15 +260,17 @@ import { collectPlayerParticleSystems, createPlayerParticleEmitter } from './pla
             uiElementsByObjectId.set(element.dataset.uiObjectId, element);
         }
         const safePath = image.spritePath || '';
-        if (!safePath.startsWith('Assets/') || safePath.includes('..') || safePath.includes(':')) continue;
+        if (!safePath.startsWith('Assets/') || safePath.includes('..') || safePath.includes(':')) return;
         try {
             const bytes = await window.tugberkPlayer.readImageAsset(safePath);
+            if (playerDisposed) return;
             const raw = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
             const url = URL.createObjectURL(new Blob([raw], { type: imageMime(safePath) }));
             uiImageUrls.push(url);
             element.style.backgroundImage = `url(${JSON.stringify(url)})`;
         } catch {}
-    }
+    };
+    await Promise.all(authoredUiImages.map(mountUiImage));
     const loadMaterialTexture = async (object, texturePath, slot = 'map') => {
         if (!texturePath || !object.material || typeof window.tugberkPlayer.readImageAsset !== 'function') return;
         const safePath = String(texturePath).replaceAll('\\', '/');
@@ -335,7 +373,12 @@ import { collectPlayerParticleSystems, createPlayerParticleEmitter } from './pla
     let pendingAnimationDelta = 0;
     const mountedControls = new Set();
     let mountedScrollRects = [];
+    const mountedScrollRectIds = new Set();
     let sceneTransitionStarted = false;
+    let lastAudioCommandSequence = 0;
+    let lastParticleCommandSequence = 0;
+    let lastAnimationCommandSequence = 0;
+    let lastSpawnCommandSequence = 0;
 
     const input = (deltaTime = 0.02) => {
         const pad = gamepadInput();
@@ -346,10 +389,38 @@ import { collectPlayerParticleSystems, createPlayerParticleEmitter } from './pla
     };
     const render = (state) => {
         lastState = state;
+        lastSpawnCommandSequence = consumePlayerSpawnCommands(
+            state.spawnCommands,
+            lastSpawnCommandSequence,
+            (node) => {
+                view.materialize(node);
+                const spawnedScene = { gameObjects: [node] };
+                const spawnedUi = mergePlayerRuntimeUi({
+                    controls: authoredUiControls, images: authoredUiImages, text: authoredUiText,
+                    scrollRects: authoredScrollRects, sceneLoadActions
+                }, spawnedScene);
+                for (const descriptor of spawnedUi.images) void mountUiImage(descriptor);
+                for (const descriptor of collectPlayerModels(spawnedScene)) void loadModelDescriptor(descriptor, 'runtime prefab');
+                const spawnedAudio = collectPlayerAudioGraph(spawnedScene);
+                authoredAudio.listeners.push(...spawnedAudio.listeners);
+                for (const descriptor of spawnedAudio.sources) loadAudioSource(descriptor);
+                for (const descriptor of collectPlayerParticleSystems(spawnedScene)) {
+                    const object = view.objects.get(descriptor.objectId);
+                    if (!object) continue;
+                    const emitter = createPlayerParticleEmitter(THREE, descriptor, object);
+                    particleEmitters.push(emitter);
+                    void loadParticleTexture(emitter);
+                }
+            }
+        );
         view.update(state);
         const simulationDelta = pendingAnimationDelta;
         if (simulationDelta > 0) {
-            for (const mixer of modelMixers) mixer.update(simulationDelta);
+            updatePlayerAnimationControllers(
+                modelAnimationControllers,
+                simulationDelta,
+                (descriptor) => isPlayerUiActive(descriptor.activePath, state.transforms)
+            );
             for (const emitter of particleEmitters) {
                 emitter.update(simulationDelta, isPlayerUiActive(emitter.descriptor.activePath, state.transforms));
             }
@@ -379,6 +450,23 @@ import { collectPlayerParticleSystems, createPlayerParticleEmitter } from './pla
             panner.positionY.value = position.y;
             panner.positionZ.value = position.z;
         }
+        lastAudioCommandSequence = consumePlayerAudioCommands(
+            state.audioCommands,
+            lastAudioCommandSequence,
+            audioSources,
+            pendingAudioCommands
+        );
+        lastParticleCommandSequence = consumePlayerParticleCommands(
+            state.particleCommands,
+            lastParticleCommandSequence,
+            particleEmitters
+        );
+        lastAnimationCommandSequence = consumePlayerAnimationCommands(
+            state.animationCommands,
+            lastAnimationCommandSequence,
+            modelAnimationControllers,
+            pendingAnimationCommands
+        );
         if (audioContext?.listener) {
             const listener = audioContext.listener;
             const activeListener = authoredAudio.listeners.find((entry) => isPlayerAudioActive(entry.activePath, state.transforms));
@@ -415,6 +503,7 @@ import { collectPlayerParticleSystems, createPlayerParticleEmitter } from './pla
         const previousBackground = view.scene.background;
         for (let passIndex = 0; passIndex < view.renderPasses.length; passIndex += 1) {
             const pass = view.renderPasses[passIndex];
+            if (!isPlayerUiActive(pass.activePath, state.transforms)) continue;
             const viewport = view.viewportPixels(renderWidth, renderHeight, pass);
             renderer.setViewport(viewport.x, viewport.y, viewport.width, viewport.height);
             renderer.setScissor(viewport.x, viewport.y, viewport.width, viewport.height);
@@ -492,15 +581,19 @@ import { collectPlayerParticleSystems, createPlayerParticleEmitter } from './pla
                 controlsLayer.append(control);
             }
         }
-        if (!mountedControls.size && authoredUiControls.length) {
-            const mountedByObjectId = mountPlayerUiControls(document, controlsLayer, authoredUiControls, worker, sessionId);
+        const pendingControls = authoredUiControls.filter((control) => !mountedControls.has(control.id));
+        if (pendingControls.length) {
+            const mountedByObjectId = mountPlayerUiControls(document, controlsLayer, pendingControls, worker, sessionId);
             for (const [objectId, element] of mountedByObjectId) {
                 if (!uiElementsByObjectId.has(objectId)) uiElementsByObjectId.set(objectId, element);
             }
-            for (const control of authoredUiControls) mountedControls.add(control.id);
+            for (const control of pendingControls) mountedControls.add(control.id);
         }
-        if (!mountedScrollRects.length && authoredScrollRects.length) {
-            mountedScrollRects = mountPlayerScrollRects(document, controlsLayer, authoredScrollRects, uiElementsByObjectId);
+        const pendingScrollRects = authoredScrollRects.filter((descriptor) => !mountedScrollRectIds.has(descriptor.id));
+        if (pendingScrollRects.length) {
+            const newlyMounted = mountPlayerScrollRects(document, controlsLayer, pendingScrollRects, uiElementsByObjectId);
+            mountedScrollRects.push(...newlyMounted);
+            for (const entry of newlyMounted) mountedScrollRectIds.add(entry.descriptor.id);
         }
         for (const element of root.querySelectorAll('[data-ui-active-path]')) {
             let path = [];
@@ -552,6 +645,7 @@ import { collectPlayerParticleSystems, createPlayerParticleEmitter } from './pla
     window.addEventListener('blur', clearInput);
     document.addEventListener('visibilitychange', () => { if (document.hidden) clearInput(); });
     window.addEventListener('pagehide', () => {
+        playerDisposed = true;
         worker.terminate(); observer.disconnect(); view.dispose(); renderer.dispose();
         for (const url of uiImageUrls) URL.revokeObjectURL(url);
         for (const audio of audioSources) {

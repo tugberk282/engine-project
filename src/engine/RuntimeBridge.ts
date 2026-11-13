@@ -24,6 +24,10 @@ export interface RuntimeFrame {
     lastUiEvent?: string | null;
     lastUiEventPayload?: unknown;
     uiText?: Array<{ id: string; text: string }>;
+    audioCommands?: Array<{ sequence: number; objectId: string; command: 'play' | 'stop' }>;
+    particleCommands?: Array<{ sequence: number; objectId: string; command: 'play' | 'stop' }>;
+    animationCommands?: Array<{ sequence: number; objectId: string; command: 'play' | 'stop'; clip?: string }>;
+    spawnCommands?: Array<{ sequence: number; node: Record<string, unknown> }>;
     behaviourScripts?: {
         instanceCount: number;
         diagnostics: Array<{ objectId: string; phase: string; message: string }>;

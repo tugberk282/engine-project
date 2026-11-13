@@ -1,3 +1,13 @@
+export function consumePlayerSpawnCommands(commands, lastSequence, materialize) {
+    let consumedSequence = Number.isInteger(lastSequence) ? lastSequence : 0;
+    for (const command of commands || []) {
+        if (!Number.isInteger(command?.sequence) || command.sequence <= consumedSequence) continue;
+        if (command.node && typeof command.node === 'object') materialize(command.node);
+        consumedSequence = Math.max(consumedSequence, command.sequence);
+    }
+    return consumedSequence;
+}
+
 export function createPlayerScene(THREE, document) {
     const scene = new THREE.Scene();
     const environmentBackground = new THREE.Color(document.environment?.backgroundColor || '#20323a');
@@ -39,7 +49,8 @@ export function createPlayerScene(THREE, document) {
             default: return null;
         }
     };
-    const visit = (node, parent) => {
+    const visit = (node, parent, parentPath = []) => {
+        const activePath = node?.id ? [...parentPath, node.id] : parentPath;
         const object = new THREE.Group();
         object.name = node.name || '';
         object.visible = node.enabled !== false;
@@ -83,6 +94,7 @@ export function createPlayerScene(THREE, document) {
             cameras.push({
                 camera,
                 objectId: node.id,
+                activePath,
                 index: cameraIndex++,
                 main: settings.isMain === true || node.tag === 'MainCamera',
                 clearFlags: settings.clearFlags || 'Solid Color',
@@ -124,29 +136,11 @@ export function createPlayerScene(THREE, document) {
             if (light.target) { light.target.position.set(0, 0, -1); object.add(light.target); }
         }
         if (components(node, 'PlayerController').length) player ??= object;
-        for (const child of node.children || []) visit(child, object);
+        for (const child of node.children || []) visit(child, object, activePath);
     };
     for (const node of document.gameObjects || []) visit(node, scene);
     scene.add(new THREE.AmbientLight(document.environment?.ambientColor || '#ffffff', document.environment?.ambientIntensity ?? 0.8));
-    const depthOrderedCameras = [...cameras].sort((left, right) => left.depth - right.depth || left.index - right.index);
-    const knownBaseCameraIds = new Set(depthOrderedCameras
-        .filter(entry => entry.renderType !== 'Overlay')
-        .map(entry => entry.objectId));
-    const baseCameras = depthOrderedCameras.filter(entry =>
-        entry.renderType !== 'Overlay' || !entry.stackBaseCameraId || !knownBaseCameraIds.has(entry.stackBaseCameraId)
-    );
     const renderPasses = [];
-    for (const base of baseCameras) {
-        renderPasses.push(base);
-        depthOrderedCameras
-            .filter(entry => entry.renderType === 'Overlay' && entry.stackBaseCameraId === base.objectId)
-            .forEach(entry => renderPasses.push(entry));
-    }
-    const selectedCamera = cameras.find(entry => entry.main)
-        || [...cameras].sort((left, right) => right.depth - left.depth || left.index - right.index)[0];
-    const camera = selectedCamera?.camera || new THREE.PerspectiveCamera(60, 1, 0.1, 1000);
-    if (selectedCamera?.clearFlags === 'Solid Color') scene.background = new THREE.Color(selectedCamera.clearColor);
-    camera.userData.clearAlpha = selectedCamera?.clearAlpha ?? 1;
     const normalizeViewport = authored => {
         const source = authored || { x: 0, y: 0, width: 1, height: 1 };
         const normalized = {
@@ -157,13 +151,13 @@ export function createPlayerScene(THREE, document) {
         normalized.y = Math.max(0, Math.min(1 - normalized.height, Number(source.y) || 0));
         return normalized;
     };
-    for (const entry of renderPasses) {
-        entry.viewportRect = normalizeViewport(entry.viewportRect);
-        entry.camera.userData.viewportRect = entry.viewportRect;
-        entry.camera.userData.clearAlpha = entry.clearAlpha;
-    }
+    const fallbackCamera = new THREE.PerspectiveCamera(60, 1, 0.1, 1000);
+    let selectedCamera = null;
+    let camera = fallbackCamera;
     const fallbackPass = {
-        camera,
+        camera: fallbackCamera,
+        objectId: null,
+        activePath: [],
         clearFlags: 'Solid Color',
         clearColor: environmentBackground,
         clearAlpha: 1,
@@ -172,8 +166,38 @@ export function createPlayerScene(THREE, document) {
         stackBaseCameraId: null,
         depth: 0
     };
-    if (renderPasses.length === 0) renderPasses.push(fallbackPass);
-    if (!camera.parent) { camera.position.set(5, 7, 12); camera.lookAt(0, 0, 0); scene.add(camera); }
+    const rebuildRenderPasses = () => {
+        const depthOrderedCameras = [...cameras].sort((left, right) => left.depth - right.depth || left.index - right.index);
+        const knownBaseCameraIds = new Set(depthOrderedCameras
+            .filter(entry => entry.renderType !== 'Overlay')
+            .map(entry => entry.objectId));
+        const baseCameras = depthOrderedCameras.filter(entry =>
+            entry.renderType !== 'Overlay' || !entry.stackBaseCameraId || !knownBaseCameraIds.has(entry.stackBaseCameraId)
+        );
+        renderPasses.length = 0;
+        for (const base of baseCameras) {
+            renderPasses.push(base);
+            depthOrderedCameras
+                .filter(entry => entry.renderType === 'Overlay' && entry.stackBaseCameraId === base.objectId)
+                .forEach(entry => renderPasses.push(entry));
+        }
+        selectedCamera = cameras.find(entry => entry.main)
+            || [...cameras].sort((left, right) => right.depth - left.depth || left.index - right.index)[0]
+            || null;
+        camera = selectedCamera?.camera || fallbackCamera;
+        if (selectedCamera?.clearFlags === 'Solid Color') scene.background = new THREE.Color(selectedCamera.clearColor);
+        camera.userData.clearAlpha = selectedCamera?.clearAlpha ?? 1;
+        for (const entry of renderPasses) {
+            entry.viewportRect = normalizeViewport(entry.viewportRect);
+            entry.camera.userData.viewportRect = entry.viewportRect;
+            entry.camera.userData.clearAlpha = entry.clearAlpha;
+        }
+        if (renderPasses.length === 0) renderPasses.push(fallbackPass);
+    };
+    fallbackCamera.position.set(5, 7, 12);
+    fallbackCamera.lookAt(0, 0, 0);
+    scene.add(fallbackCamera);
+    rebuildRenderPasses();
     const resize = (width, height) => {
         for (const entry of renderPasses) {
             const aspect = Math.max(1, width * entry.viewportRect.width) / Math.max(1, height * entry.viewportRect.height);
@@ -227,5 +251,15 @@ export function createPlayerScene(THREE, document) {
     const bindExternalObject = (objectId, object) => {
         if (typeof objectId === 'string' && object) externalObjects.set(objectId, object);
     };
-    return { scene, camera, renderPasses, environmentBackground, objects, meshCount, resize, viewportPixels, update, bindExternalObject, dispose };
+    const materialize = (node) => {
+        if (!node || typeof node.id !== 'string' || objects.has(node.id)) return null;
+        visit(node, scene);
+        rebuildRenderPasses();
+        scene.updateMatrixWorld(true);
+        return objects.get(node.id) || null;
+    };
+    return {
+        scene, get camera() { return camera; }, renderPasses, environmentBackground, objects,
+        get meshCount() { return meshCount; }, resize, viewportPixels, update, materialize, bindExternalObject, dispose
+    };
 }

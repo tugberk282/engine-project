@@ -46,6 +46,231 @@ test('standalone worker executes authored BehaviourScript lifecycle and UI event
     assert.deepEqual(Array.from(labeled.behaviourScripts.diagnostics), []);
 });
 
+test('standalone worker routes bounded BehaviourScript events between authored objects', () => {
+    const runtime = createRuntime();
+    const senderProgram = JSON.stringify({
+        version: 1,
+        update: [{
+            op: 'if', condition: { buttonDown: 'Fire' },
+            then: [{ op: 'sendEvent', target: 'Target', name: 'Hit', value: 4 }]
+        }]
+    });
+    const receiverProgram = JSON.stringify({
+        version: 1, variables: { health: 10 },
+        events: { Hit: [
+            { op: 'addVariable', name: 'health', value: { negate: { eventValue: true } } },
+            { op: 'setText', value: { concat: ['HP ', { variable: 'health' }] } }
+        ] }
+    });
+    runtime.send('start', { snapshot: JSON.stringify({ formatVersion: 1, gameObjects: [
+        { id: 'sender', name: 'Sender', transform: {}, components: [{ type: 'BehaviourScript', data: { program: senderProgram } }] },
+        { id: 'target', name: 'Target', transform: {}, components: [
+            { type: 'UIText', data: { text: '' } },
+            { type: 'BehaviourScript', data: { program: receiverProgram } }
+        ] }
+    ] }) });
+    const frame = runtime.send('tick', { deltaTime: 0.02, input: { Fire: true, '__buttonDown:Fire': true } });
+    assert.equal(frame.uiText[0].text, 'HP 6');
+    assert.deepEqual(Array.from(frame.behaviourScripts.diagnostics), []);
+});
+
+test('standalone worker starts an ID-activated pooled BehaviourScript exactly once', () => {
+    const runtime = createRuntime();
+    const activator = JSON.stringify({
+        version: 1,
+        events: { Spawn: [{ op: 'setActive', target: 'pooled', value: true }] }
+    });
+    const pooled = JSON.stringify({
+        version: 1,
+        variables: { starts: 0 },
+        start: [
+            { op: 'addVariable', name: 'starts', value: 1 },
+            { op: 'setText', value: { concat: ['Started ', { variable: 'starts' }] } }
+        ],
+        update: [{ op: 'translate', value: [1, 0, 0] }]
+    });
+    runtime.send('start', { snapshot: JSON.stringify({ formatVersion: 1, gameObjects: [
+        { id: 'activator', transform: {}, components: [{ type: 'BehaviourScript', data: { program: activator } }] },
+        { id: 'pooled', name: 'Pooled Enemy', enabled: false, transform: {}, components: [
+            { type: 'UIText', data: { text: '' } },
+            { type: 'BehaviourScript', data: { program: pooled } }
+        ] }
+    ] }) });
+    const activated = runtime.send('uiEvent', { name: 'Spawn' });
+    assert.notEqual(activated.transforms.find(({ id }) => id === 'pooled').active, false);
+    assert.equal(activated.uiText.find(({ id }) => id === 'pooled:UIText').text, 'Started 1');
+    const first = runtime.send('tick', { deltaTime: 0.02 });
+    const second = runtime.send('tick', { deltaTime: 0.02 });
+    assert.equal(first.transforms.find(({ id }) => id === 'pooled').position[0], 1);
+    assert.equal(second.transforms.find(({ id }) => id === 'pooled').position[0], 2);
+    assert.equal(second.uiText.find(({ id }) => id === 'pooled:UIText').text, 'Started 1');
+});
+
+test('standalone worker advances authored AI toward its target at frame-rate-independent speed', () => {
+    const runtime = createRuntime();
+    const program = JSON.stringify({
+        version: 1,
+        update: [{
+            op: 'if', condition: { greaterThan: [{ distanceTo: 'Player' }, 0.1] },
+            then: [{ op: 'moveTowards', destination: 'Player', speed: 4 }]
+        }]
+    });
+    runtime.send('start', { snapshot: JSON.stringify({ formatVersion: 1, gameObjects: [
+        { id: 'enemy', name: 'Enemy', transform: { position: [0, 0, 0] }, components: [{ type: 'BehaviourScript', data: { program } }] },
+        { id: 'player', name: 'Player', tag: 'Player', transform: { position: [5, 0, 0] }, components: [] }
+    ] }) });
+    const frame = runtime.send('tick', { deltaTime: 0.1 });
+    assert.equal(frame.transforms.find(({ id }) => id === 'enemy').position[0], 0.4);
+    assert.deepEqual(Array.from(frame.behaviourScripts.diagnostics), []);
+});
+
+test('standalone worker applies authored rigidbody impulse before fixed-step integration', () => {
+    const runtime = createRuntime();
+    const program = JSON.stringify({
+        version: 1,
+        fixedUpdate: [{ op: 'addForce', value: [4, 0, 0], mode: 'Impulse' }]
+    });
+    runtime.send('start', { snapshot: JSON.stringify({ formatVersion: 1, gameObjects: [{
+        id: 'body', transform: { position: [0, 0, 0] }, components: [
+            { type: 'RigidBody', data: { mass: 2, useGravity: false, drag: 0, velocity: [0, 0, 0] } },
+            { type: 'BehaviourScript', data: { program } }
+        ]
+    }] }) });
+    const frame = runtime.send('tick', { deltaTime: 0.02 });
+    assert.equal(frame.transforms[0].position[0], 0.04);
+    assert.deepEqual(Array.from(frame.behaviourScripts.diagnostics), []);
+});
+
+test('standalone worker publishes ordered BehaviourScript audio commands', () => {
+    const runtime = createRuntime();
+    const program = JSON.stringify({
+        version: 1,
+        events: {
+            PlaySfx: [{ op: 'playAudio', target: 'speaker' }],
+            StopSfx: [{ op: 'stopAudio', target: 'speaker' }]
+        }
+    });
+    runtime.send('start', { snapshot: JSON.stringify({ formatVersion: 1, gameObjects: [
+        { id: 'controller', transform: {}, components: [{ type: 'BehaviourScript', data: { program } }] },
+        { id: 'speaker', transform: {}, components: [{ type: 'AudioSource', data: { playOnAwake: false } }] }
+    ] }) });
+    const played = runtime.send('uiEvent', { name: 'PlaySfx' });
+    assert.deepEqual(JSON.parse(JSON.stringify(played.audioCommands)), [
+        { sequence: 1, objectId: 'speaker', command: 'play' }
+    ]);
+    const stopped = runtime.send('uiEvent', { name: 'StopSfx' });
+    assert.deepEqual(JSON.parse(JSON.stringify(stopped.audioCommands)), [
+        { sequence: 1, objectId: 'speaker', command: 'play' },
+        { sequence: 2, objectId: 'speaker', command: 'stop' }
+    ]);
+});
+
+test('standalone worker publishes ordered BehaviourScript particle commands', () => {
+    const runtime = createRuntime();
+    const program = JSON.stringify({
+        version: 1,
+        events: {
+            PlayFx: [{ op: 'playParticles', target: 'fx' }],
+            StopFx: [{ op: 'stopParticles', target: 'fx' }]
+        }
+    });
+    runtime.send('start', { snapshot: JSON.stringify({ formatVersion: 1, gameObjects: [
+        { id: 'controller', transform: {}, components: [{ type: 'BehaviourScript', data: { program } }] },
+        { id: 'fx', transform: {}, components: [{ type: 'ParticleSystem', data: { playOnAwake: false } }] }
+    ] }) });
+    const played = runtime.send('uiEvent', { name: 'PlayFx' });
+    assert.deepEqual(JSON.parse(JSON.stringify(played.particleCommands)), [
+        { sequence: 1, objectId: 'fx', command: 'play' }
+    ]);
+    const stopped = runtime.send('uiEvent', { name: 'StopFx' });
+    assert.deepEqual(JSON.parse(JSON.stringify(stopped.particleCommands)), [
+        { sequence: 1, objectId: 'fx', command: 'play' },
+        { sequence: 2, objectId: 'fx', command: 'stop' }
+    ]);
+});
+
+test('standalone worker publishes ordered BehaviourScript animation commands', () => {
+    const runtime = createRuntime();
+    const program = JSON.stringify({
+        version: 1,
+        events: {
+            PlayAnim: [{ op: 'playAnimation', target: 'character', clip: 'Run' }],
+            StopAnim: [{ op: 'stopAnimation', target: 'character' }]
+        }
+    });
+    runtime.send('start', { snapshot: JSON.stringify({ formatVersion: 1, gameObjects: [
+        { id: 'controller', transform: {}, components: [{ type: 'BehaviourScript', data: { program } }] },
+        { id: 'character', transform: {}, components: [{ type: 'Animator', data: { currentAnimation: 'Idle' } }] }
+    ] }) });
+    const played = runtime.send('uiEvent', { name: 'PlayAnim' });
+    assert.deepEqual(JSON.parse(JSON.stringify(played.animationCommands)), [
+        { sequence: 1, objectId: 'character', command: 'play', clip: 'Run' }
+    ]);
+    const stopped = runtime.send('uiEvent', { name: 'StopAnim' });
+    assert.deepEqual(JSON.parse(JSON.stringify(stopped.animationCommands)), [
+        { sequence: 1, objectId: 'character', command: 'play', clip: 'Run' },
+        { sequence: 2, objectId: 'character', command: 'stop' }
+    ]);
+});
+
+test('standalone worker activates authored pooled objects at the requested spawn transform', () => {
+    const runtime = createRuntime();
+    const program = JSON.stringify({
+        version: 1,
+        events: { Fire: [{ op: 'spawnPooled', pool: 'tag:Projectile', position: [4, 1, -2] }] }
+    });
+    runtime.send('start', { snapshot: JSON.stringify({ formatVersion: 1, gameObjects: [
+        { id: 'spawner', transform: {}, components: [{ type: 'BehaviourScript', data: { program } }] },
+        { id: 'projectile', name: 'Projectile', tag: 'Projectile', enabled: false, transform: { position: [0, 0, 0] }, components: [
+            { type: 'RigidBody', data: { useGravity: false, velocity: [5, 0, 0] } }
+        ] }
+    ] }) });
+    const frame = runtime.send('uiEvent', { name: 'Fire' });
+    const projectile = frame.transforms.find(({ id }) => id === 'projectile');
+    assert.equal(projectile.active, undefined);
+    assert.deepEqual(Array.from(projectile.position), [4, 1, -2]);
+    assert.deepEqual(Array.from(frame.behaviourScripts.diagnostics), []);
+});
+
+test('standalone worker instantiates a resolved prefab with runtime lifecycle and spawn descriptor', () => {
+    const runtime = createRuntime();
+    const cloneProgram = JSON.stringify({ version: 1, start: [{ op: 'setText', value: 'Spawned' }] });
+    const prefabData = {
+        id: 'prefab-root', name: 'Projectile', tag: 'Projectile', enabled: true,
+        transform: { position: [0, 0, 0], rotation: [0, 0, 0], scale: [1, 1, 1] },
+        components: [
+            { type: 'UIText', data: { text: '' } },
+            { type: 'BehaviourScript', data: { program: cloneProgram } },
+            { type: 'RigidBody', data: { mass: 1, useGravity: false, velocity: [0, 0, 0] } },
+            { type: 'MeshFilter', data: { primitiveType: 'Sphere' } },
+            { type: 'MeshRenderer', data: { color: '#ff4400' } }
+        ], children: []
+    };
+    const program = JSON.stringify({ version: 1, events: {
+        Fire: [
+            { op: 'instantiatePrefab', prefabData, position: [4, 2, -1], store: 'spawned' },
+            { op: 'setVelocity', target: { variable: 'spawned' }, value: [2, 0, 0] }
+        ],
+        RemoveLast: [{ op: 'destroy', target: { variable: 'spawned' } }]
+    } });
+    runtime.send('start', { snapshot: JSON.stringify({ formatVersion: 1, gameObjects: [
+        { id: 'spawner', transform: {}, components: [{ type: 'BehaviourScript', data: { program } }] }
+    ] }) });
+    const frame = runtime.send('uiEvent', { name: 'Fire' });
+    const command = frame.spawnCommands[0];
+    assert.equal(command.sequence, 1);
+    assert.equal(command.node.id, 'runtime-prefab-1-1');
+    assert.deepEqual(Array.from(command.node.transform.position), [4, 2, -1]);
+    assert.equal(frame.transforms.find(({ id }) => id === command.node.id).position[0], 4);
+    assert.equal(frame.uiText.find(({ id }) => id === `${command.node.id}:UIText`).text, 'Spawned');
+    assert.equal(frame.behaviourScripts.instanceCount, 2);
+    assert.deepEqual(Array.from(frame.behaviourScripts.diagnostics), []);
+    const moved = runtime.send('tick', { deltaTime: 0.02 });
+    assert.equal(moved.transforms.find(({ id }) => id === command.node.id).position[0], 4.04);
+    const removed = runtime.send('uiEvent', { name: 'RemoveLast' });
+    assert.equal(removed.transforms.find(({ id }) => id === command.node.id).active, false);
+});
+
 test('standalone worker preserves authored action press and release edges', () => {
     const runtime = createRuntime();
     const program = JSON.stringify({

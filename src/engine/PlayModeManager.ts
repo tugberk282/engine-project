@@ -7,6 +7,7 @@ import { Scene } from './Scene';
 import { SceneManager } from './SceneManager';
 import { RuntimeBridge, RuntimeFailure, RuntimeFrame, RuntimeState } from './RuntimeBridge';
 import { Input } from './Input';
+import { Prefab } from './Prefab';
 
 export type PlayMode = 'edit' | 'play' | 'paused';
 export type PlayStep = 'frame' | 'physics' | 'full';
@@ -24,6 +25,10 @@ export class PlayModeManager {
     private readonly runtime = new RuntimeBridge();
     private runtimeError: RuntimeFailure | null = null;
     private lastRuntimeUiEvent: string | null = null;
+    private lastRuntimeAudioSequence: number = 0;
+    private lastRuntimeParticleSequence: number = 0;
+    private lastRuntimeAnimationSequence: number = 0;
+    private lastRuntimeSpawnSequence: number = 0;
     private runtimeSceneSnapshot: string | null = null;
     private runtimeScenePath: string | null = null;
     private sceneTransitionInFlight = false;
@@ -87,6 +92,10 @@ export class PlayModeManager {
             this.runtimeSceneSnapshot = prepared.snapshot;
             this.runtimeScenePath = prepared.path;
             this.lastRuntimeUiEvent = null;
+            this.lastRuntimeAudioSequence = 0;
+            this.lastRuntimeParticleSequence = 0;
+            this.lastRuntimeAnimationSequence = 0;
+            this.lastRuntimeSpawnSequence = 0;
             this.frame = 0;
             this.time = 0;
             this.deltaTime = 0;
@@ -161,6 +170,10 @@ export class PlayModeManager {
         this.runtimeError = null;
         this.reportedScriptDiagnostics.clear();
         this.lastRuntimeUiEvent = null;
+        this.lastRuntimeAudioSequence = 0;
+        this.lastRuntimeParticleSequence = 0;
+        this.lastRuntimeAnimationSequence = 0;
+        this.lastRuntimeSpawnSequence = 0;
         this.sceneTransitionInFlight = false;
         if (this.runtimeSceneSnapshot) this.runtime.start(this.runtimeSceneSnapshot);
 
@@ -185,6 +198,10 @@ export class PlayModeManager {
 
         this.runtime.stop();
         this.lastRuntimeUiEvent = null;
+        this.lastRuntimeAudioSequence = 0;
+        this.lastRuntimeParticleSequence = 0;
+        this.lastRuntimeAnimationSequence = 0;
+        this.lastRuntimeSpawnSequence = 0;
         this.reportedScriptDiagnostics.clear();
 
         // Restore scene from snapshot
@@ -386,6 +403,10 @@ export class PlayModeManager {
             const scene = SceneManager.getInstance().getActiveScene();
             if (scene) scene.loadFromJSON(prepared);
             this.lastRuntimeUiEvent = null;
+            this.lastRuntimeAudioSequence = 0;
+            this.lastRuntimeParticleSequence = 0;
+            this.lastRuntimeAnimationSequence = 0;
+            this.lastRuntimeSpawnSequence = 0;
             this.runtime.restart(prepared);
             (window as any).Editor?.instance?.onRuntimeSceneChanged?.(this.runtimeScenePath || '');
             console.info('[PlayMode] BehaviourScript domain reload completed.');
@@ -428,6 +449,42 @@ export class PlayModeManager {
         }
         const scene = SceneManager.getInstance().getActiveScene();
         if (!scene) return;
+        for (const command of runtimeFrame.spawnCommands || []) {
+            if (!Number.isInteger(command.sequence) || command.sequence <= this.lastRuntimeSpawnSequence) continue;
+            const node = command.node as any;
+            if (node && typeof node.id === 'string' && !scene.findGameObjectByID(node.id)) {
+                const clone = Prefab.instantiateData(node, { preserveIds: true });
+                scene.addGameObject(clone);
+            }
+            this.lastRuntimeSpawnSequence = Math.max(this.lastRuntimeSpawnSequence, command.sequence);
+        }
+        for (const command of runtimeFrame.audioCommands || []) {
+            if (!Number.isInteger(command.sequence) || command.sequence <= this.lastRuntimeAudioSequence) continue;
+            const gameObject = scene.findGameObjectByID(command.objectId);
+            const source = gameObject?.getComponent<any>('AudioSource');
+            if (command.command === 'play') source?.play?.();
+            if (command.command === 'stop') source?.stop?.();
+            this.lastRuntimeAudioSequence = Math.max(this.lastRuntimeAudioSequence, command.sequence);
+        }
+        for (const command of runtimeFrame.particleCommands || []) {
+            if (!Number.isInteger(command.sequence) || command.sequence <= this.lastRuntimeParticleSequence) continue;
+            const gameObject = scene.findGameObjectByID(command.objectId);
+            const particles = gameObject?.getComponent<any>('ParticleSystem');
+            if (command.command === 'play') particles?.play?.();
+            if (command.command === 'stop') particles?.stop?.();
+            this.lastRuntimeParticleSequence = Math.max(this.lastRuntimeParticleSequence, command.sequence);
+        }
+        for (const command of runtimeFrame.animationCommands || []) {
+            if (!Number.isInteger(command.sequence) || command.sequence <= this.lastRuntimeAnimationSequence) continue;
+            const gameObject = scene.findGameObjectByID(command.objectId);
+            const animator = gameObject?.getComponent<any>('Animator');
+            if (command.command === 'play' && animator) {
+                const clip = command.clip || animator.currentAnimation || animator.animations?.keys?.().next?.().value;
+                if (typeof clip === 'string' && clip.length > 0) animator.play?.(clip);
+            }
+            if (command.command === 'stop') animator?.stop?.();
+            this.lastRuntimeAnimationSequence = Math.max(this.lastRuntimeAnimationSequence, command.sequence);
+        }
         for (const transformState of runtimeFrame.transforms) {
             const gameObject = scene.findGameObjectByID(transformState.id);
             if (!gameObject) continue;

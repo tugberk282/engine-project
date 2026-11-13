@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { collectPlayerParticleSystems, PlayerParticleSimulation } from '../electron/build/player-particles.mjs';
+import { collectPlayerParticleSystems, consumePlayerParticleCommands, PlayerParticleSimulation } from '../electron/build/player-particles.mjs';
 
 test('player particle collector preserves authored simulation settings and activity', () => {
     const systems = collectPlayerParticleSystems({ gameObjects: [{
@@ -45,4 +45,43 @@ test('inactive particle hierarchy freezes emission and lifetime', () => {
     assert.equal(simulation.particles.length, 0);
     simulation.update(0.1, true);
     assert.equal(simulation.particles.length, 1);
+});
+
+test('manual particle commands start, stop, clear, and consume once', () => {
+    const simulation = new PlayerParticleSimulation({
+        objectId: 'fx', emissionRate: 10, duration: 1, startLifetime: 1,
+        startSpeed: 0, gravity: [0, 0, 0], maxParticles: 10, loop: true, playOnAwake: false
+    });
+    simulation.update(0.1, true);
+    assert.equal(simulation.particles.length, 0);
+    const emitter = {
+        descriptor: { objectId: 'fx' },
+        command(command) { if (command === 'play') simulation.play(); else simulation.stop(); }
+    };
+    const commands = [{ sequence: 1, objectId: 'fx', command: 'play' }];
+    let sequence = consumePlayerParticleCommands(commands, 0, [emitter]);
+    simulation.update(0.1, true);
+    assert.equal(simulation.particles.length, 1);
+    sequence = consumePlayerParticleCommands(commands, sequence, [emitter]);
+    assert.equal(sequence, 1);
+    sequence = consumePlayerParticleCommands([{ sequence: 2, objectId: 'fx', command: 'stop' }], sequence, [emitter]);
+    assert.equal(sequence, 2);
+    assert.equal(simulation.playing, false);
+    assert.equal(simulation.particles.length, 0);
+    assert.equal(simulation.elapsed, 0);
+});
+
+test('particle collector accepts a dynamically materialized prefab subtree', () => {
+    const systems = collectPlayerParticleSystems({ gameObjects: [{
+        id: 'runtime-prefab-1', components: [], children: [{
+            id: 'runtime-prefab-2', enabled: true,
+            components: [{ type: 'ParticleSystem', data: { emissionRate: 6, playOnAwake: false } }],
+            children: []
+        }]
+    }] });
+    assert.equal(systems.length, 1);
+    assert.equal(systems[0].objectId, 'runtime-prefab-2');
+    assert.deepEqual(systems[0].activePath, ['runtime-prefab-1', 'runtime-prefab-2']);
+    assert.equal(systems[0].emissionRate, 6);
+    assert.equal(systems[0].playOnAwake, false);
 });

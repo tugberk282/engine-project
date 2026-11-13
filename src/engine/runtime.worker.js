@@ -13,6 +13,15 @@ let runtimeCollisionMatrix = new Array(32).fill(0xFFFFFFFF);
 let runtimeFixedAccumulator = 0;
 let behaviourScripts = null;
 let runtimeContactPairs = new Map();
+let runtimeAudioCommands = [];
+let runtimeAudioSequence = 1;
+let runtimeParticleCommands = [];
+let runtimeParticleSequence = 1;
+let runtimeAnimationCommands = [];
+let runtimeAnimationSequence = 1;
+let runtimeSpawnCommands = [];
+let runtimeSpawnSequence = 1;
+let runtimePrefabInstance = 1;
 
 const DEFAULT_FIXED_STEP = 1 / 50;
 
@@ -601,7 +610,11 @@ function emitState() {
         lastUiEvent, lastUiEventPayload,
         behaviourScripts: behaviourScripts
             ? { instanceCount: behaviourScripts.instanceCount, diagnostics: behaviourScripts.diagnostics() }
-            : { instanceCount: 0, diagnostics: [] }
+            : { instanceCount: 0, diagnostics: [] },
+        audioCommands: runtimeAudioCommands.map((command) => ({ ...command })),
+        particleCommands: runtimeParticleCommands.map((command) => ({ ...command })),
+        animationCommands: runtimeAnimationCommands.map((command) => ({ ...command })),
+        spawnCommands: runtimeSpawnCommands.map((command) => structuredClone(command))
     });
 }
 
@@ -628,6 +641,15 @@ self.onmessage = (event) => {
             runtimeObjects = allGameObjects(snapshot.gameObjects);
             runtimeFixedAccumulator = 0;
             runtimeContactPairs = new Map();
+            runtimeAudioCommands = [];
+            runtimeAudioSequence = 1;
+            runtimeParticleCommands = [];
+            runtimeParticleSequence = 1;
+            runtimeAnimationCommands = [];
+            runtimeAnimationSequence = 1;
+            runtimeSpawnCommands = [];
+            runtimeSpawnSequence = 1;
+            runtimePrefabInstance = 1;
             const authoredMatrix = snapshot.layerCollisionMatrix || snapshot.projectSettings?.collisionMatrix;
             runtimeCollisionMatrix = Array.from({ length: 32 }, (_, index) => {
                 const value = Array.isArray(authoredMatrix) ? Number(authoredMatrix[index]) : NaN;
@@ -635,7 +657,34 @@ self.onmessage = (event) => {
             });
             gameplay = createGameplay(snapshot);
             behaviourScripts = self.TugberkBehaviourScript.createBehaviourRuntime(runtimeObjects, {
-                refreshActiveState: () => refreshRuntimeActiveState(snapshot?.gameObjects)
+                refreshActiveState: () => refreshRuntimeActiveState(snapshot?.gameObjects),
+                audioCommand: (command) => {
+                    runtimeAudioCommands.push({ sequence: runtimeAudioSequence++, ...command });
+                    if (runtimeAudioCommands.length > 64) runtimeAudioCommands.shift();
+                },
+                particleCommand: (command) => {
+                    runtimeParticleCommands.push({ sequence: runtimeParticleSequence++, ...command });
+                    if (runtimeParticleCommands.length > 64) runtimeParticleCommands.shift();
+                },
+                animationCommand: (command) => {
+                    runtimeAnimationCommands.push({ sequence: runtimeAnimationSequence++, ...command });
+                    if (runtimeAnimationCommands.length > 64) runtimeAnimationCommands.shift();
+                },
+                instantiatePrefab: ({ prefabData, position, rotation }) => {
+                    const node = self.TugberkBehaviourScript.cloneRuntimePrefab(
+                        prefabData,
+                        `runtime-prefab-${runtimePrefabInstance++}`
+                    );
+                    node.transform.position = vector3(position, [0, 0, 0]);
+                    node.transform.rotation = vector3(rotation, [0, 0, 0]);
+                    const added = allGameObjects([node]);
+                    if (runtimeObjects.length + added.length > 2048) throw new Error('Runtime object limit exceeded.');
+                    snapshot.gameObjects.push(node);
+                    runtimeObjects.push(...added);
+                    runtimeSpawnCommands.push({ sequence: runtimeSpawnSequence++, node });
+                    if (runtimeSpawnCommands.length > 64) runtimeSpawnCommands.shift();
+                    return node;
+                }
             });
             behaviourScripts.start();
             lastUiEvent = null;

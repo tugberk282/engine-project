@@ -11,15 +11,16 @@ const root = path.resolve(__dirname, '..');
 const electronExecutable = path.join(root, 'node_modules', 'electron', 'dist',
     process.platform === 'win32' ? 'electron.exe' : 'electron');
 
-test('rendered Build Settings qualifies cancel, progress, success artifact, and backend failure', {
+test('rendered Build Settings publishes and executes the Game View-qualified Windows runtime slice', {
     skip: process.platform !== 'win32' ? 'The rendered desktop build lane currently qualifies Windows only.' : false,
-    timeout: 90_000
+    timeout: 150_000
 }, async (t) => {
     const workDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'build-settings-rendered-'));
     const output = path.join(workDirectory, 'result.json');
     const project = path.join(workDirectory, 'project');
     const successRoot = path.join(workDirectory, 'published');
     const failureRoot = path.join(workDirectory, 'not-a-directory');
+    const playerOutput = path.join(workDirectory, 'player-result.json');
     fs.cpSync(path.join(root, 'samples', 'vertical-slice'), project, { recursive: true });
     fs.mkdirSync(successRoot, { recursive: true });
     fs.writeFileSync(failureRoot, 'publication must fail below a file', 'utf8');
@@ -53,4 +54,45 @@ test('rendered Build Settings qualifies cancel, progress, success artifact, and 
         'rendered Build Settings surfaces backend publication failure and recovers',
         'Build Settings publishes the Windows executable to the selected folder'
     ]) assert.equal(checks.get(name), true, `missing or failed rendered check: ${name}`);
+
+    const playerExecutable = path.join(successRoot, 'TugberkEngine Game-Windows', 'Tugberk Player.exe');
+    await runExecutable(playerExecutable, {
+        cwd: path.dirname(playerExecutable),
+        env: {
+            ELECTRON_RUN_AS_NODE: undefined,
+            TUGBERK_PLAYER_SMOKE: '1',
+            TUGBERK_PLAYER_SMOKE_OUTPUT: playerOutput
+        },
+        timeoutMs: 60_000
+    });
+
+    assert.ok(fs.existsSync(playerOutput), 'exported Windows player did not write its runtime smoke result');
+    const playerResult = JSON.parse(fs.readFileSync(playerOutput, 'utf8'));
+    assert.equal(playerResult.sceneId, 'scene-vertical-slice-main');
+    assert.ok(playerResult.objectCount >= 6, 'exported player did not load the authored scene');
+    for (const name of [
+        'renderedScene',
+        'shadowPipeline',
+        'authoredMaterial',
+        'configuredInput',
+        'configuredJump',
+        'movement',
+        'jump',
+        'look',
+        'collision',
+        'trigger',
+        'ui'
+    ]) assert.equal(playerResult.checks?.[name], true, `exported player runtime check failed: ${name}`);
+
+    assert.deepEqual({
+        movement: playerResult.checks?.movement,
+        jump: playerResult.checks?.jump,
+        look: playerResult.checks?.look,
+        collision: playerResult.checks?.collision
+    }, {
+        movement: true,
+        jump: true,
+        look: true,
+        collision: true
+    }, 'exported player must preserve the Game View-qualified input and physics slice');
 });

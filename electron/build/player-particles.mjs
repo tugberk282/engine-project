@@ -61,6 +61,21 @@ export class PlayerParticleSimulation {
         return this.seed / 0x100000000;
     }
 
+    play() {
+        if (!this.settings.loop && this.elapsed >= this.settings.duration) {
+            this.elapsed = 0;
+            this.emission = 0;
+        }
+        this.playing = true;
+    }
+
+    stop() {
+        this.playing = false;
+        this.particles = [];
+        this.elapsed = 0;
+        this.emission = 0;
+    }
+
     update(deltaTime, active = true) {
         const dt = Math.max(0, Math.min(0.1, finite(deltaTime, 0, 0)));
         if (!active || !this.playing || dt === 0) return this.particles;
@@ -108,6 +123,10 @@ export function createPlayerParticleEmitter(THREE, descriptor, object) {
     object.add(points);
     return {
         descriptor, simulation, material,
+        command(command) {
+            if (command === 'play') simulation.play();
+            if (command === 'stop') simulation.stop();
+        },
         update(deltaTime, active) {
             const particles = simulation.update(deltaTime, active);
             const positions = [];
@@ -124,4 +143,18 @@ export function createPlayerParticleEmitter(THREE, descriptor, object) {
         },
         dispose() { geometry.dispose(); material.map?.dispose?.(); material.dispose(); object.remove(points); }
     };
+}
+
+export function consumePlayerParticleCommands(commands, lastSequence, emitters) {
+    let consumedSequence = Number.isInteger(lastSequence) ? lastSequence : 0;
+    for (const command of commands || []) {
+        if (!Number.isInteger(command?.sequence) || command.sequence <= consumedSequence) continue;
+        if (command.command === 'play' || command.command === 'stop') {
+            for (const emitter of emitters || []) {
+                if (emitter?.descriptor?.objectId === command.objectId) emitter.command?.(command.command);
+            }
+        }
+        consumedSequence = Math.max(consumedSequence, command.sequence);
+    }
+    return consumedSequence;
 }

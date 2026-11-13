@@ -2,7 +2,7 @@
 
 const { createHash } = require('node:crypto');
 const { validateRuntimeSnapshot } = require('./snapshot-validator');
-const { createBehaviourRuntime } = require('./behaviour-script');
+const { cloneRuntimePrefab, createBehaviourRuntime } = require('./behaviour-script');
 
 const PROTOCOL_VERSION = 1;
 let sessionId = '';
@@ -118,11 +118,47 @@ function createWorld(root) {
     });
     const world = {
         roots, objects, updateCount: 0, fixedUpdateCount: 0, player, triggers, cameraObject, collisionMatrix, contactPairs: new Map(),
+        audioCommands: [], nextAudioSequence: 1, particleCommands: [], nextParticleSequence: 1,
+        animationCommands: [], nextAnimationSequence: 1,
+        spawnCommands: [], nextSpawnSequence: 1, nextPrefabInstance: 1,
         camera: cameraComponent ? { mode: cameraComponent.data?.mode === 'fixed' ? 'fixed' : 'follow', offset: vector3(cameraComponent.data?.offset, [0, 6, 8]), position: [...cameraObject.transform.position] } : null,
         gameplay: player ? { status: 'playing', collectedCount: 0, respawnCount: 0, requiredCollectibles: Math.max(0, Math.floor(finiteNumber(controller?.data?.requiredCollectibles, 0))), scorePerCollectible: Math.max(0, finiteNumber(ui?.data?.scorePerCollectible, 100)) } : null
     };
     world.behaviourScripts = createBehaviourRuntime(objects, {
-        refreshActiveState: () => refreshRuntimeActiveState(roots)
+        refreshActiveState: () => refreshRuntimeActiveState(roots),
+        audioCommand: (command) => {
+            world.audioCommands.push({ sequence: world.nextAudioSequence++, ...command });
+            if (world.audioCommands.length > 64) world.audioCommands.shift();
+        },
+        particleCommand: (command) => {
+            world.particleCommands.push({ sequence: world.nextParticleSequence++, ...command });
+            if (world.particleCommands.length > 64) world.particleCommands.shift();
+        },
+        animationCommand: (command) => {
+            world.animationCommands.push({ sequence: world.nextAnimationSequence++, ...command });
+            if (world.animationCommands.length > 64) world.animationCommands.shift();
+        },
+        instantiatePrefab: ({ prefabData, position, rotation }) => {
+            const node = cloneRuntimePrefab(prefabData, `runtime-prefab-${world.nextPrefabInstance++}`);
+            node.transform.position = vector3(position, [0, 0, 0]);
+            node.transform.rotation = vector3(rotation, [0, 0, 0]);
+            const runtimeRoot = createRuntimeObject(node);
+            const added = flattenRuntimeObjects([runtimeRoot]);
+            if (world.objects.length + added.length > 2048) throw new Error('Runtime object limit exceeded.');
+            world.roots.push(runtimeRoot);
+            world.objects.push(...added);
+            for (const object of added) {
+                if (worldCollider(object)?.data?.isTrigger === true) {
+                    world.triggers.push({
+                        object, active: true,
+                        kind: object.tag === 'Finish' ? 'finish' : object.tag === 'Lose' ? 'lose' : object.tag === 'Collect' ? 'collect' : 'trigger'
+                    });
+                }
+            }
+            world.spawnCommands.push({ sequence: world.nextSpawnSequence++, node });
+            if (world.spawnCommands.length > 64) world.spawnCommands.shift();
+            return runtimeRoot;
+        }
     });
     world.behaviourScripts.start();
     return world;
@@ -503,7 +539,11 @@ function runtimeFrame() {
         behaviourScripts: world ? {
             instanceCount: world.behaviourScripts.instanceCount,
             diagnostics: world.behaviourScripts.diagnostics()
-        } : { instanceCount: 0, diagnostics: [] }
+        } : { instanceCount: 0, diagnostics: [] },
+        audioCommands: world ? world.audioCommands.map((command) => ({ ...command })) : [],
+        particleCommands: world ? world.particleCommands.map((command) => ({ ...command })) : [],
+        animationCommands: world ? world.animationCommands.map((command) => ({ ...command })) : [],
+        spawnCommands: world ? world.spawnCommands.map((command) => structuredClone(command)) : []
     };
     result.uiText = world ? world.objects.flatMap((object) => object.components
         .filter((component) => component.type === 'UIText' || component.type === 'UIInputField')
