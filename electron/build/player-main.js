@@ -3,24 +3,36 @@
 const { app, BrowserWindow, ipcMain } = require('electron');
 const fs = require('node:fs');
 const path = require('node:path');
+const {
+    playerSmokeExitCode,
+    playerSmokeFailure,
+    playerStartupFailure,
+    pruneStalePlayerSessionData
+} = require('./player-main-contract');
 const crypto = require('node:crypto');
 const { readBuiltScene, selectBuiltScene } = require('./player-content');
 
 const buildRoot = path.resolve(__dirname, '..', '..');
 let verifiedBuild = null;
 let activeScenePath = null;
+let smokeFinalized = false;
+const fatalErrorWindows = new WeakSet();
+const smokeMode = process.env.TUGBERK_PLAYER_SMOKE === '1'
+    || process.env.TUGBERK_PLAYER_SCENE_SWITCH_SMOKE === '1';
 
 // Headless Windows smoke hosts may not expose a stable Chromium GPU process.
 // Keep normal player builds accelerated and make only the explicit smoke lane
 // use deterministic software compositing.
-if (process.env.TUGBERK_PLAYER_SMOKE === '1' || process.env.TUGBERK_PLAYER_SCENE_SWITCH_SMOKE === '1') {
+if (smokeMode) {
     app.commandLine.appendSwitch('in-process-gpu');
     app.commandLine.appendSwitch('no-sandbox');
 }
 
 // Chromium cache/session files are disposable. Isolating them per player
 // process avoids stale locks and corrupted shared cache state across runs.
-const sessionDataRoot = path.join(app.getPath('temp'), 'tugberk-engine-player', String(process.pid));
+const sessionDataParent = path.join(app.getPath('temp'), 'tugberk-engine-player');
+pruneStalePlayerSessionData(sessionDataParent);
+const sessionDataRoot = path.join(sessionDataParent, String(process.pid));
 fs.mkdirSync(sessionDataRoot, { recursive: true });
 app.setPath('sessionData', sessionDataRoot);
 
@@ -96,9 +108,27 @@ function readModelAsset(relativePath) {
     return fs.readFileSync(filePath);
 }
 
-ipcMain.handle('player:bootstrap', () => {
-    verifiedBuild = readBuild();
-    return verifiedBuild;
+function showPlayerFatalError(window, error, fallbackCode) {
+    const failure = playerStartupFailure(error, fallbackCode);
+    process.stderr.write(`[player-fatal:${failure.code}] ${error?.message || error}\n`);
+    if (!window || window.isDestroyed()) return Promise.resolve(false);
+    fatalErrorWindows.add(window);
+    return window.loadFile(path.join(__dirname, 'player-error.html'), {
+        query: { code: failure.code, message: failure.message }
+    }).then(() => true).finally(() => fatalErrorWindows.delete(window));
+}
+
+ipcMain.handle('player:bootstrap', (event) => {
+    try {
+        verifiedBuild = readBuild();
+        return verifiedBuild;
+    } catch (error) {
+        if (!smokeMode) void showPlayerFatalError(BrowserWindow.fromWebContents(event.sender), error).catch((fatalError) => {
+            process.stderr.write(`[player-fatal-load-rejected] ${fatalError.message}\n`);
+            app.exit(1);
+        });
+        throw error;
+    }
 });
 ipcMain.handle('player:activate-scene', (event, requestedPath) => {
     if (!verifiedBuild) verifiedBuild = readBuild();
@@ -121,13 +151,18 @@ ipcMain.handle('player:read-image-asset', (_event, relativePath) => {
     if (!filePath.startsWith(`${contentRoot}${path.sep}`)) throw new Error('Asset escapes build content');
     return fs.readFileSync(filePath);
 });
-ipcMain.handle('player:smoke-complete', (_event, result) => {
+
+function finalizePlayerSmoke(result) {
+    if (smokeFinalized) return false;
     const output = process.env.TUGBERK_PLAYER_SMOKE_OUTPUT;
     if (!output) return false;
+    smokeFinalized = true;
     fs.writeFileSync(output, JSON.stringify(result), 'utf8');
-    app.quit();
+    app.exit(playerSmokeExitCode(result));
     return true;
-});
+}
+
+ipcMain.handle('player:smoke-complete', (_event, result) => finalizePlayerSmoke(result));
 
 app.whenReady().then(() => {
     const window = new BrowserWindow({
@@ -139,20 +174,38 @@ app.whenReady().then(() => {
         }
     });
     window.removeMenu();
-    if (process.env.TUGBERK_PLAYER_SMOKE === '1' || process.env.TUGBERK_PLAYER_SCENE_SWITCH_SMOKE === '1') {
+    if (smokeMode) {
         window.webContents.on('console-message', (_event, level, message) => {
             process.stderr.write(`[player-renderer:${level}] ${message}\n`);
         });
         window.webContents.on('did-fail-load', (_event, code, description) => {
             process.stderr.write(`[player-load-failed:${code}] ${description}\n`);
+            finalizePlayerSmoke(playerSmokeFailure('PLAYER_LOAD_FAILED', { code, description }));
         });
         window.webContents.on('render-process-gone', (_event, details) => {
             process.stderr.write(`[player-renderer-gone] ${JSON.stringify(details)}\n`);
+            finalizePlayerSmoke(playerSmokeFailure('PLAYER_RENDERER_GONE', details));
+        });
+        window.on('unresponsive', () => {
+            process.stderr.write('[player-renderer-unresponsive]\n');
+            finalizePlayerSmoke(playerSmokeFailure('PLAYER_RENDERER_UNRESPONSIVE'));
         });
     }
     window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
     window.webContents.on('will-navigate', (event) => event.preventDefault());
-    window.loadFile(path.join(__dirname, 'player.html'));
+    window.loadFile(path.join(__dirname, 'player.html')).catch((error) => {
+        if (fatalErrorWindows.has(window)) return;
+        process.stderr.write(`[player-load-rejected] ${error.message}\n`);
+        if (smokeMode) finalizePlayerSmoke(playerSmokeFailure('PLAYER_LOAD_REJECTED', { message: error.message }));
+        else void showPlayerFatalError(window, error, 'PLAYER_LOAD_FAILED').catch((fatalError) => {
+            process.stderr.write(`[player-fatal-load-rejected] ${fatalError.message}\n`);
+            app.exit(1);
+        });
+    });
+}).catch((error) => {
+    process.stderr.write(`[player-startup-failed] ${error.message}\n`);
+    if (smokeMode) finalizePlayerSmoke(playerSmokeFailure('PLAYER_STARTUP_FAILED', { message: error.message }));
+    else app.exit(1);
 });
 
 app.on('window-all-closed', () => app.quit());

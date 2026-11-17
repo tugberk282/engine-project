@@ -2,6 +2,152 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import * as THREE from 'three';
 import { consumePlayerSpawnCommands, createPlayerScene } from '../electron/build/player-scene.mjs';
+import { attachPlayerTexture, createPlayerResponseWatchdog, disposePlayerModel, normalizePlayerRuntimeFailure, startPlayerWorker } from '../electron/build/player-runtime-diagnostics.mjs';
+
+test('player response watchdog bounds outstanding work without extending on queued ticks', () => {
+    let time = 0;
+    const watchdog = createPlayerResponseWatchdog(() => time, 100);
+    assert.equal(watchdog.check(), false);
+    watchdog.request();
+    time = 90;
+    watchdog.request();
+    assert.equal(watchdog.check(), false);
+    time = 100;
+    assert.equal(watchdog.check(), true);
+    watchdog.acknowledge();
+    assert.equal(watchdog.check(), false);
+});
+
+test('player response watchdog grants a fresh window after hidden time', () => {
+    let time = 0;
+    const watchdog = createPlayerResponseWatchdog(() => time, 100);
+    watchdog.request();
+    time = 5000;
+    assert.equal(watchdog.check(false), false);
+    assert.equal(watchdog.check(true), false);
+    watchdog.request();
+    time += 99;
+    assert.equal(watchdog.check(), false);
+    time += 1;
+    assert.equal(watchdog.check(), true);
+});
+
+test('player startup accepts only its session and removes all temporary listeners', async () => {
+    const listeners = new Map();
+    const worker = {
+        addEventListener(type, callback) { listeners.set(type, callback); },
+        removeEventListener(type) { listeners.delete(type); },
+        postMessage() {}
+    };
+    const rendered = [];
+    const pending = startPlayerWorker(worker, { sessionId: 'current' }, (state) => rendered.push(state), 1000);
+    listeners.get('message')({ data: { type: 'state', sessionId: 'stale' } });
+    assert.equal(rendered.length, 0);
+    const state = { type: 'state', sessionId: 'current' };
+    listeners.get('message')({ data: state });
+    assert.equal(await pending, state);
+    assert.equal(listeners.size, 0);
+    assert.deepEqual(rendered, [state]);
+});
+
+test('player startup rejects a malformed response event and clears its listeners', async () => {
+    const listeners = new Map();
+    const worker = {
+        addEventListener(type, callback) { listeners.set(type, callback); },
+        removeEventListener(type) { listeners.delete(type); },
+        postMessage() {}
+    };
+    const pending = startPlayerWorker(worker, { sessionId: 'current' }, () => {}, 1000);
+    listeners.get('messageerror')();
+    await assert.rejects(pending, { code: 'PLAYER_RUNTIME_MESSAGE_FAILED' });
+    assert.equal(listeners.size, 0);
+});
+
+test('late player model cleanup releases shared material arrays and textures once', () => {
+    const geometry = new THREE.BoxGeometry();
+    const texture = new THREE.Texture();
+    const material = new THREE.MeshBasicMaterial({ map: texture });
+    const root = new THREE.Group();
+    root.add(new THREE.Mesh(geometry, [material, material]), new THREE.Mesh(geometry, material));
+    const counts = [0, 0, 0];
+    [geometry, texture, material].forEach((resource, index) => resource.addEventListener('dispose', () => { counts[index] += 1; }));
+    disposePlayerModel(root);
+    assert.deepEqual(counts, [1, 1, 1]);
+});
+
+test('late player model cleanup continues when one resource disposal throws', () => {
+    let materialReleased = false;
+    const root = { traverse(visitor) { visitor({
+        geometry: { dispose() { throw new Error('geometry cleanup failed'); } },
+        material: { dispose() { materialReleased = true; } }
+    }); } };
+    assert.throws(() => disposePlayerModel(root), AggregateError);
+    assert.equal(materialReleased, true);
+});
+
+test('repeated player scene teardown releases imported arrays, shared textures and lookup references', () => {
+    for (let cycle = 0; cycle < 25; cycle += 1) {
+        const view = createPlayerScene(THREE, { gameObjects: [] });
+        const geometry = new THREE.BoxGeometry();
+        const texture = new THREE.Texture();
+        const material = new THREE.MeshBasicMaterial({ map: texture });
+        const mesh = new THREE.Mesh(geometry, [material, material]);
+        view.scene.add(mesh);
+        view.bindExternalObject('imported', mesh);
+        const counts = [0, 0, 0];
+        [geometry, texture, material].forEach((resource, index) => resource.addEventListener('dispose', () => { counts[index] += 1; }));
+        view.dispose();
+        view.dispose();
+        assert.deepEqual(counts, [1, 1, 1]);
+        assert.equal(view.objects.size, 0);
+        assert.equal(view.scene.children.length, 0);
+        assert.equal(view.renderPasses.length, 0);
+    }
+});
+
+test('player disposes a texture decoded after shutdown without attaching it', async () => {
+    let complete;
+    const decoded = new Promise((resolve) => { complete = resolve; });
+    let disposed = false;
+    const texture = new THREE.Texture();
+    let disposals = 0;
+    texture.addEventListener('dispose', () => { disposals += 1; });
+    let attached = false;
+    const pending = attachPlayerTexture(() => decoded, () => disposed, () => { attached = true; });
+    disposed = true;
+    complete(texture);
+    assert.equal(await pending, false);
+    assert.equal(attached, false);
+    assert.equal(disposals, 1);
+});
+
+test('player texture ownership transfers only while alive and releases failed attachments', async () => {
+    const texture = new THREE.Texture();
+    let disposals = 0;
+    texture.addEventListener('dispose', () => { disposals += 1; });
+    const material = new THREE.MeshBasicMaterial();
+    assert.equal(await attachPlayerTexture(() => Promise.resolve(texture), () => false, (value) => { material.map = value; }), true);
+    assert.equal(material.map, texture);
+    assert.equal(disposals, 0);
+    await assert.rejects(attachPlayerTexture(() => Promise.resolve(texture), () => false, () => { throw new Error('attachment failed'); }), /attachment failed/);
+    assert.equal(disposals, 1);
+    let started = false;
+    assert.equal(await attachPlayerTexture(() => { started = true; }, () => true, () => {}), false);
+    assert.equal(started, false);
+    material.dispose();
+});
+
+test('player runtime failures expose bounded stable diagnostics', () => {
+    assert.deepEqual(normalizePlayerRuntimeFailure({ code: 'INVALID_COMMAND', message: 'bad command' }), {
+        code: 'INVALID_COMMAND',
+        message: 'The game stopped because its runtime encountered an error. Re-export the game and try again.',
+        diagnostic: 'bad command'
+    });
+    const invalid = normalizePlayerRuntimeFailure({ code: '<script>', message: 'x'.repeat(800) }, 'PLAYER_RUNTIME_WORKER_CRASHED');
+    assert.equal(invalid.code, 'PLAYER_RUNTIME_WORKER_CRASHED');
+    assert.equal(invalid.diagnostic.length, 500);
+    assert.equal(Object.isFrozen(invalid), true);
+});
 
 test('player scene consumes each sequenced runtime prefab spawn once', () => {
     const materialized = [];

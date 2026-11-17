@@ -1,3 +1,5 @@
+import { disposePlayerModel } from './player-runtime-diagnostics.mjs';
+
 export function consumePlayerSpawnCommands(commands, lastSequence, materialize) {
     let consumedSequence = Number.isInteger(lastSequence) ? lastSequence : 0;
     for (const command of commands || []) {
@@ -244,10 +246,16 @@ export function createPlayerScene(THREE, document) {
         }
         scene.updateMatrixWorld(true);
     };
-    const dispose = () => scene.traverse(object => {
-        object.geometry?.dispose();
-        if (object.material) object.material.dispose();
-    });
+    let disposed = false;
+    const dispose = () => {
+        if (disposed) return;
+        disposed = true;
+        try { disposePlayerModel(scene); }
+        finally {
+            objects.clear(); externalObjects.clear(); renderPasses.length = 0;
+            scene.clear(); scene.background = null; scene.environment = null;
+        }
+    };
     const bindExternalObject = (objectId, object) => {
         if (typeof objectId === 'string' && object) externalObjects.set(objectId, object);
     };

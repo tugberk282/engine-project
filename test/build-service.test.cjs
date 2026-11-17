@@ -9,7 +9,55 @@ const test = require('node:test');
 const { BuildService, renameWithRetry } = require('../electron/build/build-service');
 const { assertBuildRequest } = require('../electron/build/build-contract');
 const { runPackagedPlayer } = require('../electron/build/player-runtime');
+const {
+    playerSmokeExitCode,
+    playerSmokeFailure,
+    playerStartupFailure,
+    pruneStalePlayerSessionData
+} = require('../electron/build/player-main-contract');
 const { spawn } = require('node:child_process');
+
+test('standalone player smoke failures produce a failing process exit code', () => {
+    assert.equal(playerSmokeExitCode({ ok: true }), 0);
+    assert.equal(playerSmokeExitCode({ ok: false }), 1);
+    assert.equal(playerSmokeExitCode({}), 1);
+    assert.equal(playerSmokeExitCode(null), 1);
+    assert.deepEqual(playerSmokeFailure('PLAYER_LOAD_FAILED', { code: -6 }), {
+        ok: false, error: 'PLAYER_LOAD_FAILED', details: { code: -6 }
+    });
+});
+
+test('standalone player startup failures are safe and actionable', () => {
+    const integrity = playerStartupFailure(new Error('Build content integrity check failed: Assets/<bad>.json'));
+    assert.deepEqual(integrity, {
+        code: 'PLAYER_BUILD_INTEGRITY_FAILED',
+        message: 'The exported game files failed integrity verification. Re-export or reinstall this build.'
+    });
+    const missing = playerStartupFailure(Object.assign(new Error('missing'), { code: 'ENOENT' }));
+    assert.equal(missing.code, 'PLAYER_BUILD_UNREADABLE');
+    const document = fs.readFileSync(path.join(__dirname, '..', 'electron', 'build', 'player-error.html'), 'utf8');
+    const renderer = fs.readFileSync(path.join(__dirname, '..', 'electron', 'build', 'player-error.js'), 'utf8');
+    assert.match(document, /Content-Security-Policy/);
+    assert.match(document, /role="alert"/);
+    assert.match(renderer, /\.textContent = parameters\.get\('message'\)/);
+});
+
+test('standalone player startup prunes only stale PID session directories', (t) => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'tugberk-player-sessions-'));
+    t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+    for (const name of ['101', '202', '303', 'notes']) fs.mkdirSync(path.join(root, name));
+
+    const removed = pruneStalePlayerSessionData(root, {
+        currentPid: 101,
+        isProcessAlive: (pid) => pid === 202
+    });
+
+    assert.deepEqual(removed, ['303']);
+    assert.equal(fs.existsSync(path.join(root, '101')), true, 'current process data must survive');
+    assert.equal(fs.existsSync(path.join(root, '202')), true, 'live process data must survive');
+    assert.equal(fs.existsSync(path.join(root, '303')), false, 'stale process data must be removed');
+    assert.equal(fs.existsSync(path.join(root, 'notes')), true, 'unowned directories must survive');
+});
 
 test('build worker is explicitly launched in Node mode for Electron-hosted builds', () => {
     const source = fs.readFileSync(path.join(__dirname, '..', 'electron', 'build', 'build-service.js'), 'utf8');
@@ -218,7 +266,11 @@ test('canonical sample builds reproducibly and player runs deterministic frames'
     const first = await service.build(request(projectRoot, path.join(root, 'first')), {
         onProgress: ({ stage }) => stages.push(stage)
     });
-    const second = await service.build(request(projectRoot, path.join(root, 'second')));
+    const second = await service.build(request(projectRoot, path.join(root, 'published-second')));
+    // Exercise a moved player with its authored source project no longer at the
+    // original path; successful launch must depend only on exported resources.
+    await fs.promises.rename(path.join(root, 'published-second'), path.join(root, 'second'));
+    await fs.promises.rename(projectRoot, path.join(root, 'source-offline'));
     assert.deepEqual(stages, ['validate', 'resolve', 'import', 'bundle', 'package']);
     assert.equal(first.manifest.manifestHash, second.manifest.manifestHash);
     assert.deepEqual(
@@ -226,6 +278,10 @@ test('canonical sample builds reproducibly and player runs deterministic frames'
         fs.readFileSync(path.join(root, 'second', 'manifest.json'))
     );
     assert.equal(fs.existsSync(path.join(root, 'first', 'resources', 'app', 'player-content.js')), true);
+    assert.equal(fs.existsSync(path.join(root, 'first', 'resources', 'app', 'player-main-contract.js')), true);
+    assert.equal(fs.existsSync(path.join(root, 'first', 'resources', 'app', 'player-error.html')), true);
+    assert.equal(fs.existsSync(path.join(root, 'first', 'resources', 'app', 'player-error.js')), true);
+    assert.equal(fs.existsSync(path.join(root, 'first', 'resources', 'app', 'player-runtime-diagnostics.mjs')), true);
     assert.equal(fs.existsSync(path.join(root, 'first', 'resources', 'app', 'player-model.mjs')), true);
     assert.equal(fs.existsSync(path.join(root, 'first', 'resources', 'app', 'gltf-loader.js')), true);
     assert.equal(fs.existsSync(path.join(root, 'first', 'resources', 'app', 'buffer-geometry-utils.js')), true);
@@ -271,7 +327,67 @@ test('canonical sample builds reproducibly and player runs deterministic frames'
             renderedScene: true, shadowPipeline: true, authoredMaterial: true, authoredUiEvent: true, authoredLayout: true, authoredScrollRect: true, authoredFilledImage: true, authoredModel: true, authoredModelHierarchy: true, authoredParticleSystem: true, configuredInput: true, configuredJump: true, movement: true, jump: true, look: true, collision: true, trigger: true, ui: true
         });
 
+        const assetRendererPath = path.join(root, 'second', 'resources', 'app', 'player-renderer.js');
+        const assetRendererSource = await fs.promises.readFile(assetRendererPath, 'utf8');
+        assert.ok(assetRendererSource.includes('window.tugberkPlayer.readJsonAsset(safePath)'));
+        await fs.promises.writeFile(assetRendererPath, assetRendererSource
+            .replace('window.tugberkPlayer.readJsonAsset(safePath)', "Promise.reject(new Error('Forced material load failure'))")
+            .replace('sceneId: scene.sceneId,\n            objectCount:', `assetWarning: {
+                visible: !assetWarning.hidden && assetWarning.isConnected,
+                role: assetWarning.getAttribute('role'),
+                text: assetWarning.textContent,
+                count: Number(root.dataset.assetLoadFailures)
+            },
+            sceneId: scene.sceneId,
+            objectCount:`), 'utf8');
+        const assetOutput = path.join(root, 'player-asset-failure.json');
+        const assetExitCode = await new Promise((resolve, reject) => {
+            const env = { ...process.env, TUGBERK_PLAYER_SMOKE: '1', TUGBERK_PLAYER_SMOKE_OUTPUT: assetOutput };
+            delete env.ELECTRON_RUN_AS_NODE;
+            const child = spawn(path.join(root, 'second', 'Tugberk Player.exe'), [], {
+                env, cwd: path.join(root, 'second'), stdio: 'ignore'
+            });
+            const timer = setTimeout(() => { child.kill(); reject(new Error('Asset failure qualification timed out')); }, 30_000);
+            child.once('error', (error) => { clearTimeout(timer); reject(error); });
+            child.once('exit', (code) => { clearTimeout(timer); resolve(code); });
+        });
+        const assetResult = JSON.parse(fs.readFileSync(assetOutput, 'utf8'));
+        assert.equal(assetExitCode, 1, 'material fidelity smoke must report the injected missing material');
+        assert.equal(assetResult.checks.authoredMaterial, false);
+        for (const [name, passed] of Object.entries(assetResult.checks)) {
+            if (name !== 'authoredMaterial') assert.equal(passed, true, `gameplay check failed after recoverable asset error: ${name}`);
+        }
+        assert.equal(assetResult.assetWarning.visible, true);
+        assert.equal(assetResult.assetWarning.role, 'status');
+        assert.ok(assetResult.assetWarning.count > 0);
+        assert.match(assetResult.assetWarning.text, /PLAYER_ASSET_LOAD_FAILED/);
+        assert.doesNotMatch(assetResult.assetWarning.text, /Forced material/);
+        await fs.promises.writeFile(assetRendererPath, assetRendererSource, 'utf8');
+
         const switchOutput = path.join(root, 'player-scene-switch-smoke.json');
+        const rendererPath = path.join(root, 'first', 'resources', 'app', 'player-renderer.js');
+        const rendererSource = await fs.promises.readFile(rendererPath, 'utf8');
+        const retryProbe = `
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        for (let index = 0; index < 4; index += 1) await sendTick({});
+        const retry = Array.from(statusLayer.querySelectorAll('button')).find((button) => button.textContent === 'Retry scene load');
+        if (!retry || root.dataset.sceneTransitionError !== 'PLAYER_SCENE_LOAD_FAILED' || window.__transitionAttempts !== 1) {
+            throw new Error('Scene failure did not persist or repeated automatically');
+        }
+        localStorage.setItem('transitionRetryQualified', 'true');
+        retry.click();
+        await sendTick({});
+        `;
+        const patchedRenderer = rendererSource
+            .replace('void window.tugberkPlayer.activateScene(loadAction.scenePath)', `void (() => {
+                window.__transitionAttempts = (window.__transitionAttempts || 0) + 1;
+                if (window.__transitionAttempts === 1) return Promise.reject(new Error('Forced scene transition failure'));
+                return window.tugberkPlayer.activateScene(loadAction.scenePath);
+            })()`)
+            .replace('scenePath,\n            sceneId:', "retryQualified: localStorage.getItem('transitionRetryQualified') === 'true',\n            scenePath,\n            sceneId:")
+            .replace("payload: { name: action.eventName }\n        });\n        return;", "payload: { name: action.eventName }\n        });\n" + retryProbe + '\n        return;');
+        assert.notEqual(patchedRenderer, rendererSource);
+        await fs.promises.writeFile(rendererPath, patchedRenderer, 'utf8');
         await new Promise((resolve, reject) => {
             const playerEnvironment = {
                 ...process.env,
@@ -297,8 +413,104 @@ test('canonical sample builds reproducibly and player runs deterministic frames'
         });
         const sceneSwitch = JSON.parse(fs.readFileSync(switchOutput, 'utf8'));
         assert.equal(sceneSwitch.ok, true);
+        assert.equal(sceneSwitch.retryQualified, true);
         assert.notEqual(sceneSwitch.scenePath, first.manifest.entryScene);
         assert.equal(sceneSwitch.sceneId, sceneSwitch.target.sceneId);
+        await fs.promises.writeFile(rendererPath, rendererSource, 'utf8');
+
+        const brokenPlayerRoot = path.join(root, 'broken-player');
+        await fs.promises.cp(path.join(root, 'first'), brokenPlayerRoot, { recursive: true });
+        await fs.promises.rm(path.join(brokenPlayerRoot, 'resources', 'app', 'player.html'));
+        const failureOutput = path.join(root, 'player-load-failure.json');
+        const failureCode = await new Promise((resolve, reject) => {
+            const playerEnvironment = {
+                ...process.env,
+                TUGBERK_PLAYER_SMOKE: '1',
+                TUGBERK_PLAYER_SMOKE_OUTPUT: failureOutput
+            };
+            delete playerEnvironment.ELECTRON_RUN_AS_NODE;
+            const child = spawn(path.join(brokenPlayerRoot, 'Tugberk Player.exe'), [], {
+                env: playerEnvironment, cwd: brokenPlayerRoot, stdio: 'ignore'
+            });
+            const timeout = setTimeout(() => {
+                child.kill();
+                reject(new Error('Broken standalone player did not fail fast'));
+            }, 10_000);
+            child.once('error', reject);
+            child.once('exit', (code) => { clearTimeout(timeout); resolve(code); });
+        });
+        assert.equal(failureCode, 1);
+        assert.deepEqual(JSON.parse(fs.readFileSync(failureOutput, 'utf8')), {
+            ok: false,
+            error: 'PLAYER_LOAD_FAILED',
+            details: { code: -6, description: 'ERR_FILE_NOT_FOUND' }
+        });
+
+        const runtimeWorker = path.join(root, 'second', 'resources', 'app', 'runtime.worker.js');
+        await fs.promises.writeFile(assetRendererPath, assetRendererSource
+            .replace('let resourcesReleased = false;', `let resourcesReleased = false;
+                let disposalCount = 0;
+                const originalDispose = view.dispose.bind(view);
+                view.dispose = () => { disposalCount += 1; originalDispose(); };`)
+            .replace('releaseResources();\n        const failure', `releaseResources();
+                releaseResources();
+                let lateStateIgnored = true;
+                view.update = () => { lateStateIgnored = false; throw new Error('Disposed view received a late state'); };
+                render(lastState);
+                const failure`)
+            .replace('details: { message: failure.diagnostic }', 'details: { message: failure.diagnostic, resourcesReleased, disposalCount, lateStateIgnored }'), 'utf8');
+        const runtimeWorkerSource = await fs.promises.readFile(runtimeWorker, 'utf8');
+        const tickMarker = "case 'tick': {\n            if (state !== 'running') break;";
+        assert.match(runtimeWorkerSource, /case 'tick': \{/);
+        await fs.promises.writeFile(runtimeWorker, runtimeWorkerSource.replace(
+            tickMarker,
+            "case 'tick': {\n            fail('FORCED_RUNTIME_FAILURE', 'Forced runtime failure for qualification.');\n            break;"
+        ), 'utf8');
+        const runtimeFailureOutput = path.join(root, 'player-runtime-failure.json');
+        const runtimeFailureCode = await new Promise((resolve, reject) => {
+            const playerEnvironment = {
+                ...process.env,
+                TUGBERK_PLAYER_SMOKE: '1',
+                TUGBERK_PLAYER_SMOKE_OUTPUT: runtimeFailureOutput
+            };
+            delete playerEnvironment.ELECTRON_RUN_AS_NODE;
+            const child = spawn(path.join(root, 'second', 'Tugberk Player.exe'), [], {
+                env: playerEnvironment, cwd: path.join(root, 'second'), stdio: 'ignore'
+            });
+            const timeout = setTimeout(() => {
+                child.kill();
+                reject(new Error('Runtime-failing standalone player did not fail fast'));
+            }, 10_000);
+            child.once('error', reject);
+            child.once('exit', (code) => { clearTimeout(timeout); resolve(code); });
+        });
+        assert.equal(runtimeFailureCode, 1);
+        assert.deepEqual(JSON.parse(fs.readFileSync(runtimeFailureOutput, 'utf8')), {
+            ok: false,
+            error: 'FORCED_RUNTIME_FAILURE',
+            details: { message: 'Forced runtime failure for qualification.', resourcesReleased: true, disposalCount: 1, lateStateIgnored: true }
+        });
+        await fs.promises.writeFile(assetRendererPath, assetRendererSource, 'utf8');
+        for (const [scenario, source, expected] of [
+            ['hung-start', 'self.onmessage = () => {};', 'PLAYER_RUNTIME_START_TIMEOUT'],
+            ['hung-tick', runtimeWorkerSource.replace(tickMarker, "case 'tick': { return;"), 'PLAYER_RUNTIME_RESPONSE_TIMEOUT'],
+            ['crashed-start', "throw new Error('Forced startup worker crash');", 'PLAYER_RUNTIME_WORKER_CRASHED']
+        ]) {
+            await fs.promises.writeFile(runtimeWorker, source, 'utf8');
+            const output = path.join(root, `${scenario}.json`);
+            const code = await new Promise((resolve, reject) => {
+                const env = { ...process.env, TUGBERK_PLAYER_SMOKE: '1', TUGBERK_PLAYER_SMOKE_OUTPUT: output };
+                delete env.ELECTRON_RUN_AS_NODE;
+                const child = spawn(path.join(root, 'second', 'Tugberk Player.exe'), [], {
+                    env, cwd: path.join(root, 'second'), stdio: 'ignore'
+                });
+                const timer = setTimeout(() => { child.kill(); reject(new Error(`${scenario} did not fail within its bound`)); }, 20_000);
+                child.once('error', (error) => { clearTimeout(timer); reject(error); });
+                child.once('exit', (exitCode) => { clearTimeout(timer); resolve(exitCode); });
+            });
+            assert.equal(code, 1);
+            assert.equal(JSON.parse(fs.readFileSync(output, 'utf8')).error, expected);
+        }
     }
 });
 

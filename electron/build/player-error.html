@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'unsafe-inline'">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <title>Tugberk Player - Startup Error</title>
+    <style>
+        html, body { height: 100%; margin: 0; background: #111827; color: #f8fafc; font: 16px/1.5 system-ui, sans-serif; }
+        body { display: grid; place-items: center; }
+        .card { max-width: 42rem; margin: 2rem; padding: 2rem; border: 1px solid #334155; border-radius: 12px; background: #1e293b; box-shadow: 0 20px 45px #0008; }
+        h1 { margin: 0 0 .75rem; font-size: 1.5rem; }
+        p { margin: .5rem 0; color: #cbd5e1; }
+        code { display: inline-block; margin-top: 1rem; padding: .25rem .5rem; border-radius: 4px; background: #0f172a; color: #fca5a5; }
+    </style>
+</head>
+<body>
+    <main class="card" role="alert">
+        <h1>Unable to start the game</h1>
+        <p id="message">The player could not start.</p>
+        <code id="code">PLAYER_STARTUP_FAILED</code>
+    </main>
+    <script src="player-error.js"></script>
+</body>
+</html>

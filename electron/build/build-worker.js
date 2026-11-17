@@ -163,7 +163,7 @@ async function run(rawRequest) {
             await fs.promises.rename(path.join(workspace, 'electron.exe'), path.join(workspace, 'Tugberk Player.exe'));
             const appRoot = path.join(workspace, 'resources', 'app');
             await fs.promises.mkdir(appRoot, { recursive: true });
-            for (const file of ['player-main.js', 'player-preload.js', 'player-content.js', 'player.html', 'player-renderer.js', 'player-scene.mjs', 'player-ui.mjs', 'player-input.mjs', 'player-audio.mjs', 'player-model.mjs', 'player-particles.mjs', 'player.css']) {
+            for (const file of ['player-main.js', 'player-main-contract.js', 'player-preload.js', 'player-content.js', 'player.html', 'player-error.html', 'player-error.js', 'player-renderer.js', 'player-runtime-diagnostics.mjs', 'player-scene.mjs', 'player-ui.mjs', 'player-input.mjs', 'player-audio.mjs', 'player-model.mjs', 'player-particles.mjs', 'player.css']) {
                 await fs.promises.copyFile(path.join(__dirname, file), path.join(appRoot, file));
             }
             await fs.promises.copyFile(path.resolve(__dirname, '..', '..', 'src', 'engine', 'runtime.worker.js'), path.join(appRoot, 'runtime.worker.js'));

@@ -1,10 +1,23 @@
 const assert = require('node:assert/strict');
+const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
 const { findExecutable, getScratchRoot, runExecutable, smokeExecutable } = require('./packaged-smoke.cjs');
 const { runPackagedSandboxMatrix } = require('./packaged-play-sandbox-adversarial.cjs');
 
 const root = path.resolve(__dirname, '..');
+
+function fileSha256(file) {
+  return crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
+}
+
+async function waitForPathAbsent(target, timeoutMs = 30_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (fs.existsSync(target) && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+  return !fs.existsSync(target);
+}
 
 function verifyAuthenticode(file) {
   if (process.env.TUGBERK_REQUIRE_AUTHENTICODE !== '1') return;
@@ -44,9 +57,27 @@ async function main() {
   });
 
   const executable = findExecutable(installDirectory);
+  const archive = path.join(installDirectory, 'resources', 'app.asar');
+  assert.ok(fs.existsSync(archive), 'installed application did not include resources/app.asar');
+  const installedArchiveHash = fileSha256(archive);
   verifyAuthenticode(path.join(installDirectory, 'resources', 'app.asar.unpacked', 'electron', 'resources', 'win32-x64', 'tugberk-play-sandbox.exe'));
   await smokeExecutable(executable, {
-    workDirectory: path.join(workDirectory, 'smoke'),
+    workDirectory: path.join(workDirectory, 'smoke-initial'),
+    timeoutMs: 90_000,
+  });
+
+  fs.appendFileSync(archive, '\nTUGBERK_INSTALLER_REPAIR_PROBE\n', 'utf8');
+  assert.notEqual(fileSha256(archive), installedArchiveHash, 'repair probe did not change the installed archive');
+  console.log(`Reinstalling ${installer} over ${installDirectory}`);
+  await runExecutable(installer, {
+    args: ['/S', `/D=${installDirectory}`],
+    cwd: workDirectory,
+    timeoutMs: 120_000,
+  });
+  assert.equal(fileSha256(archive), installedArchiveHash, 'overwrite install did not restore resources/app.asar');
+  assert.equal(findExecutable(installDirectory), executable, 'overwrite install changed the application executable path');
+  await smokeExecutable(executable, {
+    workDirectory: path.join(workDirectory, 'smoke-overwrite'),
     timeoutMs: 90_000,
   });
   await runPackagedSandboxMatrix(installDirectory, path.join(workDirectory, 'sandbox-matrix'));
@@ -60,7 +91,8 @@ async function main() {
     cwd: workDirectory,
     timeoutMs: 120_000,
   });
-  console.log('Installer install, packaged launch, and uninstall verification passed.');
+  assert.equal(await waitForPathAbsent(executable), true, 'uninstall left the application executable behind');
+  console.log('Installer install, overwrite repair, packaged launch, and uninstall verification passed.');
 }
 
 main().catch((error) => {

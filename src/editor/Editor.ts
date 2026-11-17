@@ -2009,7 +2009,9 @@ export class Editor {
 
     private clampLayoutSizes() {
         const mainArea = document.getElementById('main-area') as HTMLElement | null;
-        if (mainArea) {
+        // Startup/project switching can temporarily hide the editor. Zero-sized
+        // DOM roots are not a valid viewport budget for persisted geometry.
+        if (mainArea && mainArea.clientWidth > 0) {
             const splitterAllowance =
                 (this.isPanelDockedVisible('hierarchy-panel') ? 4 : 0) +
                 (this.isPanelDockedVisible('inspector-panel') ? 4 : 0);
@@ -2046,7 +2048,7 @@ export class Editor {
         }
 
         const viewportWorkspace = document.getElementById('viewport-workspace') as HTMLElement | null;
-        if (viewportWorkspace && (this.isCenterSecondaryVisible() || this.isCenterTertiaryVisible())) {
+        if (viewportWorkspace && viewportWorkspace.clientWidth > 0 && (this.isCenterSecondaryVisible() || this.isCenterTertiaryVisible())) {
             const hasCenterSecondary = this.isCenterSecondaryVisible();
             const hasCenterTertiary = this.isCenterTertiaryVisible();
             const splitterAllowance =
@@ -3665,7 +3667,7 @@ export class Editor {
         if (panelId !== 'viewport-panel' && this.isPanelFloating(panelId)) {
             const floatingLayer = document.getElementById('floating-layer') as HTMLElement | null;
             const panel = document.getElementById(panelId) as HTMLElement | null;
-            if (floatingLayer && panel) {
+            if (floatingLayer && panel && panel.parentElement !== floatingLayer) {
                 floatingLayer.appendChild(panel);
             }
             this.bringFloatingPanelToFront(panelId);

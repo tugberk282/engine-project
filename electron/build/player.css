@@ -11,3 +11,8 @@ html, body, #game { margin: 0; width: 100%; height: 100%; overflow: hidden; back
 #player-hud h1 { font-size: 18px; }
 #player-hud h1, #player-hud p { margin: 8px 0; }
 #player-hud button { pointer-events: auto; margin: 4px 6px 0 0; padding: 6px 10px; }
+.player-runtime-error { box-sizing: border-box; min-height: 100%; display: grid; place-items: center; padding: 32px; background: #111827; }
+.player-runtime-error__card { max-width: 42rem; padding: 32px; border: 1px solid #334155; border-radius: 12px; background: #1e293b; box-shadow: 0 20px 45px #0008; }
+.player-runtime-error h1 { margin: 0 0 12px; font-size: 24px; }
+.player-runtime-error p { margin: 8px 0; color: #cbd5e1; }
+.player-runtime-error code { display: inline-block; margin-top: 16px; padding: 4px 8px; border-radius: 4px; background: #0f172a; color: #fca5a5; }

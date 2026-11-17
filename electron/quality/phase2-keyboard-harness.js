@@ -10,6 +10,10 @@ async function runPhase2KeyboardHarness(mainWindow) {
     if (!outputPath || !artifactDirectory) throw new Error('Phase 2 output paths are required');
     fs.mkdirSync(artifactDirectory, { recursive: true });
     const webContents = mainWindow.webContents;
+    if (phase === 'layout-bounds' || phase === 'layout-negative') {
+        mainWindow.setContentSize(900, 600);
+        webContents.setZoomFactor(1.5);
+    }
     const checks = [];
     const failures = [];
     const record = (name, pass, details) => {
@@ -71,7 +75,25 @@ async function runPhase2KeyboardHarness(mainWindow) {
     webContents.focus();
     await wait(500);
 
-    if (phase === 'reopen') {
+    const layoutState = () => evaluate(`(() => {
+        const panel = document.getElementById('hierarchy-panel');
+        const rect = panel.getBoundingClientRect();
+        const header = panel.querySelector('.panel-window-dock').getBoundingClientRect();
+        return { floating: panel.classList.contains('floating-panel'),
+            pressed: panel.querySelector('.panel-window-dock')?.getAttribute('aria-pressed'),
+            width: rect.width, height: rect.height, x: rect.x, y: rect.y,
+            visible: rect.width > 0 && rect.height > 0 && rect.right > 0 && rect.bottom > 0 && rect.x < innerWidth && rect.y < innerHeight,
+            headerAccessible: header.width > 0 && header.height > 0 && header.x >= 0 && header.y >= 0 && header.right <= innerWidth && header.bottom <= innerHeight,
+            viewportWidth: innerWidth, viewportHeight: innerHeight };
+    })()`);
+    const stageFloating = (geometry) => evaluate(`(() => {
+        const key = 'tugberkengine_editor_settings';
+        const saved = JSON.parse(localStorage.getItem(key + '_lkg'));
+        saved.floatingPanels['hierarchy-panel'] = ${JSON.stringify({ floating: true, ...geometry })};
+        localStorage.setItem(key, JSON.stringify(saved));
+        return true;
+    })()`);
+    if (phase !== 'author') {
         const state = await evaluate(`(() => {
             const editor = window.Editor.instance;
             const visit = (items) => items.flatMap((item) => [item, ...visit(item.transform?.children?.map((child) => child.gameObject) ?? [])]);
@@ -81,6 +103,53 @@ async function runPhase2KeyboardHarness(mainWindow) {
         record('keyboard-authored nested objects persist after relaunch', state.names.includes('Keyboard Root') && state.names.includes('Keyboard Child'), JSON.stringify(state));
         await evaluate("document.getElementById('hierarchy-content')?.focus()");
         await capture('reopen-persisted-focus');
+        const layout = await layoutState();
+        const expectedFloating = ['reopen', 'layout-bounds', 'layout-negative'].includes(phase);
+        record('panel layout persists across packaged restart', layout.floating === expectedFloating
+            && layout.pressed === String(expectedFloating) && layout.visible, JSON.stringify(layout));
+        if (phase === 'reopen') {
+            mainWindow.focus();
+            webContents.focus();
+            await evaluate("document.querySelector('#hierarchy-panel .panel-window-dock')?.focus()");
+            const focused = await evaluate("document.activeElement === document.querySelector('#hierarchy-panel .panel-window-dock')");
+            record('floating panel dock button receives keyboard focus', focused, 'DOM focus survives floating panel activation');
+            record('floating document receives native keyboard input', await evaluate('document.hasFocus()'), 'webContents focused after accessibility capture');
+            await key('SPACE');
+            const docked = await layoutState();
+            record('native keyboard panel button restores docked layout', !docked.floating && docked.visible, JSON.stringify(docked));
+        }
+        await capture('layout-restart-state');
+        if (phase === 'layout-recovery') {
+            const expectedWidth = await evaluate("Number(localStorage.getItem('v1-layout-recovery-width'))");
+            record('recovery restores the saved nondefault panel width', expectedWidth > 0 && Math.abs(layout.width - expectedWidth) < 2,
+                JSON.stringify({ expectedWidth, actualWidth: layout.width }));
+            record('oversized offscreen floating fixture staged', await stageFloating({ x: 50000, y: 50000, width: 9000, height: 9000 }), 'isolated settings');
+        }
+        if (phase === 'layout-bounds' || phase === 'layout-negative') {
+            record('floating panel controls remain accessible in reduced zoomed viewport', layout.floating && layout.headerAccessible, JSON.stringify(layout));
+            if (phase === 'layout-bounds') record('negative-coordinate floating fixture staged', await stageFloating({ x: -50000, y: -50000, width: 400, height: 350 }), 'isolated settings');
+        }
+        if (phase === 'layout-reopen') {
+            mainWindow.focus(); webContents.focus();
+            await evaluate("document.getElementById('left-splitter')?.focus()");
+            const beforeResize = await layoutState();
+            await key('RIGHT', ['shift']);
+            const afterResize = await layoutState();
+            record('recovery fixture has nondefault native splitter geometry', Math.abs(afterResize.width - beforeResize.width) >= 10, JSON.stringify({ beforeResize, afterResize }));
+            await evaluate(`localStorage.setItem('v1-layout-recovery-width', ${afterResize.width})`);
+            const staged = await evaluate(`(() => {
+                const key = 'tugberkengine_editor_settings';
+                const backup = localStorage.getItem(key + '_lkg');
+                if (!backup) return false;
+                const saved = JSON.parse(backup);
+                const primary = JSON.parse(localStorage.getItem(key));
+                localStorage.setItem(key, '{broken-layout-primary');
+                return { staged: localStorage.getItem(key) === '{broken-layout-primary',
+                    primaryWidths: primary.sidePanelWidths, backupWidths: saved.sidePanelWidths,
+                    primaryLegacy: primary.hierarchyWidth, backupLegacy: saved.hierarchyWidth };
+            })()`);
+            record('corrupt primary layout staged with valid recovery backup', staged?.staged === true, JSON.stringify(staged));
+        }
     } else {
         await evaluate("document.getElementById('hierarchy-content')?.focus()");
         await key('N', ['control', 'shift']);
@@ -174,6 +243,11 @@ async function runPhase2KeyboardHarness(mainWindow) {
         const saved = await evaluate("window.Editor.instance.dirtyState?.isDirty === false");
         record('native Save reaches a clean checkpoint', saved, 'Ctrl+S');
         await capture('saved-clean-focus');
+        await evaluate("document.querySelector('#hierarchy-panel .panel-window-dock')?.focus()");
+        await key('SPACE');
+        const floating = await layoutState();
+        record('native panel button floats hierarchy within viewport', floating.floating && floating.pressed === 'true' && floating.visible, JSON.stringify(floating));
+        await capture('floating-hierarchy');
     }
 
     const result = {

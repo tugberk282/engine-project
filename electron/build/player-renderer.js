@@ -14,6 +14,7 @@ import {
     updatePlayerAnimationControllers
 } from './player-model.mjs';
 import { collectPlayerParticleSystems, consumePlayerParticleCommands, createPlayerParticleEmitter } from './player-particles.mjs';
+import { attachPlayerTexture, createPlayerResponseWatchdog, disposePlayerModel, mountPlayerRuntimeFailure, normalizePlayerRuntimeFailure, startPlayerWorker } from './player-runtime-diagnostics.mjs';
 
 (async () => {
     const { manifest, scenePath, scene, smoke, sceneSwitchSmoke } = await window.tugberkPlayer.bootstrap();
@@ -60,6 +61,19 @@ import { collectPlayerParticleSystems, consumePlayerParticleCommands, createPlay
     imageLayer.id = 'player-ui-images';
     controlsLayer.id = 'player-ui-controls';
     hud.append(statusLayer, imageLayer, textLayer, controlsLayer);
+    const assetWarning = document.createElement('p');
+    assetWarning.setAttribute('role', 'status');
+    assetWarning.hidden = true;
+    hud.append(assetWarning);
+    const assetFailures = new Set();
+    const reportAssetFailure = (kind, path, error) => {
+        if (playerDisposed) return;
+        if (assetFailures.size < 100) assetFailures.add(`${kind}:${path}`);
+        root.dataset.assetLoadFailures = String(assetFailures.size);
+        assetWarning.hidden = false;
+        assetWarning.textContent = 'Some game assets could not be loaded. Visuals or sound may be incomplete. [PLAYER_ASSET_LOAD_FAILED]';
+        console.warn(`Player ${kind} asset failed: ${path}`, error);
+    };
     const uiElementsByObjectId = new Map();
     const view = createPlayerScene(THREE, scene);
     const particleEmitters = authoredParticles
@@ -111,12 +125,10 @@ import { collectPlayerParticleSystems, consumePlayerParticleCommands, createPlay
     const loadModelDescriptor = async (descriptor, source = 'authored') => {
         try {
             const bytes = await window.tugberkPlayer.readModelAsset(descriptor.path);
+            if (playerDisposed) return;
             const gltf = await parseModel(descriptor, bytes);
             if (playerDisposed) {
-                gltf.scene.traverse((entry) => {
-                    entry.geometry?.dispose();
-                    if (entry.material) entry.material.dispose();
-                });
+                disposePlayerModel(gltf.scene);
                 return;
             }
             const target = view.objects.get(descriptor.objectId);
@@ -146,6 +158,7 @@ import { collectPlayerParticleSystems, consumePlayerParticleCommands, createPlay
         } catch (error) {
             const message = `${descriptor.path}: ${error?.message || String(error)}`;
             modelErrors.push(message);
+            reportAssetFailure('model', descriptor.path, error);
             console.warn(`Could not load ${source} model ${message}`);
         }
     };
@@ -217,7 +230,7 @@ import { collectPlayerParticleSystems, consumePlayerParticleCommands, createPlay
                     playback.command(pendingCommand);
                     pendingAudioCommands.delete(descriptor.objectId);
                 }
-            }).catch(() => {}));
+            }).catch((error) => reportAssetFailure('audio', clipPath, error)));
     };
     for (const source of authoredAudio.sources) loadAudioSource(source);
     const materialLoads = [];
@@ -230,15 +243,21 @@ import { collectPlayerParticleSystems, consumePlayerParticleCommands, createPlay
         if (!safePath.startsWith('Assets/') || safePath.includes('..') || safePath.includes(':')) return;
         try {
             const bytes = await window.tugberkPlayer.readImageAsset(safePath);
+            if (playerDisposed) return;
             const raw = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
             const url = URL.createObjectURL(new Blob([raw], { type: imageMime(safePath) }));
             try {
-                const texture = await new Promise((resolve, reject) => new THREE.TextureLoader().load(url, resolve, undefined, reject));
-                if (playerDisposed) return texture.dispose();
-                emitter.material.map = texture;
-                emitter.material.needsUpdate = true;
+                await attachPlayerTexture(
+                    () => new Promise((resolve, reject) => new THREE.TextureLoader().load(url, resolve, undefined, reject)),
+                    () => playerDisposed,
+                    (texture) => {
+                        emitter.material.map = texture;
+                        emitter.material.needsUpdate = true;
+                    }
+                );
             } finally { URL.revokeObjectURL(url); }
         } catch (error) {
+            reportAssetFailure('particle texture', safePath, error);
             console.warn(`Could not load particle texture ${safePath}: ${error?.message || String(error)}`);
         }
     };
@@ -268,7 +287,9 @@ import { collectPlayerParticleSystems, consumePlayerParticleCommands, createPlay
             const url = URL.createObjectURL(new Blob([raw], { type: imageMime(safePath) }));
             uiImageUrls.push(url);
             element.style.backgroundImage = `url(${JSON.stringify(url)})`;
-        } catch {}
+        } catch (error) {
+            reportAssetFailure('image', safePath, error);
+        }
     };
     await Promise.all(authoredUiImages.map(mountUiImage));
     const loadMaterialTexture = async (object, texturePath, slot = 'map') => {
@@ -276,14 +297,20 @@ import { collectPlayerParticleSystems, consumePlayerParticleCommands, createPlay
         const safePath = String(texturePath).replaceAll('\\', '/');
         if (!safePath.startsWith('Assets/') || safePath.includes('..') || safePath.includes(':')) return;
         const bytes = await window.tugberkPlayer.readImageAsset(safePath);
+        if (playerDisposed) return;
         const raw = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
         const blob = new Blob([raw], { type: imageMime(safePath) });
         const url = URL.createObjectURL(blob);
         try {
-            const texture = await new Promise((resolve, reject) => new THREE.TextureLoader().load(url, resolve, undefined, reject));
-            texture.colorSpace = slot === 'map' ? THREE.SRGBColorSpace : THREE.NoColorSpace;
-            object.material[slot] = texture;
-            object.material.needsUpdate = true;
+            await attachPlayerTexture(
+                () => new Promise((resolve, reject) => new THREE.TextureLoader().load(url, resolve, undefined, reject)),
+                () => playerDisposed,
+                (texture) => {
+                    texture.colorSpace = slot === 'map' ? THREE.SRGBColorSpace : THREE.NoColorSpace;
+                    object.material[slot] = texture;
+                    object.material.needsUpdate = true;
+                }
+            );
         } finally { URL.revokeObjectURL(url); }
     };
     view.scene.traverse((object) => {
@@ -293,6 +320,7 @@ import { collectPlayerParticleSystems, consumePlayerParticleCommands, createPlay
         if (!safePath.startsWith('Assets/') || safePath.includes('..') || safePath.includes(':')) return;
         materialLoads.push(window.tugberkPlayer.readJsonAsset(safePath)
             .then((material) => {
+                if (playerDisposed) return;
                 const properties = material?.properties && typeof material.properties === 'object' ? material.properties : material || {};
                 if (!object.material) return;
                 if (typeof properties.color === 'string') object.material.color.set(properties.color);
@@ -314,7 +342,7 @@ import { collectPlayerParticleSystems, consumePlayerParticleCommands, createPlay
                     loadMaterialTexture(object, properties.metallicMapPath || material.metallicMapPath, 'metalnessMap'),
                     loadMaterialTexture(object, properties.roughnessMapPath || material.roughnessMapPath, 'roughnessMap')
                 ]);
-            }).catch(() => {}));
+            }).catch((error) => reportAssetFailure('material', safePath, error)));
     });
     await Promise.all(materialLoads);
     await Promise.all(audioLoads);
@@ -351,6 +379,51 @@ import { collectPlayerParticleSystems, consumePlayerParticleCommands, createPlay
     root.dataset.sceneId = scene.sceneId;
     root.dataset.objectCount = String(scene.gameObjects.length);
     const worker = new Worker('./runtime.worker.js');
+    const responseWatchdog = createPlayerResponseWatchdog();
+    let responseTimer = null;
+    let resourcesReleased = false;
+    const releaseResources = () => {
+        if (resourcesReleased) return;
+        resourcesReleased = true;
+        clearInterval(responseTimer);
+        playerDisposed = true;
+        // Each resource must still be released if another disposal operation fails.
+        const release = (callback) => {
+            try { Promise.resolve(callback()).catch((error) => console.warn('Player cleanup failed', error)); }
+            catch (error) { console.warn('Player cleanup failed', error); }
+        };
+        release(() => worker.terminate());
+        release(() => observer.disconnect());
+        if (document.pointerLockElement === root) release(() => document.exitPointerLock());
+        for (const audio of audioSources) release(() => audio.stop());
+        release(() => audioContext?.close());
+        for (const mixer of modelMixers) release(() => mixer.stopAllAction());
+        for (const emitter of particleEmitters) release(() => emitter.dispose());
+        for (const url of uiImageUrls) release(() => URL.revokeObjectURL(url));
+        release(() => view.dispose());
+        release(() => renderer.dispose());
+    };
+    window.addEventListener('pagehide', releaseResources, { once: true });
+    let runtimeFailed = false;
+    const failRuntime = (value, fallbackCode = 'PLAYER_RUNTIME_FAILED') => {
+        if (runtimeFailed) return;
+        runtimeFailed = true;
+        releaseResources();
+        const failure = normalizePlayerRuntimeFailure(value, fallbackCode);
+        mountPlayerRuntimeFailure(document, root, failure);
+        void window.tugberkPlayer.smokeComplete({
+            ok: false,
+            error: failure.code,
+            details: { message: failure.diagnostic }
+        }).catch(() => {});
+    };
+    worker.addEventListener('error', (event) => {
+        event.preventDefault();
+        failRuntime(event, 'PLAYER_RUNTIME_WORKER_CRASHED');
+    });
+    worker.addEventListener('messageerror', () => {
+        failRuntime(null, 'PLAYER_RUNTIME_MESSAGE_FAILED');
+    });
     const sessionId = `player-${Date.now().toString(36)}`;
     const keys = new Set();
     const mouseButtons = new Set();
@@ -375,6 +448,7 @@ import { collectPlayerParticleSystems, consumePlayerParticleCommands, createPlay
     let mountedScrollRects = [];
     const mountedScrollRectIds = new Set();
     let sceneTransitionStarted = false;
+    let failedSceneTransition = null;
     let lastAudioCommandSequence = 0;
     let lastParticleCommandSequence = 0;
     let lastAnimationCommandSequence = 0;
@@ -388,6 +462,8 @@ import { collectPlayerParticleSystems, consumePlayerParticleCommands, createPlay
         }, deltaTime);
     };
     const render = (state) => {
+        if (playerDisposed) return;
+        responseWatchdog.acknowledge();
         lastState = state;
         lastSpawnCommandSequence = consumePlayerSpawnCommands(
             state.spawnCommands,
@@ -430,13 +506,15 @@ import { collectPlayerParticleSystems, consumePlayerParticleCommands, createPlay
             ? sceneLoadActions.find((entry) => entry.eventName === state.lastUiEvent
                 && isPlayerUiActive(entry.activePath, state.transforms))
             : null;
-        if (loadAction && !sceneTransitionStarted) {
+        if (!loadAction) failedSceneTransition = null;
+        if (loadAction && !sceneTransitionStarted && failedSceneTransition !== loadAction) {
             sceneTransitionStarted = true;
             root.dataset.sceneTransition = loadAction.scenePath;
             void window.tugberkPlayer.activateScene(loadAction.scenePath).catch((error) => {
                 sceneTransitionStarted = false;
-                root.dataset.sceneTransitionError = error.message;
-                statusLayer.textContent = `Scene load failed: ${error.message}`;
+                failedSceneTransition = loadAction;
+                root.dataset.sceneTransitionError = 'PLAYER_SCENE_LOAD_FAILED';
+                console.error('Player scene transition failed', error);
             });
         }
         for (const entry of audioSources) {
@@ -544,6 +622,19 @@ import { collectPlayerParticleSystems, consumePlayerParticleCommands, createPlay
         const position = document.createElement('p');
         if (gameplay) position.textContent = `Position: ${gameplay.player.position.join(', ')}`;
         statusLayer.append(title, status, score, position);
+        if (failedSceneTransition) {
+            const warning = document.createElement('p');
+            warning.setAttribute('role', 'alert');
+            warning.textContent = 'The next scene could not be loaded. You can continue playing. [PLAYER_SCENE_LOAD_FAILED]';
+            const retry = document.createElement('button');
+            retry.type = 'button';
+            retry.textContent = 'Retry scene load';
+            retry.addEventListener('click', () => {
+                failedSceneTransition = null;
+                delete root.dataset.sceneTransitionError;
+            });
+            statusLayer.append(warning, retry);
+        }
         for (const text of state.uiText || []) {
             let element = textLayer.querySelector(`[data-ui-text-id="${CSS.escape(text.id)}"]`);
             if (!element) {
@@ -614,17 +705,36 @@ import { collectPlayerParticleSystems, consumePlayerParticleCommands, createPlay
             }
         };
         worker.addEventListener('message', listener);
+        responseWatchdog.request();
         worker.postMessage({ protocolVersion: 1, sessionId, command: 'tick', payload: { deltaTime: 0.02, input: mappedInput } });
     });
 
-    await new Promise((resolve, reject) => {
-        worker.onmessage = (event) => {
-            if (event.data?.type === 'error') reject(new Error(event.data.error.message));
-            else if (event.data?.type === 'state') { render(event.data); resolve(); }
-        };
-        worker.postMessage({ protocolVersion: 1, sessionId, command: 'start', payload: { snapshot: JSON.stringify(scene) } });
-    });
-    worker.onmessage = (event) => { if (event.data?.type === 'state') render(event.data); };
+    try {
+        await startPlayerWorker(worker, {
+            protocolVersion: 1, sessionId, command: 'start', payload: { snapshot: JSON.stringify(scene) }
+        }, render);
+    } catch (error) {
+        releaseResources();
+        throw error;
+    }
+    responseTimer = setInterval(() => {
+        if (responseWatchdog.check(smoke || sceneSwitchSmoke || !document.hidden)) {
+            failRuntime({ code: 'PLAYER_RUNTIME_RESPONSE_TIMEOUT', message: 'The runtime stopped responding.' });
+        }
+    }, 1000);
+    worker.onmessage = (event) => {
+        if (event.data?.type === 'error') {
+            failRuntime(event.data.error);
+            return;
+        }
+        if (event.data?.type === 'state') {
+            try {
+                render(event.data);
+            } catch (error) {
+                failRuntime(error, 'PLAYER_RUNTIME_RENDER_FAILED');
+            }
+        }
+    };
     window.addEventListener('keydown', (event) => { keys.add(event.code); event.preventDefault(); });
     window.addEventListener('keyup', (event) => { keys.delete(event.code); event.preventDefault(); });
     window.addEventListener('mousedown', (event) => mouseButtons.add(event.button));
@@ -643,18 +753,10 @@ import { collectPlayerParticleSystems, consumePlayerParticleCommands, createPlay
     });
     const clearInput = () => { keys.clear(); mouseButtons.clear(); inputMapper.clear(); };
     window.addEventListener('blur', clearInput);
-    document.addEventListener('visibilitychange', () => { if (document.hidden) clearInput(); });
-    window.addEventListener('pagehide', () => {
-        playerDisposed = true;
-        worker.terminate(); observer.disconnect(); view.dispose(); renderer.dispose();
-        for (const url of uiImageUrls) URL.revokeObjectURL(url);
-        for (const audio of audioSources) {
-            try { audio.stop(); } catch {}
-        }
-        audioContext?.close();
-        for (const mixer of modelMixers) mixer.stopAllAction();
-        for (const emitter of particleEmitters) emitter.dispose();
-    }, { once: true });
+    document.addEventListener('visibilitychange', () => {
+        responseWatchdog.acknowledge();
+        if (document.hidden) clearInput();
+    });
     root.focus();
 
     if (sceneSwitchSmoke) {
@@ -800,16 +902,24 @@ import { collectPlayerParticleSystems, consumePlayerParticleCommands, createPlay
     }
     let previous = performance.now();
     const loop = (now) => {
+        if (runtimeFailed || playerDisposed) return;
         const deltaTime = Math.min(0.1, Math.max(0, (now - previous) / 1000)); previous = now;
         pendingAnimationDelta += deltaTime;
         const mappedInput = input(deltaTime);
         mouse.deltaX = 0;
         mouse.deltaY = 0;
+        responseWatchdog.request();
         worker.postMessage({ protocolVersion: 1, sessionId, command: 'tick', payload: { deltaTime, input: mappedInput } });
         requestAnimationFrame(loop);
     };
     requestAnimationFrame(loop);
 })().catch(async (error) => {
-    document.getElementById('game').textContent = `Player failed: ${error.message}`;
-    await window.tugberkPlayer.smokeComplete({ ok: false, error: error.message });
+    const root = document.getElementById('game');
+    const failure = normalizePlayerRuntimeFailure(error, 'PLAYER_RUNTIME_START_FAILED');
+    mountPlayerRuntimeFailure(document, root, failure);
+    await window.tugberkPlayer.smokeComplete({
+        ok: false,
+        error: failure.code,
+        details: { message: failure.diagnostic }
+    });
 });

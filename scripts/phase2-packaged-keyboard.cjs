@@ -15,7 +15,7 @@ async function main() {
   const executableHash = crypto.createHash('sha256').update(fs.readFileSync(executable)).digest('hex');
   const phases = [];
 
-  for (const phase of ['author', 'reopen']) {
+  for (const phase of ['author', 'reopen', 'layout-reopen', 'layout-recovery', 'layout-bounds', 'layout-negative']) {
     const phaseRoot = path.join(runRoot, phase);
     const artifacts = path.join(phaseRoot, 'artifacts');
     const output = path.join(phaseRoot, 'result.json');
@@ -29,7 +29,7 @@ async function main() {
         ENGINE_PHASE2_KEYBOARD_PHASE: phase,
         ENGINE_PHASE2_ARTIFACT_DIR: artifacts,
         ENGINE_AUTO_OPEN_PROJECT_PATH: project,
-        ENGINE_USER_DATA_PATH: path.join(phaseRoot, 'user-data')
+        ENGINE_USER_DATA_PATH: path.join(runRoot, 'user-data')
       },
       timeoutMs: 90_000
     });
@@ -40,7 +40,7 @@ async function main() {
 
   const summary = { ok: true, issue: 'TUG-112', executable, executableSha256: executableHash, runRoot, project, phases };
   fs.writeFileSync(path.join(runRoot, 'summary.json'), JSON.stringify(summary, null, 2));
-  console.log(`TUG-112 packaged keyboard qualification passed twice; retained at ${runRoot}`);
+  console.log(`Packaged keyboard/layout qualification passed six launches; retained at ${runRoot}`);
 }
 
 main().catch((error) => { console.error(error); process.exitCode = 1; });
