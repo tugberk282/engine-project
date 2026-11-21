@@ -20,7 +20,27 @@ Scope: usable Windows editor and exported small 3D games, as defined by AGENT_HA
 
 ## Remaining evidence to resolve in order
 
-Latest observations (2026-11-17):
+Latest observations:
+
+- The upgrade verifier requires the same installed package identity and a strictly increasing semantic version. The strengthened 0.1.0 → 0.1.1 run passed all three installed smokes, profile preservation, repair, sandbox and uninstall. Evidence `C:/Users/tugbe/AppData/Local/Temp/tugberk-installer-4LwX4A`. Local and remote tag lists and GitHub Releases had no historical artifact to qualify. The bounded 254-test suite and production build passed.
+
+- Local NSIS upgrade probe passed from 0.1.0 to 0.1.1. Both were built from the current product source with distinct package versions. The installed ASAR version and bytes changed, the new app launched using the preceding smoke profile, and its marker survived. Initial, upgraded and repaired installs passed 62 checks each. Same-version repair, AppContainer checks and uninstall passed. Run `C:/Users/tugbe/AppData/Local/Temp/tugberk-installer-a4elHC`. Upgrade across historical product releases and qualification on another Windows machine remain open.
+
+- Fresh NSIS 0.1.0 installer from the current layout worktree passed isolated install, same-version overwrite with exact archive repair, two 62/62 installed smoke runs, AppContainer checks and uninstall. Installer SHA-256 `06a512eb682b642ab18dbffd16cba7e3566da89cc2a3166272ff6de26d840d47`. Run directory `C:/Users/tugbe/AppData/Local/Temp/tugberk-installer-xJbzrO`. Distinct-version migration and qualification on another Windows machine remain open.
+
+- Fresh eight-launch Windows layout run passed with an assertion for uncaught renderer console exceptions. Evidence `C:/Users/tugbe/AppData/Local/Temp/tug-112-packaged-keyboard-5b557P/summary.json`. The earlier boundingSphere exception did not recur and its cause remains open. The 254-test bounded suite and production build passed.
+
+- Eight packaged Windows launches passed, including native pointer docking of the Project tab into Viewport and a fresh process verifying its DOM host and saved host. Evidence `C:/Users/tugbe/AppData/Local/Temp/tug-112-packaged-keyboard-nIuY1U/summary.json`. The first attempt missed the header drag surface and logged a Three.js boundingSphere exception. The corrected harness verifies the header hit target. Other tab destinations and the exception's cause remain open.
+
+- Packaged Windows qualification passed six launches with native pointer docking on both side guides. The selected side persists, Hierarchy reopens to the right of Inspector after the right drop, and a subsequent right splitter change survives corrupt-primary recovery. Evidence `C:/Users/tugbe/AppData/Local/Temp/tug-112-packaged-keyboard-TJ7IMX/summary.json`.
+
+- Six packaged Windows launches verified native pointer docking for Hierarchy. The left dock guide activated before release, the panel docked and persisted on release, and the subsequent launch restored the docked state. Evidence `C:/Users/tugbe/AppData/Local/Temp/tug-112-packaged-keyboard-MPzSoI/summary.json`. Other dock hosts remain open.
+
+- After the floating-layout fix, all 254 tests in the npm test file list passed with a 90-second per-test timeout. The isolated runtime-supervisor suite passed 40/40, and the targeted layout persistence, viewport sizing and keyboard accessibility suites passed 13/13. An earlier unbounded full run stalled in the runtime-supervisor test process and was interrupted. The bounded run did not reproduce it, so its cause remains unconfirmed.
+
+- Six packaged Windows launches verified floating move and resize persistence on pointer release and restored geometry on restart. Hidden startup layer sizing had truncated saved geometry before measurement. The fallback now uses viewport dimensions. Evidence `C:/Users/tugbe/AppData/Local/Temp/tug-112-packaged-keyboard-E10WQj/summary.json`.
+
+- Floating window gesture cancellation passed in a fresh Windows package. Native pointer movement changed the geometry before Escape or an observed renderer blur restored it. Persisted layout bytes stayed unchanged for both move and resize. Six launches passed, with 18 checks in the reopen session. Evidence `C:/Users/tugbe/AppData/Local/Temp/tug-112-packaged-keyboard-XzYsJi/reopen/result.json`.
 
 - RESOLVED layout width defect: primary and LKG correctly retained the width; hidden startup roots had zero clientWidth and `clampLayoutSizes` reduced it to minimum before display. Clamping now skips unmeasurable roots and normal resize applies real bounds later. Four-launch packaged test preserves the nondefault 302px width through corrupt-primary recovery. Evidence `C:/Users/tugbe/AppData/Local/Temp/tug-112-packaged-keyboard-tdozca/summary.json`. Full 254 tests, build and two 62-check source-built smoke runs pass with no process leak. Prior failing observations below are historical; off-screen/oversized bounds and DPI matrix remain open.
 

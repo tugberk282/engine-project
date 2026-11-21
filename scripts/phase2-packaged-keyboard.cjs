@@ -15,7 +15,7 @@ async function main() {
   const executableHash = crypto.createHash('sha256').update(fs.readFileSync(executable)).digest('hex');
   const phases = [];
 
-  for (const phase of ['author', 'reopen', 'layout-reopen', 'layout-recovery', 'layout-bounds', 'layout-negative']) {
+  for (const phase of ['author', 'reopen', 'layout-reopen', 'layout-recovery', 'layout-bounds', 'layout-negative', 'tab-dock', 'tab-dock-reopen']) {
     const phaseRoot = path.join(runRoot, phase);
     const artifacts = path.join(phaseRoot, 'artifacts');
     const output = path.join(phaseRoot, 'result.json');
@@ -40,7 +40,7 @@ async function main() {
 
   const summary = { ok: true, issue: 'TUG-112', executable, executableSha256: executableHash, runRoot, project, phases };
   fs.writeFileSync(path.join(runRoot, 'summary.json'), JSON.stringify(summary, null, 2));
-  console.log(`Packaged keyboard/layout qualification passed six launches; retained at ${runRoot}`);
+  console.log(`Packaged keyboard/layout qualification passed ${phases.length} launches; retained at ${runRoot}`);
 }
 
 main().catch((error) => { console.error(error); process.exitCode = 1; });

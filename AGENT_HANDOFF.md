@@ -10,6 +10,24 @@ V1 must provide a usable editor, scene/component authoring, persistence, prefabs
 
 ## Current Position
 
+- Installer upgrade now checks matching package identity and increasing SemVer. Verified 0.1.0 → 0.1.1 again with three 62-check smoke runs, preserved profile, repair, sandbox and uninstall. No historical artifact was listed in tags or GitHub Releases. Full bounded suite 254/254 and production build passed. Remaining work includes broader Windows and device qualification.
+
+- Optional installer upgrade test passed locally (`node scripts/verify-installer.cjs <new-artifact-dir> <previous-artifact-dir>`). A temporary 0.1.1 build upgraded 0.1.0 in place, preserving the test profile marker and running three 62-check installed smokes. Repair, sandbox and uninstall also passed. This uses two versions of the current product source. Historical-release migration and another Windows environment remain open.
+
+- Fresh Windows installer qualification passed on the current layout changes. Initial and repaired installs passed 62 smoke checks each, archive SHA-256 was restored on same-version overwrite, AppContainer checks passed and uninstall removed the executable. Retained run `C:/Users/tugbe/AppData/Local/Temp/tugberk-installer-xJbzrO`.
+
+- Packaged layout harness now fails on uncaught renderer console exceptions and retains message, source and line. Eight launches passed with this assertion (evidence `C:/Users/tugbe/AppData/Local/Temp/tug-112-packaged-keyboard-5b557P/summary.json`). The historical Three.js boundingSphere exception did not reproduce. Full bounded suite and production build passed.
+
+- Native Project-to-Viewport docking and restart persistence passed in the eight-launch packaged Windows harness (`C:/Users/tugbe/AppData/Local/Temp/tug-112-packaged-keyboard-nIuY1U/summary.json`). The harness uses an unobstructed floating header hit target. Other tab destinations remain open.
+
+- Native pointer side docking now covers both left and right guides in six packaged Windows launches. Right-side placement survives restart and the right splitter width survives settings recovery. Evidence `C:/Users/tugbe/AppData/Local/Temp/tug-112-packaged-keyboard-TJ7IMX/summary.json`. Tab-host docking and remaining release validation are open.
+
+- Native pointer docking to the left guide passed in the six-launch Windows harness (`C:/Users/tugbe/AppData/Local/Temp/tug-112-packaged-keyboard-MPzSoI/summary.json`). It verifies active guide, saved dock state and restart. Continue with tab-host docking and remaining release qualification.
+
+- Packaged pointer release qualification passed six launches (`C:/Users/tugbe/AppData/Local/Temp/tug-112-packaged-keyboard-E10WQj/summary.json`). Floating move/resize save on release and survive restart. Startup floating normalization now uses viewport dimensions while its layer is unmeasurable, preserving the saved position and size. Further dock-host and device qualification remains open.
+
+- Latest checkpoint: six packaged layout sessions passed on Windows. The reopen session passed 18 checks, including Escape and genuine renderer blur during pointer move/resize. Both restore geometry and preserve persisted settings. The test transfers focus to a second window in the same process and verifies blur delivery. Evidence `C:/Users/tugbe/AppData/Local/Temp/tug-112-packaged-keyboard-XzYsJi/summary.json`. Next layout evidence: commit-on-release and keyboard/pointer interactions across more dock hosts.
+
 - Push checkpoint (2026-11-18): six-launch packaged layout qualification passed, including oversized/off-screen and negative-coordinate floating state at 150% zoom, 900x600 content size (600x400 CSS viewport). Evidence `C:/Users/tugbe/AppData/Local/Temp/tug-112-packaged-keyboard-hjgQK0/summary.json`. Latest full suite 254/254; release-integrity 4/4, architecture/provenance 10/10, release audit policy and production build pass. The broad V1 goal was explicitly paused; current user request authorizes commit/push and GitHub CI fixes, not automatic goal completion. Native memory trend, wider DPI/device matrix and unpatched development-tool picomatch advisory remain open.
 
 - Authoritative latest checkpoint: layout recovery width defect is FIXED. `clampLayoutSizes` no longer clamps persisted geometry against zero-sized hidden startup roots. Four packaged launches including native float/dock, two restarts and corrupt-primary/LKG recovery preserve a native-splitter custom width (expected=actual 302px). Evidence `C:/Users/tugbe/AppData/Local/Temp/tug-112-packaged-keyboard-tdozca/summary.json`. Full 254/254, production build and source-built smoke 62/62 twice pass with no leaked processes. Historical failing-layout notes below are superseded. Next: off-screen/oversized floating bounds and viewport-size qualification; native process-memory trend still open.

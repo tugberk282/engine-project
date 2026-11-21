@@ -65,7 +65,7 @@ async function smokeExecutable(executable, options = {}) {
     ?? fs.mkdtempSync(path.join(getScratchRoot(), 'tugberk-packaged-smoke-'));
   fs.mkdirSync(workDirectory, { recursive: true });
   const output = path.join(workDirectory, 'smoke-test-result.json');
-  const userData = path.join(workDirectory, 'user-data');
+  const userData = options.userData ?? path.join(workDirectory, 'user-data');
   const fixture = path.join(root, 'samples', 'vertical-slice');
   const project = path.join(workDirectory, 'project');
   assert.ok(fs.existsSync(fixture), `smoke fixture is missing: ${fixture}`);

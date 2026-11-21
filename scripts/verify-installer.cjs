@@ -45,12 +45,14 @@ async function main() {
   }
   const artifactDirectory = process.argv[2] ? path.resolve(process.argv[2]) : path.join(root, 'release');
   const installer = findInstaller(artifactDirectory);
+  const previousInstaller = process.argv[3] ? findInstaller(path.resolve(process.argv[3])) : null;
   verifyAuthenticode(installer);
+  if (previousInstaller) verifyAuthenticode(previousInstaller);
   const workDirectory = fs.mkdtempSync(path.join(getScratchRoot(), 'tugberk-installer-'));
   const installDirectory = path.join(workDirectory, 'installed');
 
-  console.log(`Installing ${installer} into ${installDirectory}`);
-  await runExecutable(installer, {
+  console.log(`Installing ${previousInstaller ?? installer} into ${installDirectory}`);
+  await runExecutable(previousInstaller ?? installer, {
     args: ['/S', `/D=${installDirectory}`],
     cwd: workDirectory,
     timeoutMs: 120_000,
@@ -66,15 +68,38 @@ async function main() {
     timeoutMs: 90_000,
   });
 
+  let expectedArchiveHash = installedArchiveHash;
+  if (previousInstaller) {
+    const { extractFile } = require('@electron/asar');
+    const semver = require('semver');
+    const readPackage = () => JSON.parse(extractFile(archive, 'package.json').toString('utf8'));
+    const previousPackage = readPackage();
+    const previousVersion = previousPackage.version;
+    const userData = path.join(workDirectory, 'smoke-initial', 'user-data');
+    const marker = path.join(userData, 'upgrade-profile-marker.txt');
+    fs.writeFileSync(marker, previousVersion);
+    await runExecutable(installer, { args: ['/S', `/D=${installDirectory}`], cwd: workDirectory, timeoutMs: 120_000 });
+    const nextPackage = readPackage();
+    const nextVersion = nextPackage.version;
+    assert.ok(previousPackage.name && nextPackage.name === previousPackage.name, 'upgrade changed the installed application identity');
+    assert.ok(semver.valid(previousVersion) && semver.valid(nextVersion) && semver.gt(nextVersion, previousVersion),
+      `expected an upgrade, got ${previousVersion} -> ${nextVersion}`);
+    expectedArchiveHash = fileSha256(archive);
+    assert.notEqual(expectedArchiveHash, installedArchiveHash, 'upgrade did not replace the archive');
+    await smokeExecutable(executable, { workDirectory: path.join(workDirectory, 'smoke-upgrade'), userData });
+    assert.equal(fs.readFileSync(marker, 'utf8'), previousVersion, 'upgrade lost data from the previous profile');
+    console.log(`Distinct-version install passed: ${previousVersion} -> ${nextVersion}`);
+  }
+
   fs.appendFileSync(archive, '\nTUGBERK_INSTALLER_REPAIR_PROBE\n', 'utf8');
-  assert.notEqual(fileSha256(archive), installedArchiveHash, 'repair probe did not change the installed archive');
+  assert.notEqual(fileSha256(archive), expectedArchiveHash, 'repair probe did not change the installed archive');
   console.log(`Reinstalling ${installer} over ${installDirectory}`);
   await runExecutable(installer, {
     args: ['/S', `/D=${installDirectory}`],
     cwd: workDirectory,
     timeoutMs: 120_000,
   });
-  assert.equal(fileSha256(archive), installedArchiveHash, 'overwrite install did not restore resources/app.asar');
+  assert.equal(fileSha256(archive), expectedArchiveHash, 'overwrite install did not restore resources/app.asar');
   assert.equal(findExecutable(installDirectory), executable, 'overwrite install changed the application executable path');
   await smokeExecutable(executable, {
     workDirectory: path.join(workDirectory, 'smoke-overwrite'),

@@ -1171,8 +1171,8 @@ export class Editor {
         state?: Partial<EditorFloatingPanelState>
     ): EditorFloatingPanelState {
         const floatingLayer = document.getElementById('floating-layer') as HTMLElement | null;
-        const layerWidth = Math.max(400, floatingLayer?.clientWidth ?? 1200);
-        const layerHeight = Math.max(300, floatingLayer?.clientHeight ?? 700);
+        const layerWidth = Math.max(400, floatingLayer?.clientWidth || window.innerWidth || 1200);
+        const layerHeight = Math.max(300, floatingLayer?.clientHeight || window.innerHeight || 700);
         const defaults = this.getDefaultFloatingPanelState(panelId, layerWidth, layerHeight);
 
         const width = THREE.MathUtils.clamp(
